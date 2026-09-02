@@ -9,4 +9,5 @@ target/
 __pycache__/
 *.tar.gz
 trg-*.tar.gz
-
+dist/
+build/
