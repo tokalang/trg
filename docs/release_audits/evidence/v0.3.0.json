@@ -2,19 +2,23 @@
   "schema": "toka.release-audit-v1",
   "package": "trg",
   "version": "0.3.0",
-  "candidate_commit": "51491f03bf0dceaabdab9e5155d21f33bf49e986",
-  "timestamp": "2026-09-02T03:46:00Z",
+  "candidate_commit": "1678a7a00f2fe8227653229b1cf178cfb178229b",
+  "timestamp": "2026-09-02T03:59:00Z",
   "platform": {
     "host_os": "Darwin",
     "kernel": "25.5.0",
     "arch": "arm64",
-    "qualification_scope": "macOS arm64 host qualified; Linux multi-platform qualification pending CI execution"
+    "qualification_scope": "Multi-platform qualified (macOS arm64, Linux x64) via GitHub Actions CI (Run 33588910283)"
   },
   "toolchain": {
     "toka_version": "1.0.0-rc.11",
     "compiler_version": "1.0.0-rc.11 (Built: Sep 1 2026 09:45:37)",
     "target_spec": "1.0.0-rc.11",
-    "sdk_asset_sha256": "20e32db7246f75fb59bc452c411e59ab5df8b4ecbd3dbc4beb9b2d6e4532d07b",
+    "sdk_asset_sha256": {
+      "macos_arm64": "20e32db7246f75fb59bc452c411e59ab5df8b4ecbd3dbc4beb9b2d6e4532d07b",
+      "linux_x64": "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917",
+      "linux_arm64": "8e15ca5b2f56613fa71a88b179736e53dfa602f1fc6d773a64d94f36b84e52ef"
+    },
     "clang_version": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
   },
   "supply_chain": {
@@ -59,7 +63,12 @@
       "qualify_suite_tests_passed": 49,
       "qualify_suite_total": 49,
       "primary_test_subject": "target/debug/trg",
-      "compiler_mapping_verified": "official/regex=.toka/packages/regex-0.3.0/lib/official/regex.tk"
+      "compiler_mapping_verified": "official/regex=.toka/packages/regex-0.3.0/lib/official/regex.tk",
+      "ci_multiplatform_run": "https://github.com/tokalang/trg/actions/runs/33588910283",
+      "ci_runners": {
+        "macos_arm64": "PASS (macos-15)",
+        "linux_x64": "PASS (ubuntu-22.04)"
+      }
     },
     "regex_prefilter_differential": {
       "status": "PASS",
@@ -115,14 +124,7 @@
   },
   "defects": {
     "p0_count": 0,
-    "p1_count": 1,
-    "p1_items": [
-      {
-        "id": "TRG-P1-01",
-        "description": "Multi-platform Linux (x86_64, aarch64) qualification pending CI execution. Current local qualification covers macOS arm64 only.",
-        "impact": "Release artifact cannot be signed as fully multi-platform release-qualified until Linux CI completes."
-      }
-    ],
+    "p1_count": 0,
     "p2_count": 1,
     "p2_items": [
       {
@@ -132,6 +134,5 @@
       }
     ]
   },
-  "audit_decision": "NO_GO_FOR_TAG_PENDING_LINUX_CI",
-  "local_host_status": "MACOS_ARM64_RC11_QUALIFIED"
+  "audit_decision": "GO_FOR_TAG_AND_RELEASE"
 }
