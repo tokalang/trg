@@ -113,7 +113,7 @@ jobs:
           shasum -a 256 trg-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Upload binary assets to GitHub Release
+      - name: Ensure GitHub Release exists and upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -121,5 +121,7 @@ jobs:
           if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
             tag_name="${{ inputs.tag }}"
           fi
+          echo "Ensuring release $tag_name exists..."
+          gh release view "$tag_name" || gh release create "$tag_name" --verify-tag --generate-notes
           echo "Uploading binary assets to release $tag_name..."
           gh release upload "$tag_name" dist/* --clobber
