@@ -12,7 +12,7 @@
 set -eu
 
 REPO="tokalang/trg"
-VERSION="${VERSION:-v0.6.0}"
+VERSION="${VERSION:-v0.5.1}"
 SYSTEM_INSTALL=0
 MODIFY_PATH=1
 CLI_INSTALL_DIR=""
@@ -31,7 +31,7 @@ usage() {
     "  -h, --help         Show this help" \
     "" \
     "Environment:" \
-    "  VERSION           Release tag to install (default: v0.6.0)" \
+    "  VERSION           Release tag to install (default: v0.5.1)" \
     "  INSTALL_DIR       Backward-compatible alternative to --install-dir"
 }
 

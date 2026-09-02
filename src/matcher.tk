@@ -15,7 +15,8 @@ pub shape LiteralMatcher (
 pub shape RegexMatcher (
     compiled: CompiledRegex,
     required_literal: Option<string>,
-    no_prefilter: bool
+    no_prefilter: bool,
+    is_empty_plan: bool
 )
 
 pub shape SearchPlan (
@@ -231,6 +232,8 @@ impl LiteralMatcher {
 
 impl RegexMatcher {
     pub fn is_match(self, line: str) -> bool {
+        if self.is_empty_plan { return false }
+
         // Line-level conservative Required Literal Prefilter
         if !self.no_prefilter {
             match self.required_literal {
@@ -256,6 +259,10 @@ impl RegexMatcher {
     }
 
     pub fn evaluate(self, line: str) -> MatchDecision {
+        if self.is_empty_plan {
+            return MatchDecision(matched = false, ranges = Vec<MatchRange>::new())
+        }
+
         // Line-level conservative Required Literal Prefilter
         if !self.no_prefilter {
             match self.required_literal {
@@ -386,10 +393,18 @@ impl SearchPlan {
                 line_regexp = opts.line_regexp
             )
 
-            auto combined_regex_str# = string::new()
             if num_pats == 0 {
-                combined_regex_str = string::from("")
-            } else if num_pats == 1 {
+                auto dummy_regex = Regex::compile_with_options("a^", regex_opts).unwrap()
+                return Result<SearchPlan, string>::Ok(SearchPlan::RegexPlan(RegexMatcher(
+                    compiled = cede dummy_regex,
+                    required_literal = Option<string>::None,
+                    no_prefilter = opts.no_prefilter,
+                    is_empty_plan = true
+                )))
+            }
+
+            auto combined_regex_str# = string::new()
+            if num_pats == 1 {
                 combined_regex_str = opts.patterns.borrow(0).clone()
             } else {
                 auto p_idx# = 0:usize
@@ -419,7 +434,8 @@ impl SearchPlan {
             return Result<SearchPlan, string>::Ok(SearchPlan::RegexPlan(RegexMatcher(
                 compiled = cede compiled,
                 required_literal = cede required,
-                no_prefilter = opts.no_prefilter
+                no_prefilter = opts.no_prefilter,
+                is_empty_plan = false
             )))
         }
 

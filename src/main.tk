@@ -57,6 +57,11 @@ fn main() -> i32 {
     auto num_files = files.len()
 
     if opts.files_mode {
+        if opts.quiet {
+            if global_had_error { return 2 }
+            if num_files > 0 { return 0 }
+            return 1
+        }
         auto res = print_files_list(files)
         if res == 1 {
             if global_had_error { return 2 }
@@ -118,6 +123,16 @@ fn main() -> i32 {
                 files_with_match = files_with_match + 1
                 total_matches = total_matches + scan_res.matches_count
                 if opts.quiet {
+                    if opts.json_mode {
+                        auto stats = GlobalStats(
+                            total_files = num_files,
+                            files_with_match = files_with_match,
+                            total_matches = total_matches,
+                            elapsed_nanos = 0:u64
+                        )
+                        auto s_res = print_summary_json(stats)
+                        if s_res == 2 { return 2 }
+                    }
                     return 0
                 }
             }

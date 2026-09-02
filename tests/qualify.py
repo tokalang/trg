@@ -1188,8 +1188,8 @@ def main():
         if boundary_fixture.exists():
             boundary_fixture.unlink()
 
-    # Test 66: -q / --quiet mode existence probe & match-beats-error precedence
-    log("Test 66: -q / --quiet mode existence probe & match-beats-error precedence")
+    # Test 66: -q / --quiet mode existence probe, match-beats-error, --json framing, --files
+    log("Test 66: -q / --quiet mode existence probe, match-beats-error precedence, -q --json, -q --files")
     q_fixture = fixtures_dir / "test_quiet_probe.txt"
     try:
         q_fixture.write_text("alpha beta gamma\n", encoding="utf-8")
@@ -1211,12 +1211,34 @@ def main():
         # No match found alongside non-existent file -> returns 2 (error)
         r_q_err = run_cmd([trg, "-q", "delta", "non_existent_file_xyz.txt", str(q_fixture)], check=False)
         assert r_q_err.returncode == 2
+
+        # -q --json with match: returns 0 and emits single well-formed summary event
+        r_q_json_hit = run_cmd([trg, "-q", "--json", "beta", str(q_fixture)])
+        assert r_q_json_hit.returncode == 0
+        q_lines = [json.loads(line) for line in r_q_json_hit.stdout.strip().split("\n") if line]
+        assert len(q_lines) == 1
+        assert q_lines[0].get("type") == "summary"
+        assert q_lines[0]["data"]["stats"]["searches_with_match"] == 1
+        assert q_lines[0]["data"]["stats"]["matches"] == 1
+
+        # -q --json without match: returns 1 and emits single summary event
+        r_q_json_miss = run_cmd([trg, "-q", "--json", "delta", str(q_fixture)], check=False)
+        assert r_q_json_miss.returncode == 1
+        qm_lines = [json.loads(line) for line in r_q_json_miss.stdout.strip().split("\n") if line]
+        assert len(qm_lines) == 1
+        assert qm_lines[0].get("type") == "summary"
+        assert qm_lines[0]["data"]["stats"]["searches_with_match"] == 0
+
+        # -q --files: returns 0 and produces empty output
+        r_q_files = run_cmd([trg, "-q", "--files", str(fixtures_dir)])
+        assert r_q_files.returncode == 0
+        assert r_q_files.stdout == ""
     finally:
         if q_fixture.exists():
             q_fixture.unlink()
 
-    # Test 67: -o / --only-matching submatch extraction (literal, regex, line number, multi-files)
-    log("Test 67: -o / --only-matching submatch extraction")
+    # Test 67: -o / --only-matching submatch extraction and context zeroing
+    log("Test 67: -o / --only-matching submatch extraction & context zeroing")
     o_fixture1 = fixtures_dir / "test_only_matching_1.txt"
     o_fixture2 = fixtures_dir / "test_only_matching_2.txt"
     try:
@@ -1239,6 +1261,11 @@ def main():
         assert r_o_lit_n.returncode == 0
         assert r_o_lit_n.stdout.strip() == "1:foo"
 
+        # Context zeroing on -o: -C 100 must not print context and not fail on ring buffer
+        r_o_ctx = run_cmd([trg, "-o", "-N", "-C", "100", "foo", str(o_fixture1)])
+        assert r_o_ctx.returncode == 0
+        assert r_o_ctx.stdout.strip() == "foo"
+
         # Multi-file only-matching prefixes
         r_o_multi = run_cmd([trg, "-o", "-n", "-E", "[0-9]+", str(o_fixture1), str(o_fixture2)])
         assert r_o_multi.returncode == 0
@@ -1252,8 +1279,8 @@ def main():
         if o_fixture2.exists():
             o_fixture2.unlink()
 
-    # Test 68: Multi-pattern -e / --regexp literal and regex leftmost-first matching
-    log("Test 68: Multi-pattern -e / --regexp matching and leftmost-first ordering")
+    # Test 68: Multi-pattern --regexp / -e, positional order independence, and -- delimiter
+    log("Test 68: Multi-pattern --regexp/-e, positional order independence, and -- delimiter")
     e_fixture = fixtures_dir / "test_multi_pattern.txt"
     try:
         e_fixture.write_text("the quick brown fox jumps over the lazy dog\npineapple apple banana\n", encoding="utf-8")
@@ -1262,6 +1289,21 @@ def main():
         r_e_lit = run_cmd([trg, "-e", "fox", "-e", "dog", str(e_fixture)])
         assert r_e_lit.returncode == 0
         assert "the quick brown fox" in r_e_lit.stdout
+
+        # Multiple --regexp <PATTERN> flags
+        r_multi_long = run_cmd([trg, "--regexp", "fox", "--regexp", "dog", str(e_fixture)])
+        assert r_multi_long.returncode == 0
+        assert "the quick brown fox" in r_multi_long.stdout
+
+        # Positional arguments appearing before -e (order independence)
+        r_pos_before = run_cmd([trg, "-l", str(e_fixture), "-e", "fox"])
+        assert r_pos_before.returncode == 0
+        assert r_pos_before.stdout.strip() == str(e_fixture)
+
+        # Delimiter -- before path
+        r_delim = run_cmd([trg, "-e", "fox", "--", str(e_fixture)])
+        assert r_delim.returncode == 0
+        assert "the quick brown fox" in r_delim.stdout
 
         # Leftmost-first ordering with -o on overlapping patterns (-N suppresses line numbers)
         r_e_leftmost = run_cmd([trg, "-o", "-N", "-e", "apple", "-e", "banana", "-e", "app", str(e_fixture)])
@@ -1279,10 +1321,11 @@ def main():
         if e_fixture.exists():
             e_fixture.unlink()
 
-    # Test 69: Pattern file -f / --file loading with LF/CRLF and blank patterns
-    log("Test 69: Pattern file -f / --file loading (LF/CRLF/blank lines)")
+    # Test 69: Pattern file -f / --file loading (LF/CRLF, blank lines, empty file /dev/null)
+    log("Test 69: Pattern file -f / --file loading (LF/CRLF/blank lines/empty file)")
     pat_file = fixtures_dir / "test_patterns.txt"
     target_file = fixtures_dir / "test_target_file.txt"
+    blank_pat_file = fixtures_dir / "test_blank_pat.txt"
     try:
         pat_file.write_bytes(b"TargetAlpha\r\nTargetBeta\nTargetGamma\r\n")
         target_file.write_text("line with TargetAlpha\nline with nothing\nline with TargetGamma\n", encoding="utf-8")
@@ -1294,6 +1337,22 @@ def main():
         assert "1:line with TargetAlpha" in f_lines[0]
         assert "3:line with TargetGamma" in f_lines[1]
 
+        # Pattern file with explicit blank line -> matches every line
+        blank_pat_file.write_text("\n", encoding="utf-8")
+        r_blank = run_cmd([trg, "-f", str(blank_pat_file), "-n", str(target_file)])
+        assert r_blank.returncode == 0
+        b_lines = [l for l in r_blank.stdout.strip().split("\n") if l]
+        assert len(b_lines) == 3
+
+        # Empty pattern file (/dev/null) in literal and regex mode -> exit code 1 (no matches possible)
+        r_devnull_lit = run_cmd([trg, "-f", "/dev/null", str(target_file)], check=False)
+        assert r_devnull_lit.returncode == 1
+        assert r_devnull_lit.stdout == ""
+
+        r_devnull_re = run_cmd([trg, "-E", "-f", "/dev/null", str(target_file)], check=False)
+        assert r_devnull_re.returncode == 1
+        assert r_devnull_re.stdout == ""
+
         # Missing pattern file returns 2
         r_f_err = run_cmd([trg, "-f", "non_existent_pats.txt", str(target_file)], check=False)
         assert r_f_err.returncode == 2
@@ -1303,9 +1362,11 @@ def main():
             pat_file.unlink()
         if target_file.exists():
             target_file.unlink()
+        if blank_pat_file.exists():
+            blank_pat_file.unlink()
 
-    # Test 70: --sort path and --sortr path deterministic traversal & error on invalid sort
-    log("Test 70: --sort path and --sortr path deterministic traversal")
+    # Test 70: --sort path and --sortr path deterministic traversal with O(N log N) merge sort
+    log("Test 70: --sort path and --sortr path deterministic traversal (O(N log N) merge sort)")
     sort_dir = fixtures_dir / "test_sort_tree"
     try:
         sort_dir.mkdir(parents=True, exist_ok=True)
@@ -1331,6 +1392,15 @@ def main():
         assert "m_file.txt" in desc_files[1]
         assert "a_file.txt" in desc_files[2]
 
+        # 1,000 files merge sort verification
+        for idx in range(1000):
+            (sort_dir / f"bench_{1000 - idx:04d}.dat").write_text("COMMON_KEY\n", encoding="utf-8")
+        r_sort_1k = run_cmd([trg, "--sort", "path", "-l", "COMMON_KEY", str(sort_dir)])
+        assert r_sort_1k.returncode == 0
+        lines_1k = [l for l in r_sort_1k.stdout.strip().split("\n") if l]
+        assert len(lines_1k) == 1003
+        assert lines_1k == sorted(lines_1k)
+
         # Invalid sort type returns exit 2
         r_sort_err = run_cmd([trg, "--sort", "invalid_type", "COMMON_KEY", str(sort_dir)], check=False)
         assert r_sort_err.returncode == 2
@@ -1339,8 +1409,8 @@ def main():
         if sort_dir.exists():
             shutil.rmtree(sort_dir)
 
-    # Test 71: Combination matrix (-q -o, -o -e, --sort path -e)
-    log("Test 71: Comprehensive combination matrix")
+    # Test 71: Combination matrix & ripgrep differential parity
+    log("Test 71: Comprehensive combination matrix & ripgrep differential parity")
     comb_dir = fixtures_dir / "test_comb_tree"
     try:
         comb_dir.mkdir(parents=True, exist_ok=True)
@@ -1354,6 +1424,27 @@ def main():
         assert len(comb_lines) == 2
         assert "a.txt:1:apple" in comb_lines[0]
         assert "b.txt:1:banana" in comb_lines[1]
+
+        # Differential validation against host `rg` if available
+        rg_bin = shutil.which("rg")
+        if rg_bin:
+            log(f"Host rg detected at {rg_bin}, executing 1:1 differential parity assertions...")
+            # Diff 1: multiple -e with -o -n
+            r_rg1 = run_cmd([rg_bin, "--sort", "path", "-o", "-n", "-e", "apple", "-e", "banana", str(comb_dir)])
+            assert r_comb.stdout == r_rg1.stdout
+            assert r_comb.returncode == r_rg1.returncode
+
+            # Diff 2: -q returncode parity
+            r_trg_q = run_cmd([trg, "-q", "apple", str(comb_dir)])
+            r_rg_q = run_cmd([rg_bin, "-q", "apple", str(comb_dir)])
+            assert r_trg_q.returncode == r_rg_q.returncode
+
+            # Diff 3: empty pattern file parity
+            r_trg_devnull = run_cmd([trg, "-f", "/dev/null", str(comb_dir)], check=False)
+            r_rg_devnull = run_cmd([rg_bin, "-f", "/dev/null", str(comb_dir)], check=False)
+            assert r_trg_devnull.returncode == r_rg_devnull.returncode
+            assert r_trg_devnull.stdout == r_rg_devnull.stdout
+            log("1:1 differential parity with host rg PASSED!")
     finally:
         if comb_dir.exists():
             shutil.rmtree(comb_dir)

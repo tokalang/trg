@@ -9,6 +9,7 @@ import std/io::{println}
 import src/types::{CliOptions, GlobRule, CaseMode, SortMode}
 import src/glob::{parse_glob_rule}
 import src/file_types::{lookup_type_extensions}
+import src/posix::{posix_ferror}
 
 pub fn print_help() {
     println("trg 0.6.0 - Fast, agent-friendly code search tool")
@@ -25,7 +26,8 @@ pub fn print_help() {
     println("  -e, --regexp <PATTERN>     Specify a pattern (can be used multiple times)")
     println("  -f, --file <FILE>          Read patterns from FILE, one per line")
     println("  -F, --fixed-strings        Treat the pattern as a fixed literal string (default)")
-    println("  -E, --regexp               Treat the pattern as a regular expression")
+    println("  -E, --extended-regexp      Treat the pattern as a regular expression")
+    println("      --regex-mode           Alias for -E / --extended-regexp")
     println("  -w, --word-regexp          Only show matches surrounded by word boundaries")
     println("  -x, --line-regexp          Only show matches that match the full line")
     println("  -n, --line-number          Show line numbers (1-based)")
@@ -52,6 +54,7 @@ pub fn print_help() {
     println("      --files                Print the files that would be searched")
     println("      --json                 Output newline-delimited JSONL search events (trg-json-v2)")
     println("      --hidden               Search hidden files and directories")
+    println("      --                     Treat all remaining arguments as paths/positionals")
     println("  -V, --version              Print version information")
     println("  -h, --help                 Print this help message")
 }
@@ -155,10 +158,16 @@ fn load_patterns_from_file(file_path: str) -> Result<Vec<string>, string> {
         }
         auto *buf = raw_buf.unwrap()
         auto line_buf# = string::new()
+        auto read_err# = false
 
         loop true {
             auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
-            if n == 0 { break }
+            if n == 0 {
+                if posix_ferror((*file) as Addr) {
+                    read_err = true
+                }
+                break
+            }
 
             auto *c_ptr = ((*buf) as Addr) as *char
             auto chunk_str = string::from_with_len(*c_ptr, n)
@@ -188,7 +197,7 @@ fn load_patterns_from_file(file_path: str) -> Result<Vec<string>, string> {
             }
         }
 
-        if line_buf.len() > 0 {
+        if !read_err && line_buf.len() > 0 {
             {
                 auto full_view = line_buf.as_str()
                 auto pat_text# = full_view
@@ -202,6 +211,13 @@ fn load_patterns_from_file(file_path: str) -> Result<Vec<string>, string> {
 
         libc_free(*buf)
         libc_fclose(*file)
+
+        if read_err {
+            auto err# = string::from("Error reading pattern file '")
+            err#.push_str(file_path)
+            err#.push_str("'")
+            return Result<Vec<string>, string>::Err(cede err)
+        }
     }
 
     return Result<Vec<string>, string>::Ok(cede patterns)
@@ -240,14 +256,27 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto exclude_type_exts# = Vec<string>::new()
 
     auto patterns# = Vec<string>::new()
+    auto raw_positionals# = Vec<string>::new()
     auto paths# = Vec<string>::new()
-    auto pattern_from_flags# = false
-    auto pattern_positional_set# = false
+    auto pattern_source_given# = false
+    auto end_of_options# = false
 
     auto i# = 1:usize
     loop i < num_args {
         auto &arg_str = args.borrow(i)
         auto view = arg_str.as_str()
+
+        if end_of_options {
+            raw_positionals#.push(arg_str.clone())
+            i = i + 1
+            continue
+        }
+
+        if view == "--" {
+            end_of_options = true
+            i = i + 1
+            continue
+        }
 
         if view == "-h" || view == "--help" {
             print_help()
@@ -271,19 +300,19 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
-        if view == "-E" || view == "--regexp" {
+        if view == "-E" || view == "--extended-regexp" || view == "--regex-mode" {
             regexp = true
             i = i + 1
             continue
         }
 
-        if view == "-e" {
+        if view == "-e" || view == "--regexp" {
             if i + 1 >= num_args {
-                return Result<CliOptions, string>::Err(string::from("Flag -e requires a pattern argument"))
+                return Result<CliOptions, string>::Err(string::from("Flag -e / --regexp requires a pattern argument"))
             }
             i = i + 1
             patterns#.push(args.borrow(i).clone())
-            pattern_from_flags = true
+            pattern_source_given = true
             i = i + 1
             continue
         }
@@ -291,7 +320,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         if view.starts_with("-e=") {
             auto p_str = view.substr(3:usize, view.len - 3:usize)
             patterns#.push(string::from(p_str))
-            pattern_from_flags = true
+            pattern_source_given = true
             i = i + 1
             continue
         }
@@ -299,7 +328,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         if view.starts_with("-e") && view.len > 2 {
             auto p_str = view.substr(2:usize, view.len - 2:usize)
             patterns#.push(string::from(p_str))
-            pattern_from_flags = true
+            pattern_source_given = true
             i = i + 1
             continue
         }
@@ -307,7 +336,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         if view.starts_with("--regexp=") {
             auto p_str = view.substr(9:usize, view.len - 9:usize)
             patterns#.push(string::from(p_str))
-            pattern_from_flags = true
+            pattern_source_given = true
             i = i + 1
             continue
         }
@@ -328,7 +357,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
                 patterns#.push(loaded.borrow(l_idx).clone())
                 l_idx = l_idx + 1
             }
-            pattern_from_flags = true
+            pattern_source_given = true
             i = i + 1
             continue
         }
@@ -345,7 +374,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
                 patterns#.push(loaded.borrow(l_idx).clone())
                 l_idx = l_idx + 1
             }
-            pattern_from_flags = true
+            pattern_source_given = true
             i = i + 1
             continue
         }
@@ -362,7 +391,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
                 patterns#.push(loaded.borrow(l_idx).clone())
                 l_idx = l_idx + 1
             }
-            pattern_from_flags = true
+            pattern_source_given = true
             i = i + 1
             continue
         }
@@ -379,7 +408,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
                 patterns#.push(loaded.borrow(l_idx).clone())
                 l_idx = l_idx + 1
             }
-            pattern_from_flags = true
+            pattern_source_given = true
             i = i + 1
             continue
         }
@@ -887,7 +916,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
-        // Handle short flag clustering e.g. -nF, -iE, -lc, -q, -o
+        // Handle short flag clustering e.g. -nF, -iE, -lc, -q, -o, -N
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
             auto j# = 1:usize
@@ -926,16 +955,8 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             return Result<CliOptions, string>::Err(cede err_msg)
         }
 
-        // Positional argument
-        if pattern_from_flags {
-            paths#.push(arg_str.clone())
-        } else if !files_mode && !pattern_positional_set {
-            patterns#.push(arg_str.clone())
-            pattern_positional_set = true
-        } else {
-            paths#.push(arg_str.clone())
-        }
-
+        // Collect positional argument
+        raw_positionals#.push(arg_str.clone())
         i = i + 1
     }
 
@@ -943,6 +964,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         return Result<CliOptions, string>::Ok(CliOptions(
             patterns = Vec<string>::new(),
             paths = Vec<string>::new(),
+            pattern_source_given = false,
             fixed_strings = false,
             regexp = false,
             word_regexp = false,
@@ -972,13 +994,38 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         ))
     }
 
-    if !files_mode && patterns.len() == 0 {
-        return Result<CliOptions, string>::Err(string::from("Missing search pattern. Use 'trg -h' for usage."))
+    // Resolve positionals independent of option order
+    if pattern_source_given {
+        auto p_idx# = 0:usize
+        loop p_idx < raw_positionals.len() {
+            paths#.push(raw_positionals.borrow(p_idx).clone())
+            p_idx = p_idx + 1
+        }
+    } else {
+        if !files_mode {
+            if raw_positionals.len() > 0 {
+                patterns#.push(raw_positionals.borrow(0).clone())
+                pattern_source_given = true
+                auto p_idx# = 1:usize
+                loop p_idx < raw_positionals.len() {
+                    paths#.push(raw_positionals.borrow(p_idx).clone())
+                    p_idx = p_idx + 1
+                }
+            } else if !type_list_only {
+                return Result<CliOptions, string>::Err(string::from("Missing search pattern. Use 'trg -h' for usage."))
+            }
+        } else {
+            auto p_idx# = 0:usize
+            loop p_idx < raw_positionals.len() {
+                paths#.push(raw_positionals.borrow(p_idx).clone())
+                p_idx = p_idx + 1
+            }
+        }
     }
 
     // Mutual exclusion: -E and -F cannot be combined
     if fixed_strings && regexp {
-        return Result<CliOptions, string>::Err(string::from("Flag -E (--regexp) cannot be combined with -F (--fixed-strings)"))
+        return Result<CliOptions, string>::Err(string::from("Flag -E (--extended-regexp) cannot be combined with -F (--fixed-strings)"))
     }
 
     // Flag conflict validation: --json cannot be combined with -l, -c, or --files
@@ -996,8 +1043,8 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         return Result<CliOptions, string>::Err(string::from("Flag -o (--only-matching) cannot be combined with --files or -c (--count)"))
     }
 
-    // Effective context zeroing on -l and -c: ignore context lines, do not allocate ring or enforce context limits
-    if files_with_matches || count || quiet {
+    // Effective context zeroing on -l, -c, -o, -q: ignore context lines, do not allocate ring or enforce context limits
+    if files_with_matches || count || quiet || only_matching {
         before_context = 0
         after_context = 0
     }
@@ -1010,6 +1057,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     return Result<CliOptions, string>::Ok(CliOptions(
         patterns = cede patterns,
         paths = cede paths,
+        pattern_source_given = pattern_source_given,
         fixed_strings = fixed_strings,
         regexp = regexp,
         word_regexp = word_regexp,

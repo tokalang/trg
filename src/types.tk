@@ -23,6 +23,7 @@ pub shape GlobRule (
 pub shape CliOptions (
     patterns: Vec<string>,
     paths: Vec<string>,
+    pattern_source_given: bool,
     fixed_strings: bool,
     regexp: bool,
     word_regexp: bool,

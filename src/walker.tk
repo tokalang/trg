@@ -46,33 +46,71 @@ fn str_compare(a: str, b: str) -> i32 {
     return 0:i32
 }
 
+fn merge_sort_range(files#: Vec<string>, aux#: Vec<string>, left: usize, right: usize, reverse: bool) {
+    if left >= right { return }
+    auto mid = left + (right - left) / 2:usize
+    merge_sort_range(files#, aux#, left, mid, reverse)
+    merge_sort_range(files#, aux#, mid + 1:usize, right, reverse)
+
+    auto i# = left
+    auto j# = mid + 1:usize
+    auto k# = left
+
+    loop i <= mid && j <= right {
+        auto cmp# = 0:i32
+        {
+            auto a = files.borrow(i).as_str()
+            auto b = files.borrow(j).as_str()
+            cmp = str_compare(a, b)
+        }
+        auto take_left# = false
+        if reverse {
+            take_left = cmp >= 0:i32
+        } else {
+            take_left = cmp <= 0:i32
+        }
+
+        if take_left {
+            aux#.set(k, files.borrow(i).clone())
+            i = i + 1
+        } else {
+            aux#.set(k, files.borrow(j).clone())
+            j = j + 1
+        }
+        k = k + 1
+    }
+
+    loop i <= mid {
+        aux#.set(k, files.borrow(i).clone())
+        i = i + 1
+        k = k + 1
+    }
+
+    loop j <= right {
+        aux#.set(k, files.borrow(j).clone())
+        j = j + 1
+        k = k + 1
+    }
+
+    auto copy_idx# = left
+    loop copy_idx <= right {
+        files#.set(copy_idx, aux.borrow(copy_idx).clone())
+        copy_idx = copy_idx + 1
+    }
+}
+
 fn sort_paths(files#: Vec<string>, reverse: bool) {
     auto n = files.len()
     if n <= 1 { return }
 
-    auto i# = 1:usize
-    loop i < n {
-        auto key = files.borrow(i).clone()
-        auto j# = i
-        loop j > 0 {
-            auto should_move# = false
-            {
-                auto prev = files.borrow(j - 1:usize).as_str()
-                auto cmp = str_compare(prev, key.as_str())
-                if reverse {
-                    should_move = cmp < 0:i32
-                } else {
-                    should_move = cmp > 0:i32
-                }
-            }
-            if !should_move { break }
-            auto item_prev = files.borrow(j - 1:usize).clone()
-            files#.set(j, item_prev)
-            j = j - 1:usize
-        }
-        files#.set(j, key)
-        i = i + 1
+    auto aux# = Vec<string>::new()
+    auto idx# = 0:usize
+    loop idx < n {
+        aux#.push(string::new())
+        idx = idx + 1
     }
+
+    merge_sort_range(files#, aux#, 0:usize, n - 1:usize, reverse)
 }
 
 fn build_child_path(parent: str, child: str) -> string {

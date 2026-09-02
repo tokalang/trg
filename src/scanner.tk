@@ -363,8 +363,8 @@ pub fn scan_file_stream(
         }
         auto *buf = raw_buf.unwrap()
 
-        // In JSON mode, emit begin event immediately upon file opening (trg-json-v2)
-        if opts.json_mode {
+        // In JSON mode, emit begin event immediately upon file opening (trg-json-v2) unless in quiet mode
+        if opts.json_mode && !opts.quiet {
             auto b_res = emit_json_begin(target_path.as_str())
             if b_res != 0 {
                 libc_free(*buf)
@@ -575,7 +575,7 @@ pub fn scan_file_stream(
         }
 
         // Always emit matching end event in JSON mode if begin was emitted
-        if !is_binary && opts.json_mode && !is_broken_pipe {
+        if !is_binary && opts.json_mode && !opts.quiet && !is_broken_pipe {
             auto e_res = emit_json_end(target_path.as_str(), matches_count)
             if e_res == 1 { is_broken_pipe = true }
             else if e_res == 2 { had_error = true }
