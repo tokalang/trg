@@ -4,12 +4,12 @@ import core/str::{str}
 import std/vec::{Vec}
 import std/env as env
 import std/io::{println}
-import src/types::{CliOptions, GlobRule}
+import src/types::{CliOptions, GlobRule, CaseMode}
 import src/glob::{parse_glob_rule}
 import src/file_types::{lookup_type_extensions}
 
 pub fn print_help() {
-    println("trg 0.4.0 - Fast, agent-friendly code search tool")
+    println("trg 0.5.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -F [OPTIONS] <PATTERN> [PATH...]")
@@ -27,6 +27,10 @@ pub fn print_help() {
     println("  -c, --count                Only print the count of matching lines per file")
     println("  -v, --invert-match         Invert the match (select non-matching lines)")
     println("  -i, --ignore-case          Case-insensitive search (ASCII)")
+    println("  -S, --smart-case           Smart case search (case-insensitive unless pattern has uppercase)")
+    println("  -m, --max-count <NUM>      Stop reading a file after NUM matching lines")
+    println("      --max-columns <NUM>    Omit matching lines longer than NUM bytes in human output")
+    println("      --no-ignore            Do not respect .gitignore files")
     println("  -t, --type <TYPE>          Only search files matching TYPE (can be used multiple times)")
     println("  -T, --type-not <TYPE>      Do not search files matching TYPE (can be used multiple times)")
     println("      --type-list            Show all supported file types and exit")
@@ -42,7 +46,31 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.4.0 (Toka)")
+    println("trg 0.5.0 (Toka)")
+}
+
+fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
+    if s.len == 0 {
+        auto err# = string::from("Flag ")
+        err#.push_str(flag_name)
+        err#.push_str(" requires a non-negative integer argument")
+        return Result<usize, string>::Err(cede err)
+    }
+    auto val# = 0:usize
+    auto i# = 0:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i)
+        if ch < ('0' as char) || ch > ('9' as char) {
+            auto err# = string::from("Flag ")
+            err#.push_str(flag_name)
+            err#.push_str(" requires a non-negative integer argument")
+            return Result<usize, string>::Err(cede err)
+        }
+        auto digit = (ch as usize) - ('0' as usize)
+        val = val * 10:usize + digit
+        i = i + 1
+    }
+    return Result<usize, string>::Ok(val)
 }
 
 fn parse_context_num(s: str) -> Result<usize, string> {
@@ -102,7 +130,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto files_with_matches# = false
     auto count# = false
     auto invert_match# = false
-    auto ignore_case# = false
+    auto case_mode# = CaseMode::Sensitive
+    auto no_ignore# = false
+    auto max_count_enabled# = false
+    auto max_count# = 0:usize
+    auto max_columns# = 0:usize
     auto files_mode# = false
     auto json_mode# = false
     auto hidden# = false
@@ -194,7 +226,85 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         }
 
         if view == "-i" || view == "--ignore-case" {
-            ignore_case = true
+            case_mode = CaseMode::Insensitive
+            i = i + 1
+            continue
+        }
+
+        if view == "-S" || view == "--smart-case" {
+            case_mode = CaseMode::Smart
+            i = i + 1
+            continue
+        }
+
+        if view == "--no-ignore" {
+            no_ignore = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-m" || view == "--max-count" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -m / --max-count requires an argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_non_negative_int(val_arg.as_str(), "-m / --max-count")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_count = parse_res.unwrap()
+            max_count_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--max-count=") {
+            auto val_str = view.substr(12:usize, view.len - 12:usize)
+            auto parse_res = parse_non_negative_int(val_str, "--max-count")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_count = parse_res.unwrap()
+            max_count_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-m=") {
+            auto val_str = view.substr(3:usize, view.len - 3:usize)
+            auto parse_res = parse_non_negative_int(val_str, "-m")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_count = parse_res.unwrap()
+            max_count_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-m") && view.len > 2 {
+            auto val_str = view.substr(2:usize, view.len - 2:usize)
+            auto parse_res = parse_non_negative_int(val_str, "-m")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_count = parse_res.unwrap()
+            max_count_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--max-columns" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag --max-columns requires an argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_non_negative_int(val_arg.as_str(), "--max-columns")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_columns = parse_res.unwrap()
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--max-columns=") {
+            auto val_str = view.substr(14:usize, view.len - 14:usize)
+            auto parse_res = parse_non_negative_int(val_str, "--max-columns")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_columns = parse_res.unwrap()
             i = i + 1
             continue
         }
@@ -416,7 +526,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
-        // Handle short flag clusters e.g. -nli, -Fnl, -iF, -Ew, -ix
+        // Handle short flag clusters e.g. -nli, -Fnl, -iF, -Ew, -ix, -inS, -Si
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
             auto c_idx# = 1:usize
@@ -430,7 +540,8 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
                 else if ch == ('l' as char) { files_with_matches = true }
                 else if ch == ('c' as char) { count = true }
                 else if ch == ('v' as char) { invert_match = true }
-                else if ch == ('i' as char) { ignore_case = true }
+                else if ch == ('i' as char) { case_mode = CaseMode::Insensitive }
+                else if ch == ('S' as char) { case_mode = CaseMode::Smart }
                 else {
                     is_flag_cluster = false
                     break
@@ -475,13 +586,17 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             files_with_matches = false,
             count = false,
             invert_match = false,
-            ignore_case = false,
+            case_mode = CaseMode::Sensitive,
+            no_ignore = false,
             files_mode = false,
             json_mode = false,
             hidden = false,
             type_list_only = true,
             before_context = 0,
             after_context = 0,
+            max_count_enabled = false,
+            max_count = 0,
+            max_columns = 0,
             globs = Vec<GlobRule>::new(),
             include_type_exts = Vec<string>::new(),
             exclude_type_exts = Vec<string>::new()
@@ -530,13 +645,17 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         files_with_matches = files_with_matches,
         count = count,
         invert_match = invert_match,
-        ignore_case = ignore_case,
+        case_mode = case_mode,
+        no_ignore = no_ignore,
         files_mode = files_mode,
         json_mode = json_mode,
         hidden = hidden,
         type_list_only = false,
         before_context = before_context,
         after_context = after_context,
+        max_count_enabled = max_count_enabled,
+        max_count = max_count,
+        max_columns = max_columns,
         globs = cede globs,
         include_type_exts = cede include_type_exts,
         exclude_type_exts = cede exclude_type_exts

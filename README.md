@@ -27,16 +27,31 @@
   - Overlapping and contiguous context windows merge seamlessly with zero duplicate lines.
   - Non-contiguous match groups are separated by `--` in human mode.
 - **Boolean `is_match` Fast-Path**: Scalar modes (`-l`, `-c`, and terminal text output) avoid constructing the `MatchRange` dynamic vector and `SubMatch` strings with mathematical equivalence to `find_matches`.
+- **Full Logical Line Streaming**: Arbitrary-length logical lines are fully buffered and searched with zero false negatives and exact byte offsets across LF, CRLF, and no-EOL files.
+- **Smart Case Search (`-S`, `--smart-case`)**:
+  - Automatically case-insensitive when pattern is all-lowercase; case-sensitive when pattern contains ASCII uppercase characters.
+  - Regex-escape aware: syntax tokens like `\S`, `\D`, `\W`, `\B` do not force case sensitivity.
+  - Respects CLI flag ordering (`-i -S` vs `-S -i`).
+- **Max Count Match Capping (`-m`, `--max-count`)**:
+  - `-m <NUM>` / `--max-count <NUM>`: Stop searching a file after NUM matching lines.
+  - Correctly supports `-m 0` (0 matches, exit code 1).
+  - Drains trailing context windows (`-A`, `-C`) cleanly after reaching match limit.
+- **Max Columns Output Width (`--max-columns`)**:
+  - `--max-columns <NUM>`: Omits terminal output for matching lines longer than NUM bytes (`[Omitted long matching line]`) and context lines (`[Omitted long context line]`).
+  - `--max-columns=0`: Unlimited display width (default).
+  - Preserves full un-truncated content and exact submatch offsets in `--json` streaming mode.
+- **Ignore Bypass (`--no-ignore`)**:
+  - `--no-ignore`: Search files ignored by `.gitignore` files, short-circuiting ignore stack loading for maximum traversal speed.
+  - Still respects hidden file rules (unless `--hidden` is passed), `-g` globs, `-t` file types, and symlink safety.
 - **File Type Filtering (`-t`, `-T`, `--type-list`)**:
   - `-t <TYPE>` / `--type <TYPE>`: Only search files matching TYPE (supports canonical names and aliases, e.g. `toka`, `python`/`py`, `rust`/`rs`, `c`, `cpp`, `js`, `ts`, `go`, `json`, `yaml`, `toml`, `markdown`, `sh`, `html`, `css`). Multiple `-t` arguments combine as a union.
   - `-T <TYPE>` / `--type-not <TYPE>`: Exclude files matching TYPE.
   - `--type-list`: List all supported file types, aliases, and extensions alphabetically and exit 0 without needing a pattern.
   - Case-insensitive extension matching (e.g. `.TK` matches `toka`).
   - Strict unknown type validation with immediate fail-closed error reporting (exit code `2`).
-- **Bounded Context & Line Memory**:
+- **Bounded Context Memory**:
   - Maximum context lines parameter is bounded to `1000`.
   - `BeforeRing` cumulative memory is strictly bounded to `64 MiB` (exit code 2 on breach).
-  - Single logical line memory is strictly bounded to `1MB` (lines >1MB rejected with exit code 2).
   - In `-l` and `-c` modes, effective context is zeroed out to maintain instant short-circuiting.
 - **Portable Symlink & Cycle Safety**: Uses standard POSIX `readlink` to detect and skip symbolic links across macOS and Linux.
 - **Streaming & 64KB Chunk Execution**: Incremental block reads via `libc_fread` without whole-file memory loading.
@@ -52,7 +67,7 @@
 - **Strict Error-Precedence Exit Codes**:
   - `0`: At least one match found (or files listed), with no errors.
   - `1`: No matches found, with no errors.
-  - `2`: Error occurred (bad CLI flag, overlong line, memory limit exceeded, unreadable path; error takes precedence over matches).
+  - `2`: Error occurred (bad CLI flag, memory limit exceeded, unreadable path; error takes precedence over matches).
 - **Broken Pipe Protection**: Gracefully handles closed stdout pipes (`trg ... | head -n 1`) with `SIGPIPE` ignored and `EPIPE` early termination.
 
 ---
@@ -154,6 +169,19 @@ trg -n -C 2 "posix_stat" src
 trg -t toka "pub const" .
 trg -t py -t rust "fn|def" .
 trg -t toka -T toka "pattern" . # Exclude toka files
+
+# Smart-case search (-S): case-insensitive if pattern is lowercase, case-sensitive if uppercase
+trg -S "searchplan" .
+trg -S "SearchPlan" .
+
+# Max match count per file (-m)
+trg -m 2 -n "pub fn" src/
+
+# Omit matching lines longer than 120 bytes in terminal output
+trg --max-columns 120 "data" .
+
+# Search all files bypassing .gitignore (--no-ignore)
+trg --no-ignore "TARGET" .
 
 # List all supported file types
 trg --type-list

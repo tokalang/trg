@@ -1,0 +1,17 @@
+{
+  "schema": "toka.trg-release-audit-v1",
+  "version": "0.5.0",
+  "archive_sha256": "cf398ad6303dcd706af2ca45b4bcd2e927db2eda3902774255e60146b2de6790",
+  "qualification": {
+    "total_tests": 64,
+    "passed_tests": 64,
+    "status": "PASS"
+  },
+  "features": [
+    "unbounded_logical_line_search",
+    "smart_case_tri_state",
+    "max_count_with_context_drain",
+    "max_columns_human_omission",
+    "no_ignore_short_circuit"
+  ]
+}

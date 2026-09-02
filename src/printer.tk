@@ -180,7 +180,11 @@ pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) 
         out#.push_str(":")
     }
 
-    out#.push_str(ev.line_text.as_str())
+    if opts.max_columns > 0 && ev.line_text.len() > opts.max_columns {
+        out#.push_str("[Omitted long matching line]")
+    } else {
+        out#.push_str(ev.line_text.as_str())
+    }
     return write_line(out.as_str())
 }
 
@@ -197,7 +201,11 @@ pub fn emit_human_context(ev: MatchEvent, opts: CliOptions, multiple_files: bool
         out#.push_str("-")
     }
 
-    out#.push_str(ev.line_text.as_str())
+    if opts.max_columns > 0 && ev.line_text.len() > opts.max_columns {
+        out#.push_str("[Omitted long context line]")
+    } else {
+        out#.push_str(ev.line_text.as_str())
+    }
     return write_line(out.as_str())
 }
 

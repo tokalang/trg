@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.4.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.5.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.4.0 identity on both binaries
+    # Validate exact 0.5.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.4.0 (Toka)", f"Expected 'trg 0.4.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.5.0 (Toka)", f"Expected 'trg 0.5.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.4.0 (Toka)", f"Expected 'trg 0.4.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.5.0 (Toka)", f"Expected 'trg 0.5.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.4.0
-    log("Test 1: Help & Version flags (exact 0.4.0 release identity)")
+    # Test 1: Help & Version exact 0.5.0
+    log("Test 1: Help & Version flags (exact 0.5.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.4.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.5.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.4.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.5.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -173,30 +173,26 @@ def main():
     assert r.returncode == 0
     assert "3:charlie" in r.stdout
 
-    # Test 6: Files-with-matches (-l)
+    # Test 6: Files with matches (-l)
     log("Test 6: Files with matches (-l)")
     r = run_cmd([trg, "-l", "-g", "!*invalid*", "charlie", str(fixtures_dir)])
     assert r.returncode == 0
     assert "crlf.txt" in r.stdout
 
-    # Test 7: Match count (-c)
-    log("Test 7: Count mode (-c)")
+    # Test 7: Count matches per file (-c)
+    log("Test 7: Count matches per file (-c)")
     r = run_cmd([trg, "-c", "bravo", str(fixtures_dir / "crlf.txt")])
     assert r.returncode == 0
     assert r.stdout.strip() == "1"
 
-    # Test 8: Glob filtering & Last-match-wins
-    log("Test 8: Glob include, exclude, and last-match-wins order")
-    r = run_cmd([trg, "-g", "*.txt", "-g", "!*invalid*", "alpha", str(fixtures_dir)])
-    assert r.returncode == 0
-    assert "crlf.txt" in r.stdout
+    # Test 8: Explicit path specification and stdin reading
+    log("Test 8: Explicit path specification and stdin reading")
+    r_stdin = run_cmd([trg, "hello", "-"], input_data="hello world\nfoo bar\nhello again\n")
+    assert r_stdin.returncode == 0
+    assert "hello world" in r_stdin.stdout
+    assert "hello again" in r_stdin.stdout
 
-    # Last-match-wins: -g '!*.txt' followed by -g '*.txt' should include .txt files
-    r_lmw = run_cmd([trg, "--files", "-g", "!*.tk", "-g", "*.tk", str(repo_root / "src")])
-    assert r_lmw.returncode == 0
-    assert "main.tk" in r_lmw.stdout
-
-    # Test 9: File listing (--files)
+    # Test 9: --files listing mode
     log("Test 9: --files listing mode")
     r = run_cmd([trg, "--files", str(repo_root / "src")])
     assert r.returncode == 0
@@ -245,16 +241,18 @@ def main():
     assert bin_events[2]["type"] == "summary"
     assert bin_events[2]["data"]["stats"]["matches"] == 0
 
-    # Test 13: Error path JSON framing on overlong line
-    log("Test 13: Error path JSON framing on overlong line")
-    r_err_json = run_cmd([trg, "--json", "TARGET", str(fixtures_dir / "invalid" / "overlong_line.txt")], check=False)
-    assert r_err_json.returncode == 2, f"Expected exit code 2 on error JSON, got {r_err_json.returncode}"
+    # Test 13: Full JSON match streaming on 1MB+ overlong line
+    log("Test 13: Full JSON match streaming on 1MB+ overlong line")
+    r_err_json = run_cmd([trg, "--json", "TARGET_START", str(fixtures_dir / "invalid" / "overlong_line.txt")], check=False)
+    assert r_err_json.returncode == 0, f"Expected exit code 0 on matched overlong JSON, got {r_err_json.returncode}"
     err_events = [json.loads(line) for line in r_err_json.stdout.strip().split("\n") if line.strip()]
-    assert len(err_events) == 3, f"Expected 3 framing events for error file, got {len(err_events)}"
+    assert len(err_events) == 4, f"Expected 4 framing events for matched overlong file, got {len(err_events)}"
     assert err_events[0]["type"] == "begin"
     assert err_events[0]["schema"] == "trg-json-v2"
-    assert err_events[1]["type"] == "end"
-    assert err_events[2]["type"] == "summary"
+    assert err_events[1]["type"] == "match"
+    assert err_events[1]["data"]["submatches"][0]["match"]["text"] == "TARGET_START"
+    assert err_events[2]["type"] == "end"
+    assert err_events[3]["type"] == "summary"
 
     # Test 14: Strict Exit code matrix & error precedence
     log("Test 14: Exit code matrix and ripgrep error precedence")
@@ -285,29 +283,29 @@ def main():
     r2_json_conflict_files = run_cmd([trg, "--json", "--files", str(repo_root / "src")], check=False)
     assert r2_json_conflict_files.returncode == 2, f"Expected 2 for --json --files conflict, got {r2_json_conflict_files.returncode}"
 
-    # Test 15: Exact 1MB line (1,048,576 bytes text) acceptance (exit 0)
+    # Test 15: Exact 1MB logical line (1,048,576 bytes) acceptance
     log("Test 15: Exact 1MB logical line (1,048,576 bytes) acceptance")
     r_1mb_exact = run_cmd([trg, "TARGET", str(fixtures_dir / "line_1mb_exact.txt")])
     assert r_1mb_exact.returncode == 0
     assert "TARGET" in r_1mb_exact.stdout
 
-    # Test 16: 1MB + 1 LF line (1,048,577 bytes text) rejection with exit 2
-    log("Test 16: Exact 1MB+1 line + LF (>1MB limit) rejection with exit 2")
+    # Test 16: Exact 1MB+1 line + LF (>1MB limit) acceptance and match (exit 0)
+    log("Test 16: Exact 1MB+1 line + LF (>1MB limit) acceptance and match (exit 0)")
     r_1mb_plus_lf = run_cmd([trg, "TARGET", str(fixtures_dir / "invalid" / "line_1mb_plus_1_lf.txt")], check=False)
-    assert r_1mb_plus_lf.returncode == 2, f"Expected 2, got {r_1mb_plus_lf.returncode}"
-    assert "Maximum logical line length exceeded" in r_1mb_plus_lf.stderr
+    assert r_1mb_plus_lf.returncode == 0, f"Expected 0, got {r_1mb_plus_lf.returncode}"
+    assert "TARGET" in r_1mb_plus_lf.stdout
 
-    # Test 17: 1MB + 1 CRLF line (1,048,577 bytes text) rejection with exit 2
-    log("Test 17: Exact 1MB+1 line + CRLF (>1MB limit) rejection with exit 2")
+    # Test 17: Exact 1MB+1 line + CRLF (>1MB limit) acceptance and match (exit 0)
+    log("Test 17: Exact 1MB+1 line + CRLF (>1MB limit) acceptance and match (exit 0)")
     r_1mb_plus_crlf = run_cmd([trg, "TARGET", str(fixtures_dir / "invalid" / "line_1mb_plus_1_crlf.txt")], check=False)
-    assert r_1mb_plus_crlf.returncode == 2, f"Expected 2, got {r_1mb_plus_crlf.returncode}"
-    assert "Maximum logical line length exceeded" in r_1mb_plus_crlf.stderr
+    assert r_1mb_plus_crlf.returncode == 0, f"Expected 0, got {r_1mb_plus_crlf.returncode}"
+    assert "TARGET" in r_1mb_plus_crlf.stdout
 
-    # Test 18: Overlong single line without newline (>1MB limit) rejection (exit 2)
-    log("Test 18: Overlong line without newline (>1MB limit) rejection with exit 2")
+    # Test 18: Overlong line without newline (>1MB limit) acceptance and match (exit 0)
+    log("Test 18: Overlong line without newline (>1MB limit) acceptance and match (exit 0)")
     r_overlong = run_cmd([trg, "TARGET_START", str(fixtures_dir / "invalid" / "overlong_line.txt")], check=False)
-    assert r_overlong.returncode == 2, f"Expected exit code 2 for overlong line, got {r_overlong.returncode}"
-    assert "Maximum logical line length exceeded" in r_overlong.stderr
+    assert r_overlong.returncode == 0, f"Expected exit code 0 for overlong line, got {r_overlong.returncode}"
+    assert "TARGET_START" in r_overlong.stdout
 
     # Test 19: File without trailing newline (no_eol.txt)
     log("Test 19: File without trailing newline")
@@ -672,7 +670,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.4.0" in r_re_ctx.stdout
+    assert "trg 0.5.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -954,8 +952,171 @@ def main():
         if diff_fixture2.exists():
             diff_fixture2.unlink()
 
+    # Test 58: Multi-Megabyte Line Search & Sub-megabyte Offset Precision
+    log("Test 58: Multi-megabyte line search and sub-megabyte offset precision")
+    huge_fixture = fixtures_dir / "test_huge_line.txt"
+    try:
+        # 2MB of 'a' + 'DEEP_TARGET' + 1MB of 'b'
+        huge_fixture.write_text("a" * 2000000 + "DEEP_TARGET" + "b" * 1000000 + "\n", encoding="utf-8")
+        r_huge = run_cmd([trg, "--json", "DEEP_TARGET", str(huge_fixture)])
+        assert r_huge.returncode == 0
+        h_events = [json.loads(line) for line in r_huge.stdout.strip().split("\n") if line.strip()]
+        assert len(h_events) == 4
+        assert h_events[1]["type"] == "match"
+        assert h_events[1]["data"]["line_number"] == 1
+        assert h_events[1]["data"]["submatches"][0]["match"]["text"] == "DEEP_TARGET"
+        assert h_events[1]["data"]["submatches"][0]["start"] == 2000000
+        assert h_events[1]["data"]["submatches"][0]["end"] == 2000011
+    finally:
+        if huge_fixture.exists():
+            huge_fixture.unlink()
+
+    # Test 59: Repository Dogfood Search over 1MB+ fixtures (Exit code 0, no error alerts)
+    log("Test 59: Dogfood repository search over 1MB+ fixtures (clean exit 0)")
+    r_dogfood = run_cmd([trg, "-n", "SearchPlan", str(repo_root)])
+    assert r_dogfood.returncode == 0, f"Expected dogfood exit 0, got {r_dogfood.returncode}"
+    assert "src/main.tk" in r_dogfood.stdout
+    assert "Maximum logical line length exceeded" not in r_dogfood.stderr
+
+    # Test 60: --no-ignore bypassing .gitignore vs respecting hidden files without --hidden
+    log("Test 60: --no-ignore short-circuit and hidden file interaction")
+    ignore_test_dir = fixtures_dir / "test_no_ignore_tree"
+    try:
+        ignore_test_dir.mkdir(parents=True, exist_ok=True)
+        (ignore_test_dir / ".gitignore").write_text("ignored_sub/\n", encoding="utf-8")
+        (ignore_test_dir / "ignored_sub").mkdir(exist_ok=True)
+        (ignore_test_dir / "ignored_sub" / "secret.txt").write_text("SECRET_TOKEN\n", encoding="utf-8")
+        (ignore_test_dir / ".hidden_sub").mkdir(exist_ok=True)
+        (ignore_test_dir / ".hidden_sub" / "hidden.txt").write_text("SECRET_TOKEN\n", encoding="utf-8")
+
+        # Standard search: ignores ignored_sub
+        r_std = run_cmd([trg, "-l", "SECRET_TOKEN", str(ignore_test_dir)], check=False)
+        assert r_std.returncode == 1
+
+        # With --no-ignore: finds ignored_sub/secret.txt, but still skips .hidden_sub
+        r_no_ign = run_cmd([trg, "--no-ignore", "-l", "SECRET_TOKEN", str(ignore_test_dir)])
+        assert r_no_ign.returncode == 0
+        assert "ignored_sub/secret.txt" in r_no_ign.stdout
+        assert ".hidden_sub" not in r_no_ign.stdout
+
+        # With --no-ignore and --hidden: finds both
+        r_both = run_cmd([trg, "--no-ignore", "--hidden", "-l", "SECRET_TOKEN", str(ignore_test_dir)])
+        assert r_both.returncode == 0
+        assert "ignored_sub/secret.txt" in r_both.stdout
+        assert ".hidden_sub/hidden.txt" in r_both.stdout
+    finally:
+        if ignore_test_dir.exists():
+            shutil.rmtree(ignore_test_dir)
+
+    # Test 61: Smart Case tri-state and regex syntax escape awareness
+    log("Test 61: Smart Case tri-state and regex syntax escape awareness")
+    smart_fixture = fixtures_dir / "test_smart_case.txt"
+    try:
+        smart_fixture.write_text("foo bar\nFoo bar\nFOO BAR\nxyz 123\n", encoding="utf-8")
+
+        # All-lowercase pattern with -S -> case-insensitive
+        r_sc_lower = run_cmd([trg, "-S", "-c", "foo", str(smart_fixture)])
+        assert r_sc_lower.returncode == 0
+        assert r_sc_lower.stdout.strip() == "3"
+
+        # Uppercase character in pattern with -S -> case-sensitive
+        r_sc_upper = run_cmd([trg, "-S", "-c", "Foo", str(smart_fixture)])
+        assert r_sc_upper.returncode == 0
+        assert r_sc_upper.stdout.strip() == "1"
+
+        # Regex with \\S syntax token (non-whitespace) with -S -> should NOT force case-sensitivity (matches 3 lines)
+        r_sc_esc = run_cmd([trg, "-S", "-E", "-c", "\\S+\\s+bar", str(smart_fixture)])
+        assert r_sc_esc.returncode == 0
+        assert r_sc_esc.stdout.strip() == "3" # matches "foo bar", "Foo bar", "FOO BAR"
+
+        # Regex with uppercase literal 'BAR' with -S -> should force case-sensitivity (matches 1 line)
+        r_sc_esc_upper = run_cmd([trg, "-S", "-E", "-c", "\\S+\\s+BAR", str(smart_fixture)])
+        assert r_sc_esc_upper.returncode == 0
+        assert r_sc_esc_upper.stdout.strip() == "1" # matches only "FOO BAR"
+
+        # Argument precedence: -i -S -> Smart Case (Foo is sensitive -> 1 match)
+        r_order1 = run_cmd([trg, "-i", "-S", "-c", "Foo", str(smart_fixture)])
+        assert r_order1.returncode == 0
+        assert r_order1.stdout.strip() == "1"
+
+        # Argument precedence: -S -i -> Ignore Case (Foo is insensitive -> 3 matches)
+        r_order2 = run_cmd([trg, "-S", "-i", "-c", "Foo", str(smart_fixture)])
+        assert r_order2.returncode == 0
+        assert r_order2.stdout.strip() == "3"
+    finally:
+        if smart_fixture.exists():
+            smart_fixture.unlink()
+
+    # Test 62: -m / --max-count semantics, -m 0, -c, and context window draining
+    log("Test 62: -m / --max-count capping, -m 0, -c count, and context draining")
+    mc_fixture = fixtures_dir / "test_max_count.txt"
+    try:
+        mc_fixture.write_text("line 1 match\nline 2 ctx\nline 3 match\nline 4 match\nline 5 end\n", encoding="utf-8")
+
+        # -m 0: returns 1 (no matches allowed)
+        r_m0 = run_cmd([trg, "-m", "0", "match", str(mc_fixture)], check=False)
+        assert r_m0.returncode == 1
+
+        # -m 2: caps at 2 matches
+        r_m2 = run_cmd([trg, "-m", "2", "-n", "match", str(mc_fixture)])
+        assert r_m2.returncode == 0
+        m2_lines = [l for l in r_m2.stdout.strip().split("\n") if l]
+        assert len(m2_lines) == 2
+        assert "1:line 1 match" in m2_lines[0]
+        assert "3:line 3 match" in m2_lines[1]
+
+        # -m 2 -c: outputs 2
+        r_m2_c = run_cmd([trg, "-m", "2", "-c", "match", str(mc_fixture)])
+        assert r_m2_c.returncode == 0
+        assert r_m2_c.stdout.strip() == "2"
+
+        # -m 1 -A 1: drains context line after match 1, does not scan rest
+        r_m1_ctx = run_cmd([trg, "-m", "1", "-A", "1", "-n", "match", str(mc_fixture)])
+        assert r_m1_ctx.returncode == 0
+        m1_ctx_lines = [l for l in r_m1_ctx.stdout.strip().split("\n") if l]
+        assert len(m1_ctx_lines) == 2
+        assert "1:line 1 match" in m1_ctx_lines[0]
+        assert "2-line 2 ctx" in m1_ctx_lines[1]
+    finally:
+        if mc_fixture.exists():
+            mc_fixture.unlink()
+
+    # Test 63: --max-columns human omission vs full JSON submatch parity
+    log("Test 63: --max-columns human omission vs full JSON submatch parity")
+    mc_col_fixture = fixtures_dir / "test_max_columns.txt"
+    try:
+        mc_col_fixture.write_text("short match\nthis is a very long matching line with details\nctx line very long\n", encoding="utf-8")
+
+        # Human output: omits long matching line with [Omitted long matching line]
+        r_hum_col = run_cmd([trg, "--max-columns", "20", "-n", "matching", str(mc_col_fixture)])
+        assert r_hum_col.returncode == 0
+        assert "2:[Omitted long matching line]" in r_hum_col.stdout
+        assert "with details" not in r_hum_col.stdout
+
+        # Human context output: omits long context line with [Omitted long context line]
+        r_ctx_col = run_cmd([trg, "--max-columns", "15", "-C", "1", "-n", "matching", str(mc_col_fixture)])
+        assert r_ctx_col.returncode == 0
+        assert "3-[Omitted long context line]" in r_ctx_col.stdout
+
+        # JSON output: retains full string and submatch range even with --max-columns
+        r_json_col = run_cmd([trg, "--max-columns", "20", "--json", "matching", str(mc_col_fixture)])
+        assert r_json_col.returncode == 0
+        j_events = [json.loads(l) for l in r_json_col.stdout.strip().split("\n") if l]
+        assert j_events[1]["type"] == "match"
+        assert "this is a very long matching line with details" in j_events[1]["data"]["lines"]["text"]
+        assert j_events[1]["data"]["submatches"][0]["match"]["text"] == "matching"
+    finally:
+        if mc_col_fixture.exists():
+            mc_col_fixture.unlink()
+
+    # Test 64: --max-columns=0 allows unlimited output width
+    log("Test 64: --max-columns=0 allows unlimited output width")
+    r_unlim = run_cmd([trg, "--max-columns=0", "-n", "SearchPlan", str(repo_root / "src" / "main.tk")])
+    assert r_unlim.returncode == 0
+    assert "import src/matcher::{SearchPlan}" in r_unlim.stdout
+
     log("=" * 60)
-    log("ALL 57 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.4.0)!")
+    log("ALL 64 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.5.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

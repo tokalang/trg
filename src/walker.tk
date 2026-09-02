@@ -50,13 +50,17 @@ fn walk_dir_recursive(
     collected#: Vec<string>,
     had_error#: bool
 ) {
-    ignore_stack#.push_dir(dir_path.clone())
+    if !opts.no_ignore {
+        ignore_stack#.push_dir(dir_path.clone())
+    }
 
     auto dir_res = posix_opendir(dir_path.clone())
     if dir_res.is_err() {
         log_walker_err(dir_path.as_str(), "Permission denied or unable to open directory")
         had_error = true
-        ignore_stack#.pop_dir()
+        if !opts.no_ignore {
+            ignore_stack#.pop_dir()
+        }
         return
     }
 
@@ -95,7 +99,7 @@ fn walk_dir_recursive(
 
         if stat.is_dir {
             // Check directory ignore rule for pruning
-            if ignore_stack.is_ignored(full_path.as_str(), true) {
+            if !opts.no_ignore && ignore_stack.is_ignored(full_path.as_str(), true) {
                 continue
             }
 
@@ -108,7 +112,7 @@ fn walk_dir_recursive(
             walk_dir_recursive(full_path, opts, ignore_stack#, collected#, had_error#)
         } else if stat.is_file {
             // Check file ignore rule
-            if ignore_stack.is_ignored(full_path.as_str(), false) {
+            if !opts.no_ignore && ignore_stack.is_ignored(full_path.as_str(), false) {
                 continue
             }
 
@@ -127,7 +131,9 @@ fn walk_dir_recursive(
     }
 
     posix_closedir(dir)
-    ignore_stack#.pop_dir()
+    if !opts.no_ignore {
+        ignore_stack#.pop_dir()
+    }
 }
 
 pub fn collect_search_targets(opts: CliOptions) -> WalkResult {

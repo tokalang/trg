@@ -318,10 +318,18 @@ pub fn scan_file_stream(
         auto is_binary# = false
         auto had_error# = false
         auto is_broken_pipe# = false
+        auto max_count_reached# = false
+        if opts.max_count_enabled && opts.max_count == 0 {
+            max_count_reached = true
+        }
 
         auto context_state# = make_context_state(opts.before_context)
 
         loop true {
+            if max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0) {
+                break
+            }
+
             auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
             if n == 0 {
                 if posix_ferror((*file) as Addr) {
@@ -361,12 +369,6 @@ pub fn scan_file_stream(
                 auto rem = block_view.substr(cursor, block_view.len - cursor)
                 auto nl_opt = rem.index_of('\n' as char)
                 if nl_opt.is_none() {
-                    // Check if remaining unterminated logical line exceeds 1MB limit
-                    if rem.len > 1048576:usize {
-                        log_scanner_err(target_path.as_str(), "Maximum logical line length exceeded (1MB limit)")
-                        had_error = true
-                        break
-                    }
                     carry = string::from(rem)
                     break
                 }
@@ -379,42 +381,40 @@ pub fn scan_file_stream(
                     delim_len = 2:usize
                 }
 
-                // Check if terminated logical line exceeds 1MB limit
-                if line_text.len > 1048576:usize {
-                    log_scanner_err(target_path.as_str(), "Maximum logical line length exceeded (1MB limit)")
-                    had_error = true
-                    break
-                }
-
                 auto line_matches# = false
                 auto ranges# = Vec<MatchRange>::new()
 
-                if opts.json_mode {
-                    auto decision = plan.find_matches(line_text)
-                    if !opts.invert_match {
-                        line_matches = decision.matched
+                if !max_count_reached {
+                    if opts.json_mode {
+                        auto decision = plan.find_matches(line_text)
+                        if !opts.invert_match {
+                            line_matches = decision.matched
+                        } else {
+                            line_matches = !decision.matched
+                        }
+                        ranges = cede decision.ranges
                     } else {
-                        line_matches = !decision.matched
+                        auto matched = plan.is_match(line_text)
+                        if !opts.invert_match {
+                            line_matches = matched
+                        } else {
+                            line_matches = !matched
+                        }
                     }
-                    ranges = cede decision.ranges
-                } else {
-                    auto matched = plan.is_match(line_text)
-                    if !opts.invert_match {
-                        line_matches = matched
-                    } else {
-                        line_matches = !matched
-                    }
-                }
 
-                if line_matches {
-                    has_match = true
-                    matches_count = matches_count + 1
+                    if line_matches {
+                        has_match = true
+                        matches_count = matches_count + 1
+                        if opts.max_count_enabled && matches_count >= opts.max_count {
+                            max_count_reached = true
+                        }
 
-                    if opts.files_with_matches {
-                        auto w_res = write_line(target_path.as_str())
-                        if w_res == 1 { is_broken_pipe = true }
-                        else if w_res == 2 { had_error = true }
-                        break
+                        if opts.files_with_matches {
+                            auto w_res = write_line(target_path.as_str())
+                            if w_res == 1 { is_broken_pipe = true }
+                            else if w_res == 2 { had_error = true }
+                            break
+                        }
                     }
                 }
 
@@ -451,56 +451,61 @@ pub fn scan_file_stream(
                 line_num = line_num + 1
                 cursor = cursor + nl_pos + 1
                 carry = string::new()
+
+                if max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0) {
+                    break
+                }
             }
 
-            if is_broken_pipe || had_error || (opts.files_with_matches && has_match) {
+            if is_broken_pipe || had_error || (opts.files_with_matches && has_match) || (max_count_reached && (opts.count || context_state.pending_after == 0)) {
                 break
             }
         }
 
         // Process leftover final line at EOF
         if !is_binary && !had_error && !is_broken_pipe && carry.len() > 0 && !(opts.files_with_matches && has_match) {
-            auto line_raw = carry.as_str()
-            auto line_text# = line_raw
-            auto delim_len# = 0:usize
-            if line_raw.len > 0 && line_raw.byte_at(line_raw.len - 1) == ('\r' as char) {
-                line_text = line_raw.substr(0, line_raw.len - 1)
-                delim_len = 1:usize
-            }
+            if !(max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0)) {
+                auto line_raw = carry.as_str()
+                auto line_text# = line_raw
+                auto delim_len# = 0:usize
+                if line_raw.len > 0 && line_raw.byte_at(line_raw.len - 1) == ('\r' as char) {
+                    line_text = line_raw.substr(0, line_raw.len - 1)
+                    delim_len = 1:usize
+                }
 
-            // Check if final logical line exceeds 1MB limit
-            if line_text.len > 1048576:usize {
-                log_scanner_err(target_path.as_str(), "Maximum logical line length exceeded (1MB limit)")
-                had_error = true
-            } else {
                 auto line_matches# = false
                 auto ranges# = Vec<MatchRange>::new()
 
-                if opts.json_mode {
-                    auto decision = plan.find_matches(line_text)
-                    if !opts.invert_match {
-                        line_matches = decision.matched
+                if !max_count_reached {
+                    if opts.json_mode {
+                        auto decision = plan.find_matches(line_text)
+                        if !opts.invert_match {
+                            line_matches = decision.matched
+                        } else {
+                            line_matches = !decision.matched
+                        }
+                        ranges = cede decision.ranges
                     } else {
-                        line_matches = !decision.matched
+                        auto matched = plan.is_match(line_text)
+                        if !opts.invert_match {
+                            line_matches = matched
+                        } else {
+                            line_matches = !matched
+                        }
                     }
-                    ranges = cede decision.ranges
-                } else {
-                    auto matched = plan.is_match(line_text)
-                    if !opts.invert_match {
-                        line_matches = matched
-                    } else {
-                        line_matches = !matched
-                    }
-                }
 
-                if line_matches {
-                    has_match = true
-                    matches_count = matches_count + 1
+                    if line_matches {
+                        has_match = true
+                        matches_count = matches_count + 1
+                        if opts.max_count_enabled && matches_count >= opts.max_count {
+                            max_count_reached = true
+                        }
 
-                    if opts.files_with_matches {
-                        auto w_res = write_line(target_path.as_str())
-                        if w_res == 1 { is_broken_pipe = true }
-                        else if w_res == 2 { had_error = true }
+                        if opts.files_with_matches {
+                            auto w_res = write_line(target_path.as_str())
+                            if w_res == 1 { is_broken_pipe = true }
+                            else if w_res == 2 { had_error = true }
+                        }
                     }
                 }
 

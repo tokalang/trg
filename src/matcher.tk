@@ -3,7 +3,7 @@ import core/option::{Option}
 import core/result::{Result}
 import std/vec::{Vec}
 import official/regex::{Regex, RegexOptions, RegexAnalysis, CompiledRegex, RegexError}
-import src/types::{CliOptions, MatchRange, MatchDecision}
+import src/types::{CliOptions, MatchRange, MatchDecision, CaseMode}
 
 pub shape LiteralMatcher (
     needle: string,
@@ -228,11 +228,85 @@ impl RegexMatcher {
     }
 }
 
+fn has_ascii_uppercase(s: str) -> bool {
+    auto i# = 0:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i)
+        if ch >= ('A' as char) && ch <= ('Z' as char) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn has_regex_uppercase_literal(s: str) -> bool {
+    auto i# = 0:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i)
+        if ch == ('\\' as char) {
+            i = i + 1
+            if i < s.len {
+                auto esc = s.byte_at(i)
+                if esc == ('S' as char) || esc == ('D' as char) || esc == ('W' as char) ||
+                   esc == ('B' as char) || esc == ('A' as char) || esc == ('Z' as char) ||
+                   esc == ('s' as char) || esc == ('d' as char) || esc == ('w' as char) ||
+                   esc == ('b' as char) || esc == ('n' as char) || esc == ('r' as char) ||
+                   esc == ('t' as char) || esc == ('v' as char) || esc == ('f' as char) ||
+                   esc == ('\\' as char) {
+                    i = i + 1
+                    continue
+                }
+                if esc == ('x' as char) {
+                    i = i + 1
+                    if i < s.len { i = i + 1 }
+                    if i < s.len { i = i + 1 }
+                    continue
+                }
+                if esc == ('u' as char) {
+                    i = i + 1
+                    if i < s.len { i = i + 1 }
+                    if i < s.len { i = i + 1 }
+                    if i < s.len { i = i + 1 }
+                    if i < s.len { i = i + 1 }
+                    continue
+                }
+                if esc >= ('A' as char) && esc <= ('Z' as char) {
+                    return true
+                }
+                i = i + 1
+                continue
+            }
+            break
+        }
+        if ch >= ('A' as char) && ch <= ('Z' as char) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn resolve_ignore_case(pat: str, mode: CaseMode, is_regex: bool) -> bool {
+    match mode {
+        auto CaseMode::Sensitive => { return false }
+        auto CaseMode::Insensitive => { return true }
+        auto CaseMode::Smart => {
+            if is_regex {
+                return !has_regex_uppercase_literal(pat)
+            }
+            return !has_ascii_uppercase(pat)
+        }
+    }
+}
+
 impl SearchPlan {
     pub fn create(opts: CliOptions) -> Result<SearchPlan, string> {
+        auto eff_ignore_case = resolve_ignore_case(opts.pattern.as_str(), opts.case_mode, opts.regexp)
+
         if opts.regexp {
             auto regex_opts = RegexOptions(
-                ignore_ascii_case = opts.ignore_case,
+                ignore_ascii_case = eff_ignore_case,
                 word_regexp = opts.word_regexp,
                 line_regexp = opts.line_regexp
             )
@@ -254,7 +328,7 @@ impl SearchPlan {
 
         return Result<SearchPlan, string>::Ok(SearchPlan::Literal(LiteralMatcher(
             needle = opts.pattern.clone(),
-            ignore_case = opts.ignore_case,
+            ignore_case = eff_ignore_case,
             word_regexp = opts.word_regexp,
             line_regexp = opts.line_regexp
         )))

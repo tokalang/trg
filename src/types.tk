@@ -2,6 +2,12 @@
 import core/types::{usize}
 import std/vec::{Vec}
 
+pub shape CaseMode (
+    Sensitive = 0 |
+    Insensitive = 1 |
+    Smart = 2
+)
+
 pub shape GlobRule (
     pattern: string,
     is_negation: bool,
@@ -20,13 +26,17 @@ pub shape CliOptions (
     files_with_matches: bool,
     count: bool,
     invert_match: bool,
-    ignore_case: bool,
+    case_mode: CaseMode,
+    no_ignore: bool,
     files_mode: bool,
     json_mode: bool,
     hidden: bool,
     type_list_only: bool,
     before_context: usize,
     after_context: usize,
+    max_count_enabled: bool,
+    max_count: usize,
+    max_columns: usize,
     globs: Vec<GlobRule>,
     include_type_exts: Vec<string>,
     exclude_type_exts: Vec<string>
