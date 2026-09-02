@@ -92,8 +92,9 @@ trg --json -C 1 "posix_isatty" src/posix.tk
 
 ```json
 {"type":"begin","schema":"trg-json-v2","data":{"path":{"text":"src/posix.tk"}}}
-{"type":"context","data":{"path":{"text":"src/posix.tk"},"lines":{"text":"extern fn readlink(*path: char, *buf: char, bufsiz: usize) -> isize\n"},"line_number":21,"absolute_offset":720,"submatches":[]}}
-{"type":"match","data":{"path":{"text":"src/posix.tk"},"lines":{"text":"pub fn posix_isatty(fd: i32) -> bool {\n"},"line_number":22,"absolute_offset":795,"submatches":[{"match":{"text":"posix_isatty"},"start":7,"end":19}]}}
+{"type":"context","data":{"path":{"text":"src/posix.tk"},"lines":{"text":"\n"},"line_number":57,"absolute_offset":1340,"submatches":[]}}
+{"type":"match","data":{"path":{"text":"src/posix.tk"},"lines":{"text":"pub fn posix_stat(path: string) -> Result<StatInfo, i32> {\n"},"line_number":58,"absolute_offset":1341,"submatches":[{"match":{"text":"posix_stat"},"start":7,"end":17}]}}
+{"type":"context","data":{"path":{"text":"src/posix.tk"},"lines":{"text":"    auto *cpath = path.c_str()\n"},"line_number":59,"absolute_offset":1400,"submatches":[]}}
 {"type":"end","data":{"path":{"text":"src/posix.tk"},"binary_offset":null,"stats":{"elapsed":{"secs":0,"nanos":0},"searches":1,"matches":1}}}
 {"type":"summary","data":{"elapsed_total":{"secs":0,"nanos":0},"stats":{"searches":1,"searches_with_match":1,"matches":1}}}
 ```

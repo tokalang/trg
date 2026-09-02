@@ -1,6 +1,12 @@
 import build::{Executable, run_build}
 
 fn main() -> i32 {
-    auto app# = Executable::make(c"trg", c"src/main.tk")
+    auto app# = Executable(
+        *name = c"trg",
+        *version = c"0.2.0",
+        *src = c"src/main.tk",
+        deps = string::from(""),
+        ..
+    )
     return run_build(app)
 }

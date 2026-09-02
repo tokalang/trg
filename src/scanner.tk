@@ -1,4 +1,4 @@
-// True incremental 64KB chunk-buffered streaming scanner with context lines, 1MB line limit, 64MB context bound, and trg-json-v2 framing.
+// True incremental 64KB chunk-buffered streaming scanner with O(1) circular BeforeRing, 1MB line limit, 64MB context bound, and trg-json-v2 framing.
 import core/types::{usize, char, Addr}
 import core/str::{str}
 import core/option::{Option}
@@ -22,6 +22,8 @@ extern fn write(fd: i32, *buf: void, count: usize) -> isize
 
 pub shape BeforeRing (
     lines: Vec<LogicalLine>,
+    head: usize,
+    count: usize,
     capacity: usize,
     bytes: usize
 )
@@ -37,6 +39,8 @@ fn make_context_state(before_cap: usize) -> ContextState {
     return ContextState(
         ring = BeforeRing(
             lines = Vec<LogicalLine>::new(),
+            head = 0:usize,
+            count = 0:usize,
             capacity = before_cap,
             bytes = 0:usize
         ),
@@ -48,6 +52,8 @@ fn make_context_state(before_cap: usize) -> ContextState {
 
 fn ring_clear(ring#: BeforeRing) {
     ring.lines = Vec<LogicalLine>::new()
+    ring.head = 0:usize
+    ring.count = 0:usize
     ring.bytes = 0:usize
 }
 
@@ -128,20 +134,20 @@ fn find_all_submatches(line: str, needle: str, ignore_case: bool) -> Vec<SubMatc
 
 fn process_logical_line(
     cede line: LogicalLine,
-    is_match: bool,
+    line_matches: bool,
     opts: CliOptions,
     state#: ContextState,
     target_path: str,
     needle: str,
     multiple_files: bool
 ) -> LineProcessOutcome {
-    if is_match {
+    if line_matches {
         // Group separator logic (human mode only, active when context is requested)
         auto has_context = opts.before_context > 0 || opts.after_context > 0
         if has_context && state.last_emitted_line_num > 0 && state.had_emitted_group {
             auto first_to_emit# = line.line_number
-            if state.ring.lines.len() > 0 {
-                auto &first_ring = state.ring.lines.borrow(0:usize)
+            if state.ring.count > 0 {
+                auto &first_ring = state.ring.lines.borrow(state.ring.head)
                 if first_ring.line_number > state.last_emitted_line_num {
                     first_to_emit = first_ring.line_number
                 }
@@ -155,11 +161,12 @@ fn process_logical_line(
             }
         }
 
-        // Flush before_ring
-        auto num_ring = state.ring.lines.len()
+        // Flush before_ring in O(1) FIFO order
+        auto num_ring = state.ring.count
         auto r_idx# = 0:usize
         loop r_idx < num_ring {
-            auto &r_line = state.ring.lines.borrow(r_idx)
+            auto actual_idx = (state.ring.head + r_idx) % state.ring.capacity
+            auto &r_line = state.ring.lines.borrow(actual_idx)
             if r_line.line_number > state.last_emitted_line_num {
                 auto ev = MatchEvent(
                     path = string::from(target_path),
@@ -243,15 +250,21 @@ fn process_logical_line(
         return LineProcessOutcome::Continue
     }
 
-    // Push non-matching line to before_ring
-    if opts.before_context > 0 {
-        if state.ring.lines.len() >= state.ring.capacity {
-            auto oldest_opt = state.ring.lines#.remove(0:usize)
-            if oldest_opt.is_some() {
-                auto oldest = oldest_opt.unwrap()
-                state.ring.bytes = state.ring.bytes - oldest.text.len()
+    // Push non-matching line to O(1) circular before_ring
+    if opts.before_context > 0 && state.ring.capacity > 0 {
+        if state.ring.count >= state.ring.capacity {
+            auto old_len = state.ring.lines.borrow(state.ring.head).text.len()
+            auto next_bytes = state.ring.bytes - old_len + line.text.len()
+            if next_bytes > 67108864:usize {
+                log_scanner_err(target_path, "Maximum before-context memory limit exceeded (64MB limit)")
+                return LineProcessOutcome::FatalError
             }
+            state.ring.bytes = next_bytes
+            state.ring.lines#.set(state.ring.head, cede line)
+            state.ring.head = (state.ring.head + 1:usize) % state.ring.capacity
+            return LineProcessOutcome::Continue
         }
+
         auto next_bytes = state.ring.bytes + line.text.len()
         if next_bytes > 67108864:usize {
             log_scanner_err(target_path, "Maximum before-context memory limit exceeded (64MB limit)")
@@ -259,6 +272,7 @@ fn process_logical_line(
         }
         state.ring.bytes = next_bytes
         state.ring.lines#.push(cede line)
+        state.ring.count = state.ring.count + 1
     }
 
     return LineProcessOutcome::Continue

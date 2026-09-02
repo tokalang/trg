@@ -85,34 +85,47 @@ def main():
 
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
+    build_combined = r_build.stdout + r_build.stderr
+    assert "trg v0.2.0" in build_combined or "Finished" in build_combined, f"toka build did not report trg v0.2.0: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
-    # Step 1: Compile trg binary via direct tokac
-    bin_path = repo_root / "target" / "trg"
-    bin_path.parent.mkdir(parents=True, exist_ok=True)
-    log("Step 1: Compiling trg binary...")
+    pkg_bin_path = repo_root / "target" / "debug" / "trg"
+    assert pkg_bin_path.exists(), f"Package binary {pkg_bin_path} does not exist"
+
+    # Step 1: Direct tokac compilation gate
+    direct_bin_path = repo_root / "target" / "trg"
+    direct_bin_path.parent.mkdir(parents=True, exist_ok=True)
+    log("Step 1: Compiling direct tokac binary...")
     compile_cmd = [
         tokac_bin,
         "-I", std_lib,
         "-I", str(repo_root),
         str(repo_root / "src" / "main.tk"),
-        "-o", str(bin_path)
+        "-o", str(direct_bin_path)
     ]
     run_cmd(compile_cmd, cwd=str(repo_root))
-    assert bin_path.exists(), "trg binary was not created"
-    log("Compilation successful.")
+    assert direct_bin_path.exists(), "Direct tokac binary was not created"
+    log("Direct compilation successful.")
 
-    trg = str(bin_path)
+    # Validate exact 0.2.0 identity on both binaries
+    r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
+    assert r_pkg_ver.stdout.strip() == "trg 0.2.0 (Toka)", f"Expected 'trg 0.2.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+
+    r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
+    assert r_dir_ver.stdout.strip() == "trg 0.2.0 (Toka)", f"Expected 'trg 0.2.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+
+    # Use package build artifact as the primary qualification subject
+    trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version
-    log("Test 1: Help & Version flags")
+    # Test 1: Help & Version exact 0.2.0
+    log("Test 1: Help & Version flags (exact 0.2.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.1.0" in r.stdout or "trg 0.2.0" in r.stdout
+    assert "trg 0.2.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert "trg 0.1.0 (Toka)" in r.stdout or "trg 0.2.0 (Toka)" in r.stdout
+    assert r.stdout.strip() == "trg 0.2.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -191,7 +204,7 @@ def main():
     assert events[3]["type"] == "summary"
     assert events[3]["data"]["stats"]["matches"] == 1
 
-    # Test 11: JSON framing on empty files (begin -> end -> summary)
+    # Test 11: Empty file JSON framing (begin -> end -> summary)
     log("Test 11: Empty file JSON framing")
     r_empty = run_cmd([trg, "--json", "needle", str(fixtures_dir / "empty.txt")], check=False)
     assert r_empty.returncode == 1, f"Expected exit code 1 for no matches in empty file, got {r_empty.returncode}"
@@ -499,12 +512,75 @@ def main():
     multi_lines = [l.strip() for l in r_multi_ctx.stdout.strip().split("\n") if l.strip()]
     assert not any(l == "--" for l in multi_lines), f"Unexpected cross-file group separator found in: {multi_lines}"
 
+    # Test 36: Match on line 1 (no before-context underflow) and match on last line of file
+    log("Test 36: Boundary line matches (line 1 and last line with context)")
+    r_first = run_cmd([trg, "-n", "-C", "2", "alpha", str(fixtures_dir / "crlf.txt")])
+    assert r_first.returncode == 0
+    first_lines = [l.strip() for l in r_first.stdout.strip().split("\n") if l.strip()]
+    assert first_lines[0] == "1:alpha"
+    assert first_lines[1] == "2-bravo"
+    assert first_lines[2] == "3-charlie"
+
+    r_last = run_cmd([trg, "-n", "-C", "2", "delta", str(fixtures_dir / "crlf.txt")])
+    assert r_last.returncode == 0
+    last_lines = [l.strip() for l in r_last.stdout.strip().split("\n") if l.strip()]
+    assert last_lines[0] == "2-bravo"
+    assert last_lines[1] == "3-charlie"
+    assert last_lines[2] == "4:delta"
+
+    # Test 37: Context lines on CRLF file with exact JSON byte offsets
+    log("Test 37: Context lines CRLF byte offsets in trg-json-v2")
+    r_crlf_ctx = run_cmd([trg, "--json", "-C", "1", "bravo", str(fixtures_dir / "crlf.txt")])
+    assert r_crlf_ctx.returncode == 0
+    crlf_events = [json.loads(l) for l in r_crlf_ctx.stdout.strip().split("\n") if l.strip()]
+    assert len(crlf_events) == 6 # begin, ctx(1), match(2), ctx(3), end, summary
+    assert crlf_events[1]["type"] == "context"
+    assert crlf_events[1]["data"]["absolute_offset"] == 0
+    assert crlf_events[2]["type"] == "match"
+    assert crlf_events[2]["data"]["absolute_offset"] == 7
+    assert crlf_events[3]["type"] == "context"
+    assert crlf_events[3]["data"]["absolute_offset"] == 14
+
+    # Test 38: Context lines across 64KB chunk boundary
+    log("Test 38: Context lines across 64KB chunk buffer crossing")
+    chunk_ctx_file = repo_root / "tests" / "fixtures" / "chunk_context_test.txt"
+    with open(chunk_ctx_file, "w") as f:
+        # Write lines totaling > 128KB (spanning across multiple 64KB chunks)
+        for i in range(1, 2000):
+            if i == 1000:
+                f.write(f"LINE_{i}_CHUNK_TARGET_MATCH\n")
+            else:
+                f.write(f"LINE_{i}_CHUNK_PADDING_{'A'*100}\n")
+    try:
+        r_chunk_ctx = run_cmd([trg, "-n", "-C", "2", "CHUNK_TARGET_MATCH", str(chunk_ctx_file)])
+        assert r_chunk_ctx.returncode == 0
+        chk_lines = [l.strip() for l in r_chunk_ctx.stdout.strip().split("\n") if l.strip()]
+        assert len(chk_lines) == 5
+        assert "998-LINE_998_CHUNK_PADDING" in chk_lines[0]
+        assert "999-LINE_999_CHUNK_PADDING" in chk_lines[1]
+        assert "1000:LINE_1000_CHUNK_TARGET_MATCH" in chk_lines[2]
+        assert "1001-LINE_1001_CHUNK_PADDING" in chk_lines[3]
+        assert "1002-LINE_1002_CHUNK_PADDING" in chk_lines[4]
+    finally:
+        if chunk_ctx_file.exists():
+            chunk_ctx_file.unlink()
+
+    # Test 39: Context broken pipe handling
+    log("Test 39: Context streaming broken pipe handling (| head -n 2)")
+    p1 = subprocess.Popen([trg, "-n", "-C", "5", "pub fn", str(repo_root / "src")], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    p2 = subprocess.Popen(["head", "-n", "2"], stdin=p1.stdout, stdout=subprocess.PIPE)
+    p1.stdout.close()
+    head_ctx_out, _ = p2.communicate()
+    p1.wait()
+    assert p1.returncode == 0, f"Broken pipe failed: process exited with {p1.returncode} instead of 0"
+    assert len(head_ctx_out.strip()) > 0
+
     # Clean up fixture
     if ctx_fixture.exists():
         ctx_fixture.unlink()
 
     log("=" * 60)
-    log("ALL 35 RIGOROUS QUALIFICATION TESTS PASSED SUCCESSFULLY!")
+    log("ALL 39 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.2.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":
