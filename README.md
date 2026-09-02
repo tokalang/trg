@@ -31,7 +31,7 @@
   - `BeforeRing` cumulative memory is strictly bounded to `64 MiB` (exit code 2 on breach).
   - Single logical line memory is strictly bounded to `1MB` (lines >1MB rejected with exit code 2).
   - In `-l` and `-c` modes, effective context is zeroed out to maintain instant short-circuiting.
-- **Portable Symlink & Cycle Safety**: Uses standard POSIX `readlink` to detect and skip symbolic links across macOS, Linux x86_64, and Linux aarch64.
+- **Portable Symlink & Cycle Safety**: Uses standard POSIX `readlink` to detect and skip symbolic links across macOS and Linux.
 - **Streaming & 64KB Chunk Execution**: Incremental block reads via `libc_fread` without whole-file memory loading.
 - **Bounded `.gitignore` Evaluation (`trg-ignore-profile-v1`)**: Supports nested `.gitignore` stacks with directory subtree pruning and intra-directory negation.
 - **Order-Preserving Glob Filtering (`-g`)**: Order-preserving, last-match-wins glob inclusion and exclusion rules.
@@ -53,12 +53,14 @@
 ## Installation & Build
 
 ```bash
-# Build trg via Toka package manager
-toka check --json package.tk
+# 1. Fetch dependencies and generate package.lock (first time online)
+toka fetch
+
+# 2. Build trg via Toka package manager (supports TOKA_OFFLINE=1 once fetched)
 toka build
 
-# Or direct compilation with the Toka compiler
-tokac -I /path/to/toka/lib -I /path/to/trg -I /path/to/regex/lib src/main.tk -o target/trg
+# 3. Verify installation
+target/debug/trg --version
 ```
 
 ---
@@ -88,3 +90,9 @@ trg -n -C 2 "posix_stat" src
 # Output structured JSONL stream (trg-json-v2)
 trg --json -E -C 1 "fn\\s+[a-z_]+" src
 ```
+
+---
+
+## License
+
+Distributed under the [Apache License, Version 2.0](LICENSE).

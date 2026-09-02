@@ -1,0 +1,93 @@
+{
+  "schema": "toka.release-audit-v1",
+  "package": "trg",
+  "version": "0.3.1",
+  "timestamp": "2026-09-02T04:13:00Z",
+  "license": "Apache-2.0",
+  "license_file_verified": true,
+  "platform": {
+    "host_os": "Darwin",
+    "kernel": "25.5.0",
+    "arch": "arm64",
+    "qualification_scope": "Release-Qualified on macOS arm64 (macos-15) and Linux x64 (ubuntu-22.04); Linux arm64 pending"
+  },
+  "toolchain": {
+    "toka_version": "1.0.0-rc.11",
+    "compiler_version": "1.0.0-rc.11 (Built: Sep 1 2026 09:45:37)",
+    "target_spec": "1.0.0-rc.11",
+    "sdk_asset_sha256": {
+      "macos_arm64": "20e32db7246f75fb59bc452c411e59ab5df8b4ecbd3dbc4beb9b2d6e4532d07b",
+      "linux_x64": "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917",
+      "linux_arm64": "8e15ca5b2f56613fa71a88b179736e53dfa602f1fc6d773a64d94f36b84e52ef"
+    },
+    "clang_version": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
+  },
+  "supply_chain": {
+    "dependency": "official/regex",
+    "tag": "v0.3.0",
+    "tag_commit": "02114477c4cd1bdb1c9554f200fcc31bf79ab52f",
+    "tarball_url": "https://github.com/tokalang/regex/releases/download/v0.3.0/regex-0.3.0.tar.gz",
+    "archive_sha256": "cf365755da461ff9bb48df211aca8ddbcf2c630cc1caedd8395b5200a8d8beb9",
+    "tree_sha256": "c0a8b50305ae4e6e7ee82c1505ca314dd0bc98968d088d5e631dc39104db68a1",
+    "catalog_url": "https://pkg.tokalang.dev/catalog.json",
+    "catalog_status": "verified_active"
+  },
+  "gates": {
+    "license_compliance": {
+      "status": "PASS",
+      "license_type": "Apache-2.0",
+      "root_license_file": "PRESENT",
+      "archive_contains_license": true
+    },
+    "application_blackbox_verifier": {
+      "status": "PASS",
+      "verifier_script": "tests/verify_application_release.py",
+      "online_fetch_lock_generate": "PASS",
+      "application_build": "PASS",
+      "version_assertion": "trg 0.3.1 (Toka)",
+      "functional_sanity": "PASS",
+      "offline_replay_purged": "PASS"
+    },
+    "package_qualification": {
+      "status": "PASS",
+      "toolchain": "Toka 1.0.0-rc.11 official SDK",
+      "toka_doctor": "PASS",
+      "toka_check": "PASS",
+      "toka_build": "PASS",
+      "qualify_suite_tests_passed": 49,
+      "qualify_suite_total": 49
+    },
+    "differential_prefilter": {
+      "status": "PASS",
+      "matrix_dimensions": "16 patterns x 18 flag sets x 3 target corpora",
+      "total_configurations_tested": 864,
+      "stdout_parity": "100%",
+      "stderr_parity": "100%",
+      "returncode_parity": "100%",
+      "json_framing_parity": "100%"
+    },
+    "safety_and_resource_limits": {
+      "status": "PASS",
+      "line_limit_1mb": "PASS",
+      "beforering_64mb": "PASS",
+      "pattern_limit_4096": "PASS",
+      "group_depth_128": "PASS",
+      "non_backtracking_linear_nfa": "PASS",
+      "readlink_symlink_safety": "PASS",
+      "broken_pipe_sigpipe": "PASS"
+    }
+  },
+  "defects": {
+    "p0_count": 0,
+    "p1_count": 0,
+    "p2_count": 1,
+    "p2_items": [
+      {
+        "id": "TRG-P2-01",
+        "description": "Human and count output modes evaluate full MatchRange vector instead of short-circuit boolean is_match.",
+        "impact": "No correctness impact. Opportunity for short-circuit optimization in Phase 2."
+      }
+    ]
+  },
+  "audit_decision": "GO_FOR_V0_3_1_RELEASE"
+}

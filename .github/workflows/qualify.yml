@@ -69,3 +69,8 @@ jobs:
 
       - name: Run qualification suite
         run: python3 tests/qualify.py
+
+      - name: Verify application package release archive
+        run: |
+          toka publish
+          python3 tests/verify_application_release.py --archive trg-0.3.1.tar.gz
