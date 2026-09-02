@@ -143,8 +143,8 @@ fn process_logical_line(
         ring_clear(state.ring#)
 
         // Emit match event
-        if opts.json_mode {
-            auto submatches# = Vec<SubMatch>::new()
+        auto submatches# = Vec<SubMatch>::new()
+        if opts.json_mode || opts.only_matching {
             if !opts.invert_match {
                 auto s_idx# = 0:usize
                 loop s_idx < ranges.len() {
@@ -160,24 +160,21 @@ fn process_logical_line(
                     s_idx = s_idx + 1:usize
                 }
             }
-            auto ev = MatchEvent(
-                path = string::from(target_path),
-                line_text = line.text.clone(),
-                line_number = line.line_number,
-                absolute_offset = line.absolute_offset,
-                submatches = cede submatches
-            )
+        }
+
+        auto ev = MatchEvent(
+            path = string::from(target_path),
+            line_text = line.text.clone(),
+            line_number = line.line_number,
+            absolute_offset = line.absolute_offset,
+            submatches = cede submatches
+        )
+
+        if opts.json_mode {
             auto m_res = emit_json_match(ev)
             if m_res == 1 { return LineProcessOutcome::BrokenPipe }
             if m_res == 2 { return LineProcessOutcome::FatalError }
         } else {
-            auto ev = MatchEvent(
-                path = string::from(target_path),
-                line_text = line.text.clone(),
-                line_number = line.line_number,
-                absolute_offset = line.absolute_offset,
-                submatches = Vec<SubMatch>::new()
-            )
             auto m_res = emit_human_match(ev, opts, multiple_files)
             if m_res == 1 { return LineProcessOutcome::BrokenPipe }
             if m_res == 2 { return LineProcessOutcome::FatalError }
@@ -260,7 +257,7 @@ fn scan_and_process_line(
     auto ranges# = Vec<MatchRange>::new()
 
     if !max_count_reached {
-        if opts.json_mode {
+        if opts.json_mode || opts.only_matching {
             auto decision = plan.find_matches(line_text)
             if !opts.invert_match {
                 line_matches = decision.matched
@@ -284,6 +281,10 @@ fn scan_and_process_line(
                 max_count_reached = true
             }
 
+            if opts.quiet {
+                return LineProcessOutcome::Continue
+            }
+
             if opts.files_with_matches {
                 auto w_res = write_line(target_path)
                 if w_res == 1 { return LineProcessOutcome::BrokenPipe }
@@ -293,7 +294,7 @@ fn scan_and_process_line(
         }
     }
 
-    if !opts.files_with_matches && !opts.count {
+    if !opts.files_with_matches && !opts.count && !opts.quiet {
         auto l_record = LogicalLine(
             text = string::from(line_text),
             line_number = line_num,
@@ -506,7 +507,7 @@ pub fn scan_file_stream(
                 line_num = line_num + 1
                 cursor = cursor + nl_pos + 1
 
-                if opts.files_with_matches && has_match {
+                if has_match && (opts.files_with_matches || opts.quiet) {
                     break
                 }
                 if max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0) {
@@ -514,7 +515,10 @@ pub fn scan_file_stream(
                 }
             }
 
-            if is_broken_pipe || had_error || (opts.files_with_matches && has_match) {
+            if is_broken_pipe || had_error {
+                break
+            }
+            if has_match && (opts.files_with_matches || opts.quiet) {
                 break
             }
             if max_count_reached && (opts.count || context_state.pending_after == 0) {
@@ -523,7 +527,7 @@ pub fn scan_file_stream(
         }
 
         // Transition 4: Process leftover final line at EOF
-        if !is_binary && !had_error && !is_broken_pipe && line_buf.len() > 0 && !(opts.files_with_matches && has_match) {
+        if !is_binary && !had_error && !is_broken_pipe && line_buf.len() > 0 && !(has_match && (opts.files_with_matches || opts.quiet)) {
             if !(max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0)) {
                 auto advance_len# = 0:usize
                 auto outcome# = LineProcessOutcome::Continue

@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.5.1 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.6.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.5.1 identity on both binaries
+    # Validate exact 0.6.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.5.1 (Toka)", f"Expected 'trg 0.5.1 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.6.0 (Toka)", f"Expected 'trg 0.6.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.5.1 (Toka)", f"Expected 'trg 0.5.1 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.6.0 (Toka)", f"Expected 'trg 0.6.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.5.1
-    log("Test 1: Help & Version flags (exact 0.5.1 release identity)")
+    # Test 1: Help & Version exact 0.6.0
+    log("Test 1: Help & Version flags (exact 0.6.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.5.1 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.6.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.5.1 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.6.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -670,7 +670,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.5.1" in r_re_ctx.stdout
+    assert "trg 0.6.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1188,9 +1188,180 @@ def main():
         if boundary_fixture.exists():
             boundary_fixture.unlink()
 
+    # Test 66: -q / --quiet mode existence probe & match-beats-error precedence
+    log("Test 66: -q / --quiet mode existence probe & match-beats-error precedence")
+    q_fixture = fixtures_dir / "test_quiet_probe.txt"
+    try:
+        q_fixture.write_text("alpha beta gamma\n", encoding="utf-8")
+        # Match found: returns 0, stdout empty
+        r_q_hit = run_cmd([trg, "-q", "beta", str(q_fixture)])
+        assert r_q_hit.returncode == 0
+        assert r_q_hit.stdout == ""
+
+        # Match not found: returns 1, stdout empty
+        r_q_miss = run_cmd([trg, "-q", "delta", str(q_fixture)], check=False)
+        assert r_q_miss.returncode == 1
+        assert r_q_miss.stdout == ""
+
+        # ripgrep error precedence exception: match found alongside non-existent file -> returns 0
+        r_q_prec = run_cmd([trg, "-q", "beta", "non_existent_file_xyz.txt", str(q_fixture)], check=False)
+        assert r_q_prec.returncode == 0
+        assert r_q_prec.stdout == ""
+
+        # No match found alongside non-existent file -> returns 2 (error)
+        r_q_err = run_cmd([trg, "-q", "delta", "non_existent_file_xyz.txt", str(q_fixture)], check=False)
+        assert r_q_err.returncode == 2
+    finally:
+        if q_fixture.exists():
+            q_fixture.unlink()
+
+    # Test 67: -o / --only-matching submatch extraction (literal, regex, line number, multi-files)
+    log("Test 67: -o / --only-matching submatch extraction")
+    o_fixture1 = fixtures_dir / "test_only_matching_1.txt"
+    o_fixture2 = fixtures_dir / "test_only_matching_2.txt"
+    try:
+        o_fixture1.write_text("foo 123 bar 456 baz\nqux 789\n", encoding="utf-8")
+        o_fixture2.write_text("alpha 111 beta 222\n", encoding="utf-8")
+
+        # Regex submatch extraction with -n
+        r_o_regex = run_cmd([trg, "-o", "-n", "-E", "[0-9]+", str(o_fixture1)])
+        assert r_o_regex.returncode == 0
+        o_lines = [l for l in r_o_regex.stdout.strip().split("\n") if l]
+        assert o_lines == ["1:123", "1:456", "2:789"]
+
+        # Literal submatch extraction without line numbers (-N)
+        r_o_lit = run_cmd([trg, "-o", "-N", "foo", str(o_fixture1)])
+        assert r_o_lit.returncode == 0
+        assert r_o_lit.stdout.strip() == "foo"
+
+        # Literal submatch extraction with line numbers (-n)
+        r_o_lit_n = run_cmd([trg, "-o", "-n", "foo", str(o_fixture1)])
+        assert r_o_lit_n.returncode == 0
+        assert r_o_lit_n.stdout.strip() == "1:foo"
+
+        # Multi-file only-matching prefixes
+        r_o_multi = run_cmd([trg, "-o", "-n", "-E", "[0-9]+", str(o_fixture1), str(o_fixture2)])
+        assert r_o_multi.returncode == 0
+        m_lines = [l for l in r_o_multi.stdout.strip().split("\n") if l]
+        assert len(m_lines) == 5
+        assert any(str(o_fixture1) in l and "1:123" in l for l in m_lines)
+        assert any(str(o_fixture2) in l and "1:111" in l for l in m_lines)
+    finally:
+        if o_fixture1.exists():
+            o_fixture1.unlink()
+        if o_fixture2.exists():
+            o_fixture2.unlink()
+
+    # Test 68: Multi-pattern -e / --regexp literal and regex leftmost-first matching
+    log("Test 68: Multi-pattern -e / --regexp matching and leftmost-first ordering")
+    e_fixture = fixtures_dir / "test_multi_pattern.txt"
+    try:
+        e_fixture.write_text("the quick brown fox jumps over the lazy dog\npineapple apple banana\n", encoding="utf-8")
+
+        # Literal multi -e matching
+        r_e_lit = run_cmd([trg, "-e", "fox", "-e", "dog", str(e_fixture)])
+        assert r_e_lit.returncode == 0
+        assert "the quick brown fox" in r_e_lit.stdout
+
+        # Leftmost-first ordering with -o on overlapping patterns (-N suppresses line numbers)
+        r_e_leftmost = run_cmd([trg, "-o", "-N", "-e", "apple", "-e", "banana", "-e", "app", str(e_fixture)])
+        assert r_e_leftmost.returncode == 0
+        lm_lines = [l for l in r_e_leftmost.stdout.strip().split("\n") if l]
+        # "pineapple apple banana" -> matches "apple" in pineapple, "apple", "banana"
+        assert lm_lines == ["apple", "apple", "banana"]
+
+        # Regex multi -e matching (-N suppresses line numbers)
+        r_e_regex = run_cmd([trg, "-E", "-o", "-N", "-e", "quick|lazy", "-e", "fox|dog", str(e_fixture)])
+        assert r_e_regex.returncode == 0
+        re_lines = [l for l in r_e_regex.stdout.strip().split("\n") if l]
+        assert re_lines == ["quick", "fox", "lazy", "dog"]
+    finally:
+        if e_fixture.exists():
+            e_fixture.unlink()
+
+    # Test 69: Pattern file -f / --file loading with LF/CRLF and blank patterns
+    log("Test 69: Pattern file -f / --file loading (LF/CRLF/blank lines)")
+    pat_file = fixtures_dir / "test_patterns.txt"
+    target_file = fixtures_dir / "test_target_file.txt"
+    try:
+        pat_file.write_bytes(b"TargetAlpha\r\nTargetBeta\nTargetGamma\r\n")
+        target_file.write_text("line with TargetAlpha\nline with nothing\nline with TargetGamma\n", encoding="utf-8")
+
+        r_f = run_cmd([trg, "-f", str(pat_file), "-n", str(target_file)])
+        assert r_f.returncode == 0
+        f_lines = [l for l in r_f.stdout.strip().split("\n") if l]
+        assert len(f_lines) == 2
+        assert "1:line with TargetAlpha" in f_lines[0]
+        assert "3:line with TargetGamma" in f_lines[1]
+
+        # Missing pattern file returns 2
+        r_f_err = run_cmd([trg, "-f", "non_existent_pats.txt", str(target_file)], check=False)
+        assert r_f_err.returncode == 2
+        assert "Failed to open pattern file" in r_f_err.stderr
+    finally:
+        if pat_file.exists():
+            pat_file.unlink()
+        if target_file.exists():
+            target_file.unlink()
+
+    # Test 70: --sort path and --sortr path deterministic traversal & error on invalid sort
+    log("Test 70: --sort path and --sortr path deterministic traversal")
+    sort_dir = fixtures_dir / "test_sort_tree"
+    try:
+        sort_dir.mkdir(parents=True, exist_ok=True)
+        (sort_dir / "z_file.txt").write_text("COMMON_KEY\n", encoding="utf-8")
+        (sort_dir / "a_file.txt").write_text("COMMON_KEY\n", encoding="utf-8")
+        (sort_dir / "m_file.txt").write_text("COMMON_KEY\n", encoding="utf-8")
+
+        # Ascending sort: a, m, z
+        r_sort_asc = run_cmd([trg, "--sort", "path", "-l", "COMMON_KEY", str(sort_dir)])
+        assert r_sort_asc.returncode == 0
+        asc_files = [l for l in r_sort_asc.stdout.strip().split("\n") if l]
+        assert len(asc_files) == 3
+        assert "a_file.txt" in asc_files[0]
+        assert "m_file.txt" in asc_files[1]
+        assert "z_file.txt" in asc_files[2]
+
+        # Descending sort: z, m, a
+        r_sort_desc = run_cmd([trg, "--sortr", "path", "-l", "COMMON_KEY", str(sort_dir)])
+        assert r_sort_desc.returncode == 0
+        desc_files = [l for l in r_sort_desc.stdout.strip().split("\n") if l]
+        assert len(desc_files) == 3
+        assert "z_file.txt" in desc_files[0]
+        assert "m_file.txt" in desc_files[1]
+        assert "a_file.txt" in desc_files[2]
+
+        # Invalid sort type returns exit 2
+        r_sort_err = run_cmd([trg, "--sort", "invalid_type", "COMMON_KEY", str(sort_dir)], check=False)
+        assert r_sort_err.returncode == 2
+        assert "Unrecognized sort type" in r_sort_err.stderr
+    finally:
+        if sort_dir.exists():
+            shutil.rmtree(sort_dir)
+
+    # Test 71: Combination matrix (-q -o, -o -e, --sort path -e)
+    log("Test 71: Comprehensive combination matrix")
+    comb_dir = fixtures_dir / "test_comb_tree"
+    try:
+        comb_dir.mkdir(parents=True, exist_ok=True)
+        (comb_dir / "b.txt").write_text("banana 100\n", encoding="utf-8")
+        (comb_dir / "a.txt").write_text("apple 200\n", encoding="utf-8")
+
+        # --sort path + multi -e + -o + -n
+        r_comb = run_cmd([trg, "--sort", "path", "-o", "-n", "-e", "apple", "-e", "banana", str(comb_dir)])
+        assert r_comb.returncode == 0
+        comb_lines = [l for l in r_comb.stdout.strip().split("\n") if l]
+        assert len(comb_lines) == 2
+        assert "a.txt:1:apple" in comb_lines[0]
+        assert "b.txt:1:banana" in comb_lines[1]
+    finally:
+        if comb_dir.exists():
+            shutil.rmtree(comb_dir)
+
     log("=" * 60)
-    log("ALL 65 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.5.1)!")
+    log("ALL 71 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.6.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":
     main()
+

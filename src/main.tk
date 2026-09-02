@@ -117,6 +117,9 @@ fn main() -> i32 {
             if scan_res.has_match {
                 files_with_match = files_with_match + 1
                 total_matches = total_matches + scan_res.matches_count
+                if opts.quiet {
+                    return 0
+                }
             }
         }
 

@@ -2,7 +2,7 @@
 import core/types::{usize, Addr}
 import core/result::{Result}
 import std/vec::{Vec}
-import src/types::{CliOptions, GlobRule}
+import src/types::{CliOptions, GlobRule, SortMode}
 import src/posix::{posix_stat, posix_opendir, posix_readdir, posix_closedir, posix_get_errno}
 import src/ignore::{IgnoreStack}
 import src/glob::{is_glob_allowed}
@@ -27,6 +27,53 @@ pub shape WalkResult (
     files: Vec<string>,
     had_error: bool
 )
+
+fn str_compare(a: str, b: str) -> i32 {
+    auto min_len# = a.len
+    if b.len < a.len {
+        min_len = b.len
+    }
+    auto i# = 0:usize
+    loop i < min_len {
+        auto b_a = a.byte_at(i)
+        auto b_b = b.byte_at(i)
+        if b_a < b_b { return -1:i32 }
+        if b_a > b_b { return 1:i32 }
+        i = i + 1
+    }
+    if a.len < b.len { return -1:i32 }
+    if a.len > b.len { return 1:i32 }
+    return 0:i32
+}
+
+fn sort_paths(files#: Vec<string>, reverse: bool) {
+    auto n = files.len()
+    if n <= 1 { return }
+
+    auto i# = 1:usize
+    loop i < n {
+        auto key = files.borrow(i).clone()
+        auto j# = i
+        loop j > 0 {
+            auto should_move# = false
+            {
+                auto prev = files.borrow(j - 1:usize).as_str()
+                auto cmp = str_compare(prev, key.as_str())
+                if reverse {
+                    should_move = cmp < 0:i32
+                } else {
+                    should_move = cmp > 0:i32
+                }
+            }
+            if !should_move { break }
+            auto item_prev = files.borrow(j - 1:usize).clone()
+            files#.set(j, item_prev)
+            j = j - 1:usize
+        }
+        files#.set(j, key)
+        i = i + 1
+    }
+}
 
 fn build_child_path(parent: str, child: str) -> string {
     if parent == "." || parent == "" {
@@ -180,6 +227,16 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
         }
 
         i = i + 1
+    }
+
+    match opts.sort_mode {
+        auto SortMode::Path => {
+            sort_paths(files#, false)
+        }
+        auto SortMode::PathReverse => {
+            sort_paths(files#, true)
+        }
+        auto SortMode::None => {}
     }
 
     return WalkResult(

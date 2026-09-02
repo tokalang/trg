@@ -6,7 +6,7 @@ import official/regex::{Regex, RegexOptions, RegexAnalysis, CompiledRegex, Regex
 import src/types::{CliOptions, MatchRange, MatchDecision, CaseMode}
 
 pub shape LiteralMatcher (
-    needle: string,
+    needles: Vec<string>,
     ignore_case: bool,
     word_regexp: bool,
     line_regexp: bool
@@ -48,117 +48,180 @@ fn index_of_str_ascii_case(haystack: str, needle: str) -> Option<usize> {
 
 impl LiteralMatcher {
     pub fn is_match(self, line: str) -> bool {
-        auto needle = self.needle.as_str()
+        auto num_needles = self.needles.len()
+        if num_needles == 0 { return false }
 
-        if needle.len == 0 {
-            if self.line_regexp && line.len > 0 {
-                return false
-            }
-            return true
-        }
+        auto k# = 0:usize
+        loop k < num_needles {
+            auto &needle_str = self.needles.borrow(k)
+            auto needle = needle_str.as_str()
 
-        // Fast path: no word boundary and no whole-line boundary
-        if !self.word_regexp && !self.line_regexp {
-            if self.ignore_case {
-                return index_of_str_ascii_case(line, needle).is_some()
-            } else {
-                return line.index_of_str(needle).is_some()
-            }
-        }
-
-        // Boundary-aware search loop
-        auto offset# = 0:usize
-        loop offset <= line.len {
-            if offset + needle.len > line.len { break }
-            auto rem = line.substr(offset, line.len - offset)
-            auto found_opt# = Option<usize>::None
-            if self.ignore_case {
-                found_opt = index_of_str_ascii_case(rem, needle)
-            } else {
-                found_opt = rem.index_of_str(needle)
-            }
-
-            if found_opt.is_none() { break }
-            auto match_idx = found_opt.unwrap()
-            auto start = offset + match_idx
-            auto end = start + needle.len
-
-            auto valid# = true
-            if self.word_regexp {
-                auto prev_is_word = start > 0 && is_ascii_word_byte(line.byte_at(start - 1:usize) as u8)
-                auto next_is_word = end < line.len && is_ascii_word_byte(line.byte_at(end) as u8)
-                if prev_is_word || next_is_word {
-                    valid = false
+            if needle.len == 0 {
+                if !self.line_regexp || line.len == 0 {
+                    return true
                 }
+                k = k + 1
+                continue
             }
 
-            if self.line_regexp {
-                if start != 0 || end != line.len {
-                    valid = false
+            // Fast path: no word boundary and no whole-line boundary
+            if !self.word_regexp && !self.line_regexp {
+                auto hit# = false
+                if self.ignore_case {
+                    hit = index_of_str_ascii_case(line, needle).is_some()
+                } else {
+                    hit = line.index_of_str(needle).is_some()
                 }
+                if hit { return true }
+                k = k + 1
+                continue
             }
 
-            if valid {
-                return true
+            // Boundary-aware search loop
+            auto offset# = 0:usize
+            loop offset <= line.len {
+                if offset + needle.len > line.len { break }
+                auto rem = line.substr(offset, line.len - offset)
+                auto found_opt# = Option<usize>::None
+                if self.ignore_case {
+                    found_opt = index_of_str_ascii_case(rem, needle)
+                } else {
+                    found_opt = rem.index_of_str(needle)
+                }
+
+                if found_opt.is_none() { break }
+                auto match_idx = found_opt.unwrap()
+                auto start = offset + match_idx
+                auto end = start + needle.len
+
+                auto valid# = true
+                if self.word_regexp {
+                    auto prev_is_word = start > 0 && is_ascii_word_byte(line.byte_at(start - 1:usize) as u8)
+                    auto next_is_word = end < line.len && is_ascii_word_byte(line.byte_at(end) as u8)
+                    if prev_is_word || next_is_word {
+                        valid = false
+                    }
+                }
+
+                if self.line_regexp {
+                    if start != 0 || end != line.len {
+                        valid = false
+                    }
+                }
+
+                if valid {
+                    return true
+                }
+
+                offset = start + 1
+                if needle.len == 0 { break }
             }
 
-            offset = end
-            if needle.len == 0 { break }
+            k = k + 1
         }
 
         return false
     }
 
     pub fn evaluate(self, line: str) -> MatchDecision {
-        auto needle = self.needle.as_str()
         auto ranges# = Vec<MatchRange>::new()
+        auto num_needles = self.needles.len()
 
-        if needle.len == 0 {
-            // Empty pattern matches entire line at position 0
-            if self.line_regexp && line.len > 0 {
-                return MatchDecision(matched = false, ranges = cede ranges)
+        if num_needles == 0 {
+            return MatchDecision(matched = false, ranges = cede ranges)
+        }
+
+        if line.len == 0 {
+            auto i# = 0:usize
+            loop i < num_needles {
+                if self.needles.borrow(i).len() == 0 {
+                    ranges#.push(MatchRange(start = 0:usize, end = 0:usize))
+                    return MatchDecision(matched = true, ranges = cede ranges)
+                }
+                i = i + 1
             }
-            ranges#.push(MatchRange(start = 0:usize, end = 0:usize))
-            return MatchDecision(matched = true, ranges = cede ranges)
+            return MatchDecision(matched = false, ranges = cede ranges)
         }
 
         auto offset# = 0:usize
         loop offset <= line.len {
-            if offset + needle.len > line.len { break }
-            auto rem = line.substr(offset, line.len - offset)
-            auto found_opt# = Option<usize>::None
-            if self.ignore_case {
-                found_opt = index_of_str_ascii_case(rem, needle)
+            auto best_start# = line.len + 1:usize
+            auto best_len# = 0:usize
+            auto best_found# = false
+
+            auto k# = 0:usize
+            loop k < num_needles {
+                auto &needle_str = self.needles.borrow(k)
+                auto needle = needle_str.as_str()
+
+                if needle.len == 0 {
+                    if !self.line_regexp || line.len == 0 {
+                        if offset < best_start {
+                            best_start = offset
+                            best_len = 0:usize
+                            best_found = true
+                        }
+                    }
+                    k = k + 1
+                    continue
+                }
+
+                auto scan# = offset
+                loop scan + needle.len <= line.len {
+                    if scan >= best_start { break }
+                    auto rem = line.substr(scan, line.len - scan)
+                    auto found_opt# = Option<usize>::None
+                    if self.ignore_case {
+                        found_opt = index_of_str_ascii_case(rem, needle)
+                    } else {
+                        found_opt = rem.index_of_str(needle)
+                    }
+
+                    if found_opt.is_none() { break }
+                    auto match_idx = found_opt.unwrap()
+                    auto start = scan + match_idx
+                    auto end = start + needle.len
+
+                    if start >= best_start { break }
+
+                    auto valid# = true
+                    if self.word_regexp {
+                        auto prev_is_word = start > 0 && is_ascii_word_byte(line.byte_at(start - 1:usize) as u8)
+                        auto next_is_word = end < line.len && is_ascii_word_byte(line.byte_at(end) as u8)
+                        if prev_is_word || next_is_word {
+                            valid = false
+                        }
+                    }
+
+                    if self.line_regexp {
+                        if start != 0 || end != line.len {
+                            valid = false
+                        }
+                    }
+
+                    if valid {
+                        if start < best_start {
+                            best_start = start
+                            best_len = needle.len
+                            best_found = true
+                        }
+                        break
+                    }
+
+                    scan = start + 1
+                }
+
+                k = k + 1
+            }
+
+            if !best_found { break }
+
+            ranges#.push(MatchRange(start = best_start, end = best_start + best_len))
+            if best_len == 0 {
+                offset = best_start + 1
             } else {
-                found_opt = rem.index_of_str(needle)
+                offset = best_start + best_len
             }
-
-            if found_opt.is_none() { break }
-            auto match_idx = found_opt.unwrap()
-            auto start = offset + match_idx
-            auto end = start + needle.len
-
-            auto valid# = true
-            if self.word_regexp {
-                auto prev_is_word = start > 0 && is_ascii_word_byte(line.byte_at(start - 1:usize) as u8)
-                auto next_is_word = end < line.len && is_ascii_word_byte(line.byte_at(end) as u8)
-                if prev_is_word || next_is_word {
-                    valid = false
-                }
-            }
-
-            if self.line_regexp {
-                if start != 0 || end != line.len {
-                    valid = false
-                }
-            }
-
-            if valid {
-                ranges#.push(MatchRange(start = start, end = end))
-            }
-
-            offset = end
-            if needle.len == 0 { break }
         }
 
         auto is_match = ranges.len() > 0
@@ -287,22 +350,34 @@ fn has_regex_uppercase_literal(s: str) -> bool {
     return false
 }
 
-fn resolve_ignore_case(pat: str, mode: CaseMode, is_regex: bool) -> bool {
+fn resolve_multi_ignore_case(patterns: Vec<string>, mode: CaseMode, is_regex: bool) -> bool {
     match mode {
         auto CaseMode::Sensitive => { return false }
         auto CaseMode::Insensitive => { return true }
         auto CaseMode::Smart => {
-            if is_regex {
-                return !has_regex_uppercase_literal(pat)
+            auto i# = 0:usize
+            loop i < patterns.len() {
+                auto pat = patterns.borrow(i).as_str()
+                if is_regex {
+                    if has_regex_uppercase_literal(pat) {
+                        return false
+                    }
+                } else {
+                    if has_ascii_uppercase(pat) {
+                        return false
+                    }
+                }
+                i = i + 1
             }
-            return !has_ascii_uppercase(pat)
+            return true
         }
     }
 }
 
 impl SearchPlan {
     pub fn create(opts: CliOptions) -> Result<SearchPlan, string> {
-        auto eff_ignore_case = resolve_ignore_case(opts.pattern.as_str(), opts.case_mode, opts.regexp)
+        auto eff_ignore_case = resolve_multi_ignore_case(opts.patterns, opts.case_mode, opts.regexp)
+        auto num_pats = opts.patterns.len()
 
         if opts.regexp {
             auto regex_opts = RegexOptions(
@@ -310,7 +385,26 @@ impl SearchPlan {
                 word_regexp = opts.word_regexp,
                 line_regexp = opts.line_regexp
             )
-            auto compile_res = Regex::compile_with_options(opts.pattern.as_str(), regex_opts)
+
+            auto combined_regex_str# = string::new()
+            if num_pats == 0 {
+                combined_regex_str = string::from("")
+            } else if num_pats == 1 {
+                combined_regex_str = opts.patterns.borrow(0).clone()
+            } else {
+                auto p_idx# = 0:usize
+                loop p_idx < num_pats {
+                    if p_idx > 0 {
+                        combined_regex_str#.push_str("|")
+                    }
+                    combined_regex_str#.push_str("(")
+                    combined_regex_str#.push_str(opts.patterns.borrow(p_idx).as_str())
+                    combined_regex_str#.push_str(")")
+                    p_idx = p_idx + 1
+                }
+            }
+
+            auto compile_res = Regex::compile_with_options(combined_regex_str.as_str(), regex_opts)
             if compile_res.is_err() {
                 auto err = compile_res.unwrap_err()
                 auto err_msg# = string::from("regex parse error: ")
@@ -318,7 +412,10 @@ impl SearchPlan {
                 return Result<SearchPlan, string>::Err(cede err_msg)
             }
             auto compiled = compile_res.unwrap()
-            auto required = compiled.required_literal()
+            auto required# = Option<string>::None
+            if num_pats == 1 {
+                required = compiled.required_literal()
+            }
             return Result<SearchPlan, string>::Ok(SearchPlan::RegexPlan(RegexMatcher(
                 compiled = cede compiled,
                 required_literal = cede required,
@@ -327,7 +424,7 @@ impl SearchPlan {
         }
 
         return Result<SearchPlan, string>::Ok(SearchPlan::Literal(LiteralMatcher(
-            needle = opts.pattern.clone(),
+            needles = opts.patterns.clone(),
             ignore_case = eff_ignore_case,
             word_regexp = opts.word_regexp,
             line_regexp = opts.line_regexp

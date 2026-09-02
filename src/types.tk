@@ -8,6 +8,12 @@ pub shape CaseMode (
     Smart = 2
 )
 
+pub shape SortMode (
+    None = 0 |
+    Path = 1 |
+    PathReverse = 2
+)
+
 pub shape GlobRule (
     pattern: string,
     is_negation: bool,
@@ -15,7 +21,7 @@ pub shape GlobRule (
 )
 
 pub shape CliOptions (
-    pattern: string,
+    patterns: Vec<string>,
     paths: Vec<string>,
     fixed_strings: bool,
     regexp: bool,
@@ -25,8 +31,11 @@ pub shape CliOptions (
     line_number: bool,
     files_with_matches: bool,
     count: bool,
+    quiet: bool,
+    only_matching: bool,
     invert_match: bool,
     case_mode: CaseMode,
+    sort_mode: SortMode,
     no_ignore: bool,
     files_mode: bool,
     json_mode: bool,

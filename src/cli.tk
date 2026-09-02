@@ -1,28 +1,37 @@
 // Strict command-line argument parser for trg.
 import core/result::{Result}
 import core/str::{str}
+import core/types::{Addr, ADDR0}
+import sys/libc::{libc_fopen, libc_fread, libc_fclose, libc_malloc, libc_free}
 import std/vec::{Vec}
 import std/env as env
 import std/io::{println}
-import src/types::{CliOptions, GlobRule, CaseMode}
+import src/types::{CliOptions, GlobRule, CaseMode, SortMode}
 import src/glob::{parse_glob_rule}
 import src/file_types::{lookup_type_extensions}
 
 pub fn print_help() {
-    println("trg 0.5.1 - Fast, agent-friendly code search tool")
+    println("trg 0.6.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
+    println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
+    println("  trg -f <FILE>... [OPTIONS] [PATH...]")
     println("  trg -F [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -E [OPTIONS] <PATTERN> [PATH...]")
     println("  trg --files [OPTIONS] [PATH...]")
     println("  trg --type-list")
     println("")
     println("Options:")
+    println("  -e, --regexp <PATTERN>     Specify a pattern (can be used multiple times)")
+    println("  -f, --file <FILE>          Read patterns from FILE, one per line")
     println("  -F, --fixed-strings        Treat the pattern as a fixed literal string (default)")
     println("  -E, --regexp               Treat the pattern as a regular expression")
     println("  -w, --word-regexp          Only show matches surrounded by word boundaries")
     println("  -x, --line-regexp          Only show matches that match the full line")
     println("  -n, --line-number          Show line numbers (1-based)")
+    println("  -N, --no-line-number       Suppress line numbers")
+    println("  -o, --only-matching        Show only the matching part of lines")
+    println("  -q, --quiet                Do not print matches; exit 0 on first match, 1 otherwise")
     println("  -l, --files-with-matches   Only print the paths of matching files")
     println("  -c, --count                Only print the count of matching lines per file")
     println("  -v, --invert-match         Invert the match (select non-matching lines)")
@@ -31,6 +40,8 @@ pub fn print_help() {
     println("  -m, --max-count <NUM>      Stop reading a file after NUM matching lines")
     println("      --max-columns <NUM>    Omit matching lines longer than NUM bytes in human output")
     println("      --no-ignore            Do not respect .gitignore files")
+    println("      --sort <TYPE>          Sort search results by TYPE (path, none)")
+    println("      --sortr <TYPE>         Sort search results by TYPE in reverse order (path, none)")
     println("  -t, --type <TYPE>          Only search files matching TYPE (can be used multiple times)")
     println("  -T, --type-not <TYPE>      Do not search files matching TYPE (can be used multiple times)")
     println("      --type-list            Show all supported file types and exit")
@@ -46,7 +57,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.5.1 (Toka)")
+    println("trg 0.6.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
@@ -117,6 +128,85 @@ fn merge_extensions(cede target: Vec<string>, exts: Vec<string>) -> Vec<string> 
     return cede res
 }
 
+fn load_patterns_from_file(file_path: str) -> Result<Vec<string>, string> {
+    auto path_str = string::from(file_path)
+    auto mode_buf# = [0:char; 4]
+    mode_buf[0] = 'r' as char
+    mode_buf[1] = 'b' as char
+    mode_buf[2] = 0 as char
+
+    auto patterns# = Vec<string>::new()
+
+    unsafe {
+        auto *mode_ptr = &mode_buf[0] as *char
+        auto *path_c = path_str.c_str()
+        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
+        if *fp == null {
+            auto err# = string::from("Failed to open pattern file '")
+            err#.push_str(file_path)
+            err#.push_str("': No such file or directory or permission denied")
+            return Result<Vec<string>, string>::Err(cede err)
+        }
+        auto *file = fp.unwrap()
+        auto nul *raw_buf = libc_malloc(65536:usize)
+        if *raw_buf == null {
+            libc_fclose(*file)
+            return Result<Vec<string>, string>::Err(string::from("Out of memory reading pattern file"))
+        }
+        auto *buf = raw_buf.unwrap()
+        auto line_buf# = string::new()
+
+        loop true {
+            auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            if n == 0 { break }
+
+            auto *c_ptr = ((*buf) as Addr) as *char
+            auto chunk_str = string::from_with_len(*c_ptr, n)
+            auto chunk_view = chunk_str.as_str()
+            auto cursor# = 0:usize
+
+            loop cursor < chunk_view.len {
+                auto rem = chunk_view.substr(cursor, chunk_view.len - cursor)
+                auto nl_opt = rem.index_of('\n' as char)
+                if nl_opt.is_none() {
+                    line_buf#.push_str(rem)
+                    break
+                }
+                auto nl_pos = nl_opt.unwrap()
+                auto chunk_slice = rem.substr(0, nl_pos)
+                line_buf#.push_str(chunk_slice)
+                {
+                    auto full_view = line_buf.as_str()
+                    auto pat_text# = full_view
+                    if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                        pat_text = full_view.substr(0, full_view.len - 1)
+                    }
+                    patterns#.push(string::from(pat_text))
+                }
+                line_buf#.clear()
+                cursor = cursor + nl_pos + 1
+            }
+        }
+
+        if line_buf.len() > 0 {
+            {
+                auto full_view = line_buf.as_str()
+                auto pat_text# = full_view
+                if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                    pat_text = full_view.substr(0, full_view.len - 1)
+                }
+                patterns#.push(string::from(pat_text))
+            }
+            line_buf#.clear()
+        }
+
+        libc_free(*buf)
+        libc_fclose(*file)
+    }
+
+    return Result<Vec<string>, string>::Ok(cede patterns)
+}
+
 pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto args = env::args()
     auto num_args = args.len()
@@ -129,8 +219,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto line_number# = true
     auto files_with_matches# = false
     auto count# = false
+    auto quiet# = false
+    auto only_matching# = false
     auto invert_match# = false
     auto case_mode# = CaseMode::Sensitive
+    auto sort_mode# = SortMode::None
     auto no_ignore# = false
     auto max_count_enabled# = false
     auto max_count# = 0:usize
@@ -146,9 +239,10 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto include_type_exts# = Vec<string>::new()
     auto exclude_type_exts# = Vec<string>::new()
 
-    auto pattern# = string::from("")
+    auto patterns# = Vec<string>::new()
     auto paths# = Vec<string>::new()
-    auto pattern_set# = false
+    auto pattern_from_flags# = false
+    auto pattern_positional_set# = false
 
     auto i# = 1:usize
     loop i < num_args {
@@ -183,6 +277,125 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
+        if view == "-e" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -e requires a pattern argument"))
+            }
+            i = i + 1
+            patterns#.push(args.borrow(i).clone())
+            pattern_from_flags = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-e=") {
+            auto p_str = view.substr(3:usize, view.len - 3:usize)
+            patterns#.push(string::from(p_str))
+            pattern_from_flags = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-e") && view.len > 2 {
+            auto p_str = view.substr(2:usize, view.len - 2:usize)
+            patterns#.push(string::from(p_str))
+            pattern_from_flags = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--regexp=") {
+            auto p_str = view.substr(9:usize, view.len - 9:usize)
+            patterns#.push(string::from(p_str))
+            pattern_from_flags = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-f" || view == "--file" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -f / --file requires a file argument"))
+            }
+            i = i + 1
+            auto &file_arg = args.borrow(i)
+            auto load_res = load_patterns_from_file(file_arg.as_str())
+            if load_res.is_err() {
+                return Result<CliOptions, string>::Err(load_res.unwrap_err())
+            }
+            auto loaded = load_res.unwrap()
+            auto l_idx# = 0:usize
+            loop l_idx < loaded.len() {
+                patterns#.push(loaded.borrow(l_idx).clone())
+                l_idx = l_idx + 1
+            }
+            pattern_from_flags = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-f=") {
+            auto f_path = view.substr(3:usize, view.len - 3:usize)
+            auto load_res = load_patterns_from_file(f_path)
+            if load_res.is_err() {
+                return Result<CliOptions, string>::Err(load_res.unwrap_err())
+            }
+            auto loaded = load_res.unwrap()
+            auto l_idx# = 0:usize
+            loop l_idx < loaded.len() {
+                patterns#.push(loaded.borrow(l_idx).clone())
+                l_idx = l_idx + 1
+            }
+            pattern_from_flags = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-f") && view.len > 2 {
+            auto f_path = view.substr(2:usize, view.len - 2:usize)
+            auto load_res = load_patterns_from_file(f_path)
+            if load_res.is_err() {
+                return Result<CliOptions, string>::Err(load_res.unwrap_err())
+            }
+            auto loaded = load_res.unwrap()
+            auto l_idx# = 0:usize
+            loop l_idx < loaded.len() {
+                patterns#.push(loaded.borrow(l_idx).clone())
+                l_idx = l_idx + 1
+            }
+            pattern_from_flags = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--file=") {
+            auto f_path = view.substr(7:usize, view.len - 7:usize)
+            auto load_res = load_patterns_from_file(f_path)
+            if load_res.is_err() {
+                return Result<CliOptions, string>::Err(load_res.unwrap_err())
+            }
+            auto loaded = load_res.unwrap()
+            auto l_idx# = 0:usize
+            loop l_idx < loaded.len() {
+                patterns#.push(loaded.borrow(l_idx).clone())
+                l_idx = l_idx + 1
+            }
+            pattern_from_flags = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-q" || view == "--quiet" {
+            quiet = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-o" || view == "--only-matching" {
+            only_matching = true
+            i = i + 1
+            continue
+        }
+
         if view == "-w" || view == "--word-regexp" {
             word_regexp = true
             i = i + 1
@@ -203,6 +416,12 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 
         if view == "-n" || view == "--line-number" {
             line_number = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-N" || view == "--no-line-number" {
+            line_number = false
             i = i + 1
             continue
         }
@@ -239,6 +458,80 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 
         if view == "--no-ignore" {
             no_ignore = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--sort" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag --sort requires a type argument (path, none)"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto val_str = val_arg.as_str()
+            if val_str == "path" {
+                sort_mode = SortMode::Path
+            } else if val_str == "none" {
+                sort_mode = SortMode::None
+            } else {
+                auto err# = string::from("Unrecognized sort type: '")
+                err#.push_str(val_str)
+                err#.push_str("'. Supported types: path, none")
+                return Result<CliOptions, string>::Err(cede err)
+            }
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--sort=") {
+            auto val_str = view.substr(7:usize, view.len - 7:usize)
+            if val_str == "path" {
+                sort_mode = SortMode::Path
+            } else if val_str == "none" {
+                sort_mode = SortMode::None
+            } else {
+                auto err# = string::from("Unrecognized sort type: '")
+                err#.push_str(val_str)
+                err#.push_str("'. Supported types: path, none")
+                return Result<CliOptions, string>::Err(cede err)
+            }
+            i = i + 1
+            continue
+        }
+
+        if view == "--sortr" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag --sortr requires a type argument (path, none)"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto val_str = val_arg.as_str()
+            if val_str == "path" {
+                sort_mode = SortMode::PathReverse
+            } else if val_str == "none" {
+                sort_mode = SortMode::None
+            } else {
+                auto err# = string::from("Unrecognized sort type: '")
+                err#.push_str(val_str)
+                err#.push_str("'. Supported types: path, none")
+                return Result<CliOptions, string>::Err(cede err)
+            }
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--sortr=") {
+            auto val_str = view.substr(8:usize, view.len - 8:usize)
+            if val_str == "path" {
+                sort_mode = SortMode::PathReverse
+            } else if val_str == "none" {
+                sort_mode = SortMode::None
+            } else {
+                auto err# = string::from("Unrecognized sort type: '")
+                err#.push_str(val_str)
+                err#.push_str("'. Supported types: path, none")
+                return Result<CliOptions, string>::Err(cede err)
+            }
             i = i + 1
             continue
         }
@@ -403,49 +696,54 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
-        // Long form context with equals: --after-context=N, --before-context=N, --context=N
-        if view.starts_with("--after-context=") {
-            auto val_str = view.substr(16:usize, view.len - 16:usize)
-            auto parse_res = parse_context_num(val_str)
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            after_context = parse_res.unwrap()
-            context_set_explicitly = true
-            i = i + 1
-            continue
-        }
-
-        if view.starts_with("--before-context=") {
-            auto val_str = view.substr(17:usize, view.len - 17:usize)
-            auto parse_res = parse_context_num(val_str)
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            before_context = parse_res.unwrap()
-            context_set_explicitly = true
-            i = i + 1
-            continue
-        }
-
-        if view.starts_with("--context=") {
-            auto val_str = view.substr(10:usize, view.len - 10:usize)
-            auto parse_res = parse_context_num(val_str)
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            auto n = parse_res.unwrap()
-            before_context = n
-            after_context = n
-            context_set_explicitly = true
-            i = i + 1
-            continue
-        }
-
-        // Context flags with space: -A <N>, -B <N>, -C <N>, --after-context <N>, etc.
+        // Context options
         if view == "-A" || view == "--after-context" {
             if i + 1 >= num_args {
-                return Result<CliOptions, string>::Err(string::from("Flag -A / --after-context requires a non-negative integer argument"))
+                return Result<CliOptions, string>::Err(string::from("Flag -A / --after-context requires an argument"))
             }
             i = i + 1
-            auto &val_arg = args.borrow(i)
-            auto parse_res = parse_context_num(val_arg.as_str())
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            after_context = parse_res.unwrap()
+            auto &num_arg = args.borrow(i)
+            auto num_res = parse_context_num(num_arg.as_str())
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            after_context = num_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--after-context=") {
+            auto num_str = view.substr(16:usize, view.len - 16:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            after_context = num_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-A=") {
+            auto num_str = view.substr(3:usize, view.len - 3:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            after_context = num_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-A") && view.len > 2 {
+            auto num_str = view.substr(2:usize, view.len - 2:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            after_context = num_res.unwrap()
             context_set_explicitly = true
             i = i + 1
             continue
@@ -453,13 +751,51 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 
         if view == "-B" || view == "--before-context" {
             if i + 1 >= num_args {
-                return Result<CliOptions, string>::Err(string::from("Flag -B / --before-context requires a non-negative integer argument"))
+                return Result<CliOptions, string>::Err(string::from("Flag -B / --before-context requires an argument"))
             }
             i = i + 1
-            auto &val_arg = args.borrow(i)
-            auto parse_res = parse_context_num(val_arg.as_str())
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            before_context = parse_res.unwrap()
+            auto &num_arg = args.borrow(i)
+            auto num_res = parse_context_num(num_arg.as_str())
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            before_context = num_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--before-context=") {
+            auto num_str = view.substr(17:usize, view.len - 17:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            before_context = num_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-B=") {
+            auto num_str = view.substr(3:usize, view.len - 3:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            before_context = num_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-B") && view.len > 2 {
+            auto num_str = view.substr(2:usize, view.len - 2:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            before_context = num_res.unwrap()
             context_set_explicitly = true
             i = i + 1
             continue
@@ -467,76 +803,104 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 
         if view == "-C" || view == "--context" {
             if i + 1 >= num_args {
-                return Result<CliOptions, string>::Err(string::from("Flag -C / --context requires a non-negative integer argument"))
+                return Result<CliOptions, string>::Err(string::from("Flag -C / --context requires an argument"))
             }
             i = i + 1
-            auto &val_arg = args.borrow(i)
-            auto parse_res = parse_context_num(val_arg.as_str())
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            auto n = parse_res.unwrap()
-            before_context = n
-            after_context = n
+            auto &num_arg = args.borrow(i)
+            auto num_res = parse_context_num(num_arg.as_str())
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            auto c_val = num_res.unwrap()
+            before_context = c_val
+            after_context = c_val
             context_set_explicitly = true
             i = i + 1
             continue
         }
 
-        // Attached short forms: -A2, -B3, -C4
-        if view.starts_with("-A") && view.len > 2 {
-            auto val_str = view.substr(2:usize, view.len - 2:usize)
-            auto parse_res = parse_context_num(val_str)
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            after_context = parse_res.unwrap()
+        if view.starts_with("--context=") {
+            auto num_str = view.substr(10:usize, view.len - 10:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            auto c_val = num_res.unwrap()
+            before_context = c_val
+            after_context = c_val
             context_set_explicitly = true
             i = i + 1
             continue
         }
 
-        if view.starts_with("-B") && view.len > 2 {
-            auto val_str = view.substr(2:usize, view.len - 2:usize)
-            auto parse_res = parse_context_num(val_str)
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            before_context = parse_res.unwrap()
+        if view.starts_with("-C=") {
+            auto num_str = view.substr(3:usize, view.len - 3:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            auto c_val = num_res.unwrap()
+            before_context = c_val
+            after_context = c_val
             context_set_explicitly = true
             i = i + 1
             continue
         }
 
         if view.starts_with("-C") && view.len > 2 {
-            auto val_str = view.substr(2:usize, view.len - 2:usize)
-            auto parse_res = parse_context_num(val_str)
-            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
-            auto n = parse_res.unwrap()
-            before_context = n
-            after_context = n
+            auto num_str = view.substr(2:usize, view.len - 2:usize)
+            auto num_res = parse_context_num(num_str)
+            if num_res.is_err() {
+                return Result<CliOptions, string>::Err(num_res.unwrap_err())
+            }
+            auto c_val = num_res.unwrap()
+            before_context = c_val
+            after_context = c_val
             context_set_explicitly = true
             i = i + 1
             continue
         }
 
+        // Glob options
         if view == "-g" || view == "--glob" {
             if i + 1 >= num_args {
                 return Result<CliOptions, string>::Err(string::from("Flag -g / --glob requires an argument"))
             }
             i = i + 1
-            auto &glob_arg = args.borrow(i)
-            auto rule = parse_glob_rule(glob_arg.clone())
-            globs#.push(cede rule)
+            auto &g_arg = args.borrow(i)
+            globs#.push(parse_glob_rule(g_arg.clone()))
             i = i + 1
             continue
         }
 
-        // Handle short flag clusters e.g. -nli, -Fnl, -iF, -Ew, -ix, -inS, -Si
+        if view.starts_with("--glob=") {
+            auto g_str = view.substr(7:usize, view.len - 7:usize)
+            globs#.push(parse_glob_rule(string::from(g_str)))
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-g") && view.len > 2 {
+            auto g_str = view.substr(2:usize, view.len - 2:usize)
+            globs#.push(parse_glob_rule(string::from(g_str)))
+            i = i + 1
+            continue
+        }
+
+        // Handle short flag clustering e.g. -nF, -iE, -lc, -q, -o
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
-            auto c_idx# = 1:usize
-            loop c_idx < view.len {
-                auto ch = view.byte_at(c_idx)
+            auto j# = 1:usize
+            loop j < view.len {
+                auto ch = view.byte_at(j)
                 if ch == ('F' as char) { fixed_strings = true }
                 else if ch == ('E' as char) { regexp = true }
                 else if ch == ('w' as char) { word_regexp = true }
                 else if ch == ('x' as char) { line_regexp = true }
                 else if ch == ('n' as char) { line_number = true }
+                else if ch == ('N' as char) { line_number = false }
+                else if ch == ('o' as char) { only_matching = true }
+                else if ch == ('q' as char) { quiet = true }
                 else if ch == ('l' as char) { files_with_matches = true }
                 else if ch == ('c' as char) { count = true }
                 else if ch == ('v' as char) { invert_match = true }
@@ -546,7 +910,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
                     is_flag_cluster = false
                     break
                 }
-                c_idx = c_idx + 1
+                j = j + 1
             }
 
             if is_flag_cluster {
@@ -563,9 +927,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         }
 
         // Positional argument
-        if !files_mode && !pattern_set {
-            pattern = arg_str.clone()
-            pattern_set = true
+        if pattern_from_flags {
+            paths#.push(arg_str.clone())
+        } else if !files_mode && !pattern_positional_set {
+            patterns#.push(arg_str.clone())
+            pattern_positional_set = true
         } else {
             paths#.push(arg_str.clone())
         }
@@ -575,7 +941,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 
     if type_list_only {
         return Result<CliOptions, string>::Ok(CliOptions(
-            pattern = string::from(""),
+            patterns = Vec<string>::new(),
             paths = Vec<string>::new(),
             fixed_strings = false,
             regexp = false,
@@ -585,8 +951,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             line_number = false,
             files_with_matches = false,
             count = false,
+            quiet = false,
+            only_matching = false,
             invert_match = false,
             case_mode = CaseMode::Sensitive,
+            sort_mode = SortMode::None,
             no_ignore = false,
             files_mode = false,
             json_mode = false,
@@ -603,7 +972,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         ))
     }
 
-    if !files_mode && !pattern_set {
+    if !files_mode && patterns.len() == 0 {
         return Result<CliOptions, string>::Err(string::from("Missing search pattern. Use 'trg -h' for usage."))
     }
 
@@ -622,8 +991,13 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         return Result<CliOptions, string>::Err(string::from("Flag --files cannot be combined with context options (-A, -B, -C)"))
     }
 
+    // Flag conflict validation: -o cannot be combined with --files or -c
+    if only_matching && (files_mode || count) {
+        return Result<CliOptions, string>::Err(string::from("Flag -o (--only-matching) cannot be combined with --files or -c (--count)"))
+    }
+
     // Effective context zeroing on -l and -c: ignore context lines, do not allocate ring or enforce context limits
-    if files_with_matches || count {
+    if files_with_matches || count || quiet {
         before_context = 0
         after_context = 0
     }
@@ -634,7 +1008,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     }
 
     return Result<CliOptions, string>::Ok(CliOptions(
-        pattern = cede pattern,
+        patterns = cede patterns,
         paths = cede paths,
         fixed_strings = fixed_strings,
         regexp = regexp,
@@ -644,8 +1018,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         line_number = line_number,
         files_with_matches = files_with_matches,
         count = count,
+        quiet = quiet,
+        only_matching = only_matching,
         invert_match = invert_match,
         case_mode = case_mode,
+        sort_mode = sort_mode,
         no_ignore = no_ignore,
         files_mode = files_mode,
         json_mode = json_mode,

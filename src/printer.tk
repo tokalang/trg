@@ -168,6 +168,31 @@ pub fn emit_json_end(path: str, matches_count: usize) -> i32 {
 }
 
 pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> i32 {
+    if opts.only_matching {
+        auto num_sub = ev.submatches.len()
+        auto s_idx# = 0:usize
+        loop s_idx < num_sub {
+            auto &sm = ev.submatches.borrow(s_idx)
+            auto out# = string::new()
+            if multiple_files && ev.path.len() > 0 {
+                out#.push_str(ev.path.as_str())
+                out#.push_str(":")
+            }
+
+            if opts.line_number {
+                auto lnum_str = u64_to_string(ev.line_number as u64)
+                out#.push_str(lnum_str.as_str())
+                out#.push_str(":")
+            }
+
+            out#.push_str(sm.match_text.as_str())
+            auto w_res = write_line(out.as_str())
+            if w_res != 0 { return w_res }
+            s_idx = s_idx + 1
+        }
+        return 0
+    }
+
     auto out# = string::new()
     if multiple_files && ev.path.len() > 0 {
         out#.push_str(ev.path.as_str())
@@ -189,6 +214,10 @@ pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) 
 }
 
 pub fn emit_human_context(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> i32 {
+    if opts.only_matching {
+        return 0
+    }
+
     auto out# = string::new()
     if multiple_files && ev.path.len() > 0 {
         out#.push_str(ev.path.as_str())
