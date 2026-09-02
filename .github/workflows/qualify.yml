@@ -58,6 +58,7 @@ jobs:
           "$sdk/bin/tokac" --version | grep -F '1.0.0-rc.11'
           echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
           echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_COMPILER=$sdk/bin/tokac" >> "$GITHUB_ENV"
           echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
           echo "PATH=$sdk/bin:$PATH" >> "$GITHUB_ENV"
 

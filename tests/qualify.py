@@ -8,15 +8,20 @@ import json
 def log(msg):
     print(f"[QUALIFY] {msg}", flush=True)
 
+import shutil
+
 def find_tokac(repo_root):
-    tokac_env = os.environ.get("TOKA_COMPILER")
+    tokac_env = os.environ.get("TOKA_COMPILER") or os.environ.get("TOKAC")
     if tokac_env and os.path.isfile(tokac_env):
         return tokac_env
-    workspace_root = repo_root.parent
+    which_tokac = shutil.which("tokac")
+    if which_tokac and os.path.isfile(which_tokac):
+        return which_tokac
     candidates = [
-        workspace_root / "toka" / "build" / "bin" / "tokac",
-        workspace_root / "toka" / "build-rc10-ecosystem" / "bin" / "tokac",
-        workspace_root / "toka" / "build-debug" / "bin" / "tokac",
+        pathlib.Path("/Users/zhyi/.toka-sdks/1.0.0-rc.11/bin/tokac"),
+        repo_root.parent / "toka" / "build" / "bin" / "tokac",
+        repo_root.parent / "toka" / "build-rc10-ecosystem" / "bin" / "tokac",
+        repo_root.parent / "toka" / "build-debug" / "bin" / "tokac",
     ]
     for c in candidates:
         if c.exists() and os.access(c, os.X_OK):
@@ -27,11 +32,14 @@ def find_toka_cli(repo_root):
     toka_env = os.environ.get("TOKA")
     if toka_env and os.path.isfile(toka_env):
         return toka_env
-    workspace_root = repo_root.parent
+    which_toka = shutil.which("toka")
+    if which_toka and os.path.isfile(which_toka):
+        return which_toka
     candidates = [
-        workspace_root / "toka" / "build" / "bin" / "toka",
-        workspace_root / "toka" / "build-rc10-ecosystem" / "bin" / "toka",
-        workspace_root / "toka" / "build-debug" / "bin" / "toka",
+        pathlib.Path("/Users/zhyi/.toka-sdks/1.0.0-rc.11/bin/toka"),
+        repo_root.parent / "toka" / "build" / "bin" / "toka",
+        repo_root.parent / "toka" / "build-rc10-ecosystem" / "bin" / "toka",
+        repo_root.parent / "toka" / "build-debug" / "bin" / "toka",
     ]
     for c in candidates:
         if c.exists() and os.access(c, os.X_OK):
@@ -42,6 +50,9 @@ def find_lib(repo_root):
     lib_env = os.environ.get("TOKA_LIB")
     if lib_env and os.path.isdir(lib_env):
         return lib_env
+    sdk_lib = pathlib.Path("/Users/zhyi/.toka-sdks/1.0.0-rc.11/lib")
+    if sdk_lib.exists():
+        return str(sdk_lib)
     workspace_root = repo_root.parent
     std_lib = workspace_root / "toka" / "lib"
     if std_lib.exists():
@@ -86,7 +97,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.2.0" in build_combined or "Finished" in build_combined, f"toka build did not report trg v0.2.0: {build_combined}"
+    assert "trg v0.3.0" in build_combined or "Finished" in build_combined, f"toka build did not report trg v0.3.0: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -96,11 +107,16 @@ def main():
     direct_bin_path = repo_root / "target" / "trg"
     direct_bin_path.parent.mkdir(parents=True, exist_ok=True)
     log("Step 1: Compiling direct tokac binary...")
+    regex_lib_candidates = [
+        repo_root / ".toka" / "packages" / "regex-0.3.0" / "lib",
+        repo_root.parent / "regex" / "lib",
+    ]
+    regex_inc = next((p for p in regex_lib_candidates if p.exists()), repo_root.parent / "regex" / "lib")
     compile_cmd = [
         tokac_bin,
         "-I", std_lib,
         "-I", str(repo_root),
-        "-I", str(repo_root.parent / "regex" / "lib"),
+        "-I", str(regex_inc),
         str(repo_root / "src" / "main.tk"),
         "-o", str(direct_bin_path)
     ]
