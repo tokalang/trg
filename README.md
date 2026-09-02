@@ -59,34 +59,63 @@
 
 ## Installation
 
-### 1. One-Line Install (Recommended, No Toka SDK Required)
+### 1. User-Local Install (Recommended, No Toka SDK Required)
 
-Install the standalone precompiled binary directly for macOS (Apple Silicon) and Linux (x86_64):
+Install the standalone precompiled binary into `~/.local/bin` without `sudo`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh | sh
 ```
 
-Custom installation directory:
+The installer downloads `SHA256SUMS` from the same GitHub Release, verifies the
+selected archive before extraction, and configures the appropriate zsh or bash
+startup files when `~/.local/bin` is not already configured. Open a new terminal
+after installation; restart GUI-launched applications such as Codex so they
+inherit the updated `PATH`.
+
+To use an explicit user-writable destination without changing shell profiles:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh | INSTALL_DIR="$HOME/.local/bin" bash
+curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh \
+  | sh -s -- --install-dir "$HOME/bin"
 ```
 
-### 2. Manual Precompiled Binary Download
+`INSTALL_DIR="$HOME/bin"` remains supported for compatibility.
+
+### 2. Explicit System-Wide Install
+
+Administrators may opt into `/usr/local/bin` installation:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh \
+  | sh -s -- --system
+```
+
+The installer itself runs as the current user. It downloads and verifies the
+archive before using `sudo`, and only uses `sudo` for the final directory creation
+and binary installation when `/usr/local/bin` is not writable. Do not run the
+entire installer as root or use `curl ... | sudo sh`.
+
+Run `sh install.sh --help` to see all options, including `--no-modify-path`.
+
+### 3. Manual Precompiled Binary Download
 
 You can also download standalone archives directly from [GitHub Releases](https://github.com/tokalang/trg/releases/latest):
 
 - **macOS (Apple Silicon / arm64)**:
   ```bash
-  curl -fsSL https://github.com/tokalang/trg/releases/download/v0.4.0/trg-v0.4.0-macos-arm64.tar.gz | tar -xz && sudo mv trg-v0.4.0-macos-arm64/trg /usr/local/bin/
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.4.0/trg-v0.4.0-macos-arm64.tar.gz
   ```
 
 - **Linux (x86_64)**:
   ```bash
-  curl -fsSL https://github.com/tokalang/trg/releases/download/v0.4.0/trg-v0.4.0-linux-x64.tar.gz | tar -xz && sudo mv trg-v0.4.0-linux-x64/trg /usr/local/bin/
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.4.0/trg-v0.4.0-linux-x64.tar.gz
   ```
 
-### 3. Build from Source (via Toka Package Manager)
+Download `SHA256SUMS` from the same release and verify the archive before
+extracting it. The automated installer above performs this check by default.
+
+### 4. Build from Source (via Toka Package Manager)
 
 ```bash
 # Fetch dependencies and build

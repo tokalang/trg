@@ -70,6 +70,9 @@ jobs:
       - name: Run qualification suite
         run: python3 tests/qualify.py
 
+      - name: Verify standalone installer behavior
+        run: python3 tests/verify_installer.py
+
       - name: Verify application package release archive
         run: |
           toka publish
