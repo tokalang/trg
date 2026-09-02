@@ -58,8 +58,8 @@ fn main() -> i32 {
 
     if opts.files_mode {
         if opts.quiet {
-            if global_had_error { return 2 }
             if num_files > 0 { return 0 }
+            if global_had_error { return 2 }
             return 1
         }
         auto res = print_files_list(files)

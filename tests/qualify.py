@@ -1233,6 +1233,11 @@ def main():
         r_q_files = run_cmd([trg, "-q", "--files", str(fixtures_dir)])
         assert r_q_files.returncode == 0
         assert r_q_files.stdout == ""
+
+        # -q --files error precedence: returns 0 if files found even if bad paths exist
+        r_q_files_prec = run_cmd([trg, "-q", "--files", "/non_existent_bad_path_xyz", str(fixtures_dir)], check=False)
+        assert r_q_files_prec.returncode == 0
+        assert r_q_files_prec.stdout == ""
     finally:
         if q_fixture.exists():
             q_fixture.unlink()
@@ -1444,7 +1449,15 @@ def main():
             r_rg_devnull = run_cmd([rg_bin, "-f", "/dev/null", str(comb_dir)], check=False)
             assert r_trg_devnull.returncode == r_rg_devnull.returncode
             assert r_trg_devnull.stdout == r_rg_devnull.stdout
-            log("1:1 differential parity with host rg PASSED!")
+
+            # Diff 4: -q --files error precedence parity (match beats error when files discovered)
+            r_trg_qf = run_cmd([trg, "-q", "--files", "/non_existent_missing_path_xyz", str(comb_dir)], check=False)
+            r_rg_qf = run_cmd([rg_bin, "-q", "--files", "/non_existent_missing_path_xyz", str(comb_dir)], check=False)
+            assert r_trg_qf.returncode == 0
+            assert r_trg_qf.returncode == r_rg_qf.returncode
+            assert r_trg_qf.stdout == ""
+            assert r_rg_qf.stdout == ""
+            log("Selected stdout and exit-code differential parity with host rg PASSED!")
     finally:
         if comb_dir.exists():
             shutil.rmtree(comb_dir)

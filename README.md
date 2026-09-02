@@ -5,12 +5,24 @@
 ## Features & Guarantees
 
 - **Literal Fast-Path Search (Default & `-F`)**: Clean fixed-string literal search path with zero regex overhead.
-- **Regular Expression Search (`-E`, `--regexp`)**:
+- **Pattern Specification (`-e`, `--regexp <PATTERN>`, `-f <FILE>`)**:
+  - `-e <PATTERN>` / `--regexp <PATTERN>`: Specify multiple search patterns combined as a union with leftmost-first ordering.
+  - `-f <FILE>` / `--file <FILE>`: Load patterns line by line from file, supporting LF, CRLF, and empty pattern lines.
+- **Regular Expression Search (`-E`, `--extended-regexp`, `--regex-mode`)**:
   - Non-backtracking RE2 subset matching via `official/regex@0.3.0` (Thompson NFA with bounded execution).
   - Supports concatenation, numbered grouping `(...)`, alternation `|`, quantifiers `*`, `+`, `?`, counted `{m,n}`, and character classes `[...]`.
   - Case-insensitive regex matching (`-E -i`).
   - Strict mutual exclusion: `-E` and `-F` cannot be combined (fails fast with exit code `2`).
   - Immediate fail-closed syntax error reporting with exit code `2`.
+- **Only-Matching Output (`-o`, `--only-matching`)**:
+  - Print only matched subparts line by line prefixed with file and line numbers when enabled.
+- **Quiet Probe Mode (`-q`, `--quiet`)**:
+  - Silence match printing and short-circuit immediately on first match with exit code 0.
+- **Deterministic File Sorting (`--sort`, `--sortr`)**:
+  - Sort search paths deterministically by path in ascending (`--sort path`) or descending (`--sortr path`) order via $O(N \log N)$ merge sort.
+- **Line Numbers & Suppression (`-n`, `-N`)**:
+  - `-n, --line-number`: Show 1-based line numbers.
+  - `-N, --no-line-number`: Suppress line numbers.
 - **Word Boundaries (`-w`, `--word-regexp`)**:
   - Only show matches surrounded by non-word boundaries (or start/end of line).
   - Consistent behavior across both literal and regex modes, supporting discrete words (`foo`) and punctuation (`-`).
@@ -183,8 +195,23 @@ trg --max-columns 120 "data" .
 # Search all files bypassing .gitignore (--no-ignore)
 trg --no-ignore "TARGET" .
 
-# List all supported file types
-trg --type-list
+# Search with multiple patterns (-e, --regexp)
+trg -e "SearchPlan" -e "LiteralMatcher" src
+
+# Read patterns from file (-f, --file)
+trg -f patterns.txt src
+
+# Extract only matching substrings (-o)
+trg -o -E "[0-9]+" file.txt
+
+# Quiet probe (exit 0 on match, exit 1 on no match)
+trg -q "TODO" src/ && echo "Found TODOs"
+
+# Deterministic lexicographical path sort (--sort path, --sortr path)
+trg --sort path -l "pub fn" src/
+
+# Suppress line numbers (-N)
+trg -N "pub fn" src/
 
 # Output structured JSONL stream (trg-json-v2)
 trg --json -E -C 1 "fn\\s+[a-z_]+" src
