@@ -27,7 +27,7 @@
   - Overlapping and contiguous context windows merge seamlessly with zero duplicate lines.
   - Non-contiguous match groups are separated by `--` in human mode.
 - **Boolean `is_match` Fast-Path**: Scalar modes (`-l`, `-c`, and terminal text output) avoid constructing the `MatchRange` dynamic vector and `SubMatch` strings with mathematical equivalence to `find_matches`.
-- **Full Logical Line Streaming**: Arbitrary-length logical lines are fully buffered and searched with zero false negatives and exact byte offsets across LF, CRLF, and no-EOL files.
+- **Chunked I/O & Logical Line Buffering**: Logical lines (subject to available memory) are fully buffered and searched with zero false negatives and exact byte offsets across LF, CRLF, and no-EOL files.
 - **Smart Case Search (`-S`, `--smart-case`)**:
   - Automatically case-insensitive when pattern is all-lowercase; case-sensitive when pattern contains ASCII uppercase characters.
   - Regex-escape aware: syntax tokens like `\S`, `\D`, `\W`, `\B` do not force case sensitivity.
@@ -41,7 +41,7 @@
   - `--max-columns=0`: Unlimited display width (default).
   - Preserves full un-truncated content and exact submatch offsets in `--json` streaming mode.
 - **Ignore Bypass (`--no-ignore`)**:
-  - `--no-ignore`: Search files ignored by `.gitignore` files, short-circuiting ignore stack loading for maximum traversal speed.
+  - `--no-ignore`: Search files ignored by `.gitignore` files, avoiding ignore-file loading and evaluation overhead.
   - Still respects hidden file rules (unless `--hidden` is passed), `-g` globs, `-t` file types, and symlink safety.
 - **File Type Filtering (`-t`, `-T`, `--type-list`)**:
   - `-t <TYPE>` / `--type <TYPE>`: Only search files matching TYPE (supports canonical names and aliases, e.g. `toka`, `python`/`py`, `rust`/`rs`, `c`, `cpp`, `js`, `ts`, `go`, `json`, `yaml`, `toml`, `markdown`, `sh`, `html`, `css`). Multiple `-t` arguments combine as a union.
