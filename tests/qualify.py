@@ -67,7 +67,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.2.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.3.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -108,25 +108,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.2.0 identity on both binaries
+    # Validate exact 0.3.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.2.0 (Toka)", f"Expected 'trg 0.2.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.3.0 (Toka)", f"Expected 'trg 0.3.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.2.0 (Toka)", f"Expected 'trg 0.2.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.3.0 (Toka)", f"Expected 'trg 0.3.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.2.0
-    log("Test 1: Help & Version flags (exact 0.2.0 release identity)")
+    # Test 1: Help & Version exact 0.3.0
+    log("Test 1: Help & Version flags (exact 0.3.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.2.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.3.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.2.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.3.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -595,9 +595,9 @@ def main():
     assert "pub fn print_help" in r_re_ci.stdout
 
     # Test 42: Word regexp -w (literal and regex)
-    log("Test 42: Word regexp -w (literal and regex)")
+    log("Test 42: Word regexp -w (literal and regex, including punctuation)")
     w_fixture = fixtures_dir / "test_word_boundary.txt"
-    w_fixture.write_text("a foo b\nfoobar\nbarfoo\nfoo\nbar\n", encoding="utf-8")
+    w_fixture.write_text("a foo b\nfoobar\nbarfoo\nfoo\nbar\n-\n.-.\na-b\n", encoding="utf-8")
     try:
         r_w_lit = run_cmd([trg, "-w", "foo", str(w_fixture)])
         assert r_w_lit.returncode == 0
@@ -615,6 +615,19 @@ def main():
         assert any("bar" in l for l in w_re_lines)
         assert not any("foobar" in l for l in w_re_lines)
         assert not any("barfoo" in l for l in w_re_lines)
+
+        # Punctuation word boundary parity check for '-'
+        p_lit_dash = subprocess.run([trg, "-w", "-", "-"], input="-\n", text=True, capture_output=True)
+        assert p_lit_dash.returncode == 0 and "1:-" in p_lit_dash.stdout
+
+        p_re_dash = subprocess.run([trg, "-E", "-w", "-", "-"], input="-\n", text=True, capture_output=True)
+        assert p_re_dash.returncode == 0 and "1:-" in p_re_dash.stdout
+
+        p_re_dot = subprocess.run([trg, "-E", "-w", "-", "-"], input=".-.\n", text=True, capture_output=True)
+        assert p_re_dot.returncode == 0 and "1:.-." in p_re_dot.stdout
+
+        p_re_rej = subprocess.run([trg, "-E", "-w", "-", "-"], input="a-b\n", text=True, capture_output=True)
+        assert p_re_rej.returncode == 1
     finally:
         if w_fixture.exists():
             w_fixture.unlink()
@@ -645,7 +658,7 @@ def main():
     r_re_ctx = run_cmd([trg, "-n", "-E", "-C", "1", "pub fn print_help\\(\\)", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
     assert "pub fn print_help()" in r_re_ctx.stdout
-    assert "trg 0.2.0" in r_re_ctx.stdout
+    assert "trg 0.3.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -682,8 +695,15 @@ def main():
     assert r_re_c.returncode == 0
     assert int(r_re_c.stdout.strip()) >= 2
 
-    # Test 49: Differential prefilter equivalence gate
-    log("Test 49: Differential prefilter equivalence gate (prefilter ON vs OFF 100% byte-for-byte identical)")
+    # Test 49: Comprehensive Differential Prefilter Equivalence Gate
+    log("Test 49: Comprehensive Differential Prefilter Equivalence Gate (100% byte-for-byte parity across all modes)")
+    diff_fixture = fixtures_dir / "test_diff_cases.txt"
+    diff_fixture.write_text(
+        "pub fn foo() {}\npub fn foobar() {}\nfn foox() {}\n\nLINE_BLANK_ABOVE\n(ab)(ab)\nababab\n"
+        "prefix-1234\nUPPER_CASE_LINE\n-\n.-.\na-b\nTRAILING_NO_EOL_LINE",
+        encoding="utf-8"
+    )
+
     test_patterns = [
         "fn\\s+[a-z_]+",
         "pub fn [A-Z]+",
@@ -691,35 +711,63 @@ def main():
         "a*",
         "foo|bar",
         "([a-z]+)-([0-9]+)",
+        "(foo|foobar)x",
+        ".*",
+        "^$",
+        "^|a",
+        "[a-z]+",
+        "(ab){0,3}",
+        "(ab){1,3}",
+        "-",
     ]
-    for pat in test_patterns:
-        # 1. Plain text search comparison
-        r_norm = run_cmd([trg, "-E", pat, str(repo_root / "src")], check=False)
-        r_nopf = run_cmd([trg, "-E", "--no-prefilter", pat, str(repo_root / "src")], check=False)
-        assert r_norm.stdout == r_nopf.stdout, f"Differential stdout mismatch for pattern {pat}"
-        assert r_norm.stderr == r_nopf.stderr, f"Differential stderr mismatch for pattern {pat}"
-        assert r_norm.returncode == r_nopf.returncode, f"Differential returncode mismatch for pattern {pat}"
 
-        # 2. JSON streaming comparison
-        r_json_norm = run_cmd([trg, "--json", "-E", pat, str(repo_root / "src")], check=False)
-        r_json_nopf = run_cmd([trg, "--json", "-E", "--no-prefilter", pat, str(repo_root / "src")], check=False)
-        assert r_json_norm.stdout == r_json_nopf.stdout, f"Differential JSON stdout mismatch for pattern {pat}"
-        assert r_json_norm.stderr == r_json_nopf.stderr, f"Differential JSON stderr mismatch for pattern {pat}"
-        assert r_json_norm.returncode == r_json_nopf.returncode, f"Differential JSON returncode mismatch for pattern {pat}"
+    flag_combinations = [
+        [],
+        ["-i"],
+        ["-w"],
+        ["-x"],
+        ["-v"],
+        ["-n", "-C", "2"],
+        ["--json"],
+        ["--json", "-i"],
+        ["--json", "-w"],
+        ["--json", "-x"],
+        ["--json", "-v"],
+        ["-n", "-C", "2", "-i"],
+        ["-n", "-C", "2", "-w"],
+        ["-n", "-C", "2", "-x"],
+    ]
 
-        # 3. Context lines comparison (-C 2)
-        r_ctx_norm = run_cmd([trg, "-n", "-C", "2", "-E", pat, str(repo_root / "src")], check=False)
-        r_ctx_nopf = run_cmd([trg, "-n", "-C", "2", "-E", "--no-prefilter", pat, str(repo_root / "src")], check=False)
-        assert r_ctx_norm.stdout == r_ctx_nopf.stdout, f"Differential context stdout mismatch for pattern {pat}"
-        assert r_ctx_norm.stderr == r_ctx_nopf.stderr, f"Differential context stderr mismatch for pattern {pat}"
-        assert r_ctx_norm.returncode == r_ctx_nopf.returncode, f"Differential context returncode mismatch for pattern {pat}"
+    try:
+        targets = [str(repo_root / "src"), str(diff_fixture)]
+        for tgt in targets:
+            for pat in test_patterns:
+                for extra_flags in flag_combinations:
+                    cmd_norm = [trg, "-E"] + extra_flags + [pat, tgt]
+                    cmd_nopf = [trg, "-E", "--no-prefilter"] + extra_flags + [pat, tgt]
 
-    # Clean up fixture
-    if ctx_fixture.exists():
-        ctx_fixture.unlink()
+                    r_norm = run_cmd(cmd_norm, check=False)
+                    r_nopf = run_cmd(cmd_nopf, check=False)
+
+                    assert r_norm.stdout == r_nopf.stdout, (
+                        f"Differential stdout mismatch for {cmd_norm} vs {cmd_nopf}\n"
+                        f"NORM:\n{r_norm.stdout}\nNOPF:\n{r_nopf.stdout}"
+                    )
+                    assert r_norm.stderr == r_nopf.stderr, (
+                        f"Differential stderr mismatch for {cmd_norm} vs {cmd_nopf}\n"
+                        f"NORM:\n{r_norm.stderr}\nNOPF:\n{r_nopf.stderr}"
+                    )
+                    assert r_norm.returncode == r_nopf.returncode, (
+                        f"Differential returncode mismatch ({r_norm.returncode} vs {r_nopf.returncode}) for {cmd_norm}"
+                    )
+    finally:
+        if diff_fixture.exists():
+            diff_fixture.unlink()
+        if ctx_fixture.exists():
+            ctx_fixture.unlink()
 
     log("=" * 60)
-    log("ALL 49 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
+    log("ALL 49 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.3.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

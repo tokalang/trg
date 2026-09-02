@@ -1,6 +1,6 @@
 pub const PACKAGE = (
     name = "trg",
-    version = "0.2.0",
+    version = "0.3.0",
     kind = "application",
     license = "Apache-2.0",
     compiler = "1.0.0-rc.11",
@@ -14,8 +14,8 @@ pub const PACKAGE = (
 
 pub const AI_CONTRACT = (
     schema = "toka-application-v1",
-    summary = "Fast, agent-friendly, symlink-safe code search tool in Toka with context lines and regex support.",
-    capabilities = ["literal fast-path search (-F)", "regex search (-E) with native word and line assertions", "context lines streaming (-A, -B, -C) with overlapping window merging and group separator", "bounded context memory (max 1000 lines, 64MB before-context limit)", "symlink and cycle safety via portable readlink", "incremental 64KB chunk-buffered streaming reads", "bounded line memory with explicit 1MB line length limit", "newline-delimited JSONL streaming schema (trg-json-v2)", "bounded gitignore profile with directory subtree pruning and intra-directory negation", "order-preserving last-match-wins glob filtering (-g)", "ripgrep-compliant error precedence (exit code 2 on any search error)", "graceful broken-pipe and SIGPIPE handling"],
+    summary = "Fast, agent-friendly, symlink-safe code search tool in Toka with context lines, regex search, and prefilter.",
+    capabilities = ["literal fast-path search (-F)", "regex search (-E) with native word and line assertions", "word boundary matching (-w)", "full line matching (-x)", "conservative required literal prefilter", "context lines streaming (-A, -B, -C) with overlapping window merging and group separator", "bounded context memory (max 1000 lines, 64MB before-context limit)", "symlink and cycle safety via portable readlink", "incremental 64KB chunk-buffered streaming reads", "bounded line memory with explicit 1MB line length limit", "newline-delimited JSONL streaming schema (trg-json-v2)", "bounded gitignore profile with directory subtree pruning and intra-directory negation", "order-preserving last-match-wins glob filtering (-g)", "ripgrep-compliant error precedence (exit code 2 on any search error)", "graceful broken-pipe and SIGPIPE handling"],
     non_goals = ["unbounded context line memory", "re-including descendant files within pruned directories", "multithreading in Phase 1"],
     safety = "POSIX readlink symlink loop prevention; fail-closed error propagation with exit code 2; SIGPIPE ignored to prevent unexpected pipeline crashes; 1MB max line limit and 64MB before-context limit to prevent unbounded memory allocation",
     qualification = "python3 tests/qualify.py"

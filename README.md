@@ -4,17 +4,31 @@
 
 ## Features & Guarantees
 
-- **Literal Fast-Path Search (`-F`)**: Clean fixed-string literal search path.
+- **Literal Fast-Path Search (Default & `-F`)**: Clean fixed-string literal search path with zero regex overhead.
+- **Regular Expression Search (`-E`, `--regexp`)**:
+  - Non-backtracking RE2 subset matching via `official/regex@0.3.0` (Thompson NFA with bounded execution).
+  - Supports concatenation, numbered grouping `(...)`, alternation `|`, quantifiers `*`, `+`, `?`, counted `{m,n}`, and character classes `[...]`.
+  - Case-insensitive regex matching (`-E -i`).
+  - Strict mutual exclusion: `-E` and `-F` cannot be combined (fails fast with exit code `2`).
+  - Immediate fail-closed syntax error reporting with exit code `2`.
+- **Word Boundaries (`-w`, `--word-regexp`)**:
+  - Only show matches surrounded by non-word boundaries (or start/end of line).
+  - Consistent behavior across both literal and regex modes, supporting discrete words (`foo`) and punctuation (`-`).
+- **Line Matching (`-x`, `--line-regexp`)**:
+  - Only match whole lines (anchored at both start and end).
+  - Preserves alternative branch selection in regex mode (e.g. `a|abc` on line `abc`).
+- **Conservative Required Literal Prefilter**:
+  - Automatically extracts required literals from regex patterns with zero false negatives (`can_match_empty == true` $\implies$ `required_literal == None`).
+  - Skips non-matching lines before NFA execution with 100% differential parity.
 - **Context Lines Streaming (`-A`, `-B`, `-C`)**:
   - `-A <NUM>` / `--after-context <NUM>`: Print NUM lines after each match.
   - `-B <NUM>` / `--before-context <NUM>`: Print NUM lines before each match.
   - `-C <NUM>` / `--context <NUM>`: Print NUM lines before and after each match.
   - Overlapping and contiguous context windows merge seamlessly with zero duplicate lines.
   - Non-contiguous match groups are separated by `--` in human mode.
-  - Matches occurring inside active after-context refresh the window.
 - **Bounded Context & Line Memory**:
   - Maximum context lines parameter is bounded to `1000`.
-  - `BeforeRing` cumulative memory is strictly bounded to `64 MiB` (pre-push fail-closed enforcement, exit code 2 on breach).
+  - `BeforeRing` cumulative memory is strictly bounded to `64 MiB` (exit code 2 on breach).
   - Single logical line memory is strictly bounded to `1MB` (lines >1MB rejected with exit code 2).
   - In `-l` and `-c` modes, effective context is zeroed out to maintain instant short-circuiting.
 - **Portable Symlink & Cycle Safety**: Uses standard POSIX `readlink` to detect and skip symbolic links across macOS, Linux x86_64, and Linux aarch64.
@@ -23,9 +37,9 @@
 - **Order-Preserving Glob Filtering (`-g`)**: Order-preserving, last-match-wins glob inclusion and exclusion rules.
 - **Standard Flag Precedence Matrix**: Full support for `--files`, `-n` (line numbers), `-l` (files with matches), `-c` (matching line counts), `-v` (invert match), and `-i` (ASCII case-insensitivity).
 - **Structured JSONL Output (`--json`, `trg-json-v2`)**:
-  - Starting in v0.2.0, `--json` exclusively streams `trg-json-v2` events (`begin`, `match`, `context`, `end`, `summary`).
+  - Streams `trg-json-v2` events (`begin`, `match`, `context`, `end`, `summary`).
   - `begin` carries `"schema": "trg-json-v2"`.
-  - Byte-accurate offsets on both LF and CRLF.
+  - Byte-accurate offsets on both LF and CRLF with submatch byte ranges.
   - Unbroken framing (`begin → context/match → end → summary`) even on empty, binary, or error files.
 - **Binary File Skip**: Automatically skips binary files containing null bytes in the initial probe.
 - **Strict Error-Precedence Exit Codes**:
@@ -44,7 +58,7 @@ toka check --json package.tk
 toka build
 
 # Or direct compilation with the Toka compiler
-tokac -I /path/to/toka/lib -I /path/to/trg src/main.tk -o target/trg
+tokac -I /path/to/toka/lib -I /path/to/trg -I /path/to/regex/lib src/main.tk -o target/trg
 ```
 
 ---
@@ -52,80 +66,25 @@ tokac -I /path/to/toka/lib -I /path/to/trg src/main.tk -o target/trg
 ## Usage Examples
 
 ```bash
-# Search for literal text with line numbers
+# Search for literal text with line numbers (default literal search)
 trg -n "pub fn" src/posix.tk
+
+# Search using regular expression (-E)
+trg -E "fn\\s+[a-z_]+" src
+
+# Case-insensitive regex search (-E -i)
+trg -E -i "pub\\s+fn\\s+[a-z]+" src
+
+# Word boundary search (-w) in literal and regex mode
+trg -w "foo" file.txt
+trg -E -w "foo|bar" file.txt
+
+# Whole-line search (-x)
+trg -E -x "a|abc" file.txt
 
 # Search with surrounding context lines (-C 2)
 trg -n -C 2 "posix_stat" src
 
-# Search with before-context (-B 3) or after-context (-A 2)
-trg -n -B 3 -A 2 "scan_file_stream" src/scanner.tk
-
-# Case-insensitive search
-trg -i "struct" src
-
-# Invert match (lines not containing pattern)
-trg -v "import" src/main.tk
-
-# List files with matches (-l)
-trg -l "posix_opendir" src
-
-# Count matching lines per file (-c)
-trg -c "pub fn" src/posix.tk
-
-# Filter by glob pattern (last match wins)
-trg -g '!*.tk' -g '*.tk' "Result" src
-
-# Search from standard input
-printf "hello needle\n" | trg needle -
-
-# List all searchable files
-trg --files src
-
 # Output structured JSONL stream (trg-json-v2)
-trg --json -C 1 "posix_isatty" src/posix.tk
-```
-
----
-
-## JSONL Wire Schema (`trg-json-v2`)
-
-```json
-{"type":"begin","schema":"trg-json-v2","data":{"path":{"text":"src/posix.tk"}}}
-{"type":"context","data":{"path":{"text":"src/posix.tk"},"lines":{"text":"\n"},"line_number":57,"absolute_offset":1340,"submatches":[]}}
-{"type":"match","data":{"path":{"text":"src/posix.tk"},"lines":{"text":"pub fn posix_stat(path: string) -> Result<StatInfo, i32> {\n"},"line_number":58,"absolute_offset":1341,"submatches":[{"match":{"text":"posix_stat"},"start":7,"end":17}]}}
-{"type":"context","data":{"path":{"text":"src/posix.tk"},"lines":{"text":"    auto *cpath = path.c_str()\n"},"line_number":59,"absolute_offset":1400,"submatches":[]}}
-{"type":"end","data":{"path":{"text":"src/posix.tk"},"binary_offset":null,"stats":{"elapsed":{"secs":0,"nanos":0},"searches":1,"matches":1}}}
-{"type":"summary","data":{"elapsed_total":{"secs":0,"nanos":0},"stats":{"searches":1,"searches_with_match":1,"matches":1}}}
-```
-
----
-
-## Performance Benchmarks (macOS arm64, Apple Silicon)
-
-Benchmark measuring median execution times across 10 iterations comparing `trg v0.2.0` (single-threaded Toka) against `ripgrep 15.1.0` (`rg -j1` single-threaded, `rg` multi-threaded):
-
-| Benchmark Scenario | `trg` (v0.2.0) | `rg -j1` (1-Thread) | `rg` (Multi-Thread) | `trg / rg-1T` Slowdown |
-|:---|:---:|:---:|:---:|:---:|
-| **91.5 MB Streaming File: Literal** | **145.55 ms** (628 MB/s) | 11.44 ms | 11.28 ms | ~12.7x |
-| **91.5 MB Streaming File: Context `-C 3`** | **146.75 ms** (623 MB/s) | 11.43 ms | 11.45 ms | ~12.8x |
-| **91.5 MB Streaming File: Case-Insensitive `-i`** | **135.54 ms** (675 MB/s) | 18.03 ms | 17.63 ms | ~7.5x |
-| **`toka/lib`: Literal `"pub fn"`** | **10.75 ms** | 7.22 ms | 8.71 ms | **1.49x** |
-| **`toka/lib`: Context `"pub fn" -C 2`** | **15.32 ms** | 7.47 ms | 7.36 ms | **2.05x** |
-| **`toka/` (Whole Repo): Literal `"struct"`** | **318.82 ms** | 139.72 ms | 71.45 ms | **2.28x** |
-| **`toka/` (Whole Repo): Context `"struct" -C 2`** | **345.97 ms** | 144.26 ms | 71.56 ms | **2.40x** |
-| **`toka/` (Whole Repo): `--files` Directory Listing** | **65.79 ms** | 43.29 ms | 21.39 ms | **1.52x** |
-
-> **Key Observations**:
-> - Context line overhead is **near zero** (only +1.20 ms on a 91.5MB file for `-C 3`), confirming the effectiveness of the $O(1)$ circular `BeforeRing`.
-> - On medium and whole-codebase directory crawls, single-threaded `trg` performs within **1.49x ~ 2.4x** of single-threaded Rust `ripgrep`.
-
----
-
-## Qualification Test Suite
-
-Run the full automated qualification test suite:
-
-```bash
-python3 tests/qualify.py
+trg --json -E -C 1 "fn\\s+[a-z_]+" src
 ```
