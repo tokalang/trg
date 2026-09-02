@@ -10,12 +10,16 @@ import src/glob::{parse_glob_rule}
 pub fn print_help() {
     println("trg 0.2.0 - Fast, agent-friendly code search tool")
     println("Usage:")
-    println("  trg [OPTIONS] -F <PATTERN> [PATH...]")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
+    println("  trg -F [OPTIONS] <PATTERN> [PATH...]")
+    println("  trg -E [OPTIONS] <PATTERN> [PATH...]")
     println("  trg --files [OPTIONS] [PATH...]")
     println("")
     println("Options:")
-    println("  -F, --fixed-strings        Treat the pattern as a fixed literal string (default in Phase 0)")
+    println("  -F, --fixed-strings        Treat the pattern as a fixed literal string (default)")
+    println("  -E, --regexp               Treat the pattern as a regular expression")
+    println("  -w, --word-regexp          Only show matches surrounded by word boundaries")
+    println("  -x, --line-regexp          Only show matches that match the full line")
     println("  -n, --line-number          Show line numbers (1-based)")
     println("  -l, --files-with-matches   Only print the paths of matching files")
     println("  -c, --count                Only print the count of matching lines per file")
@@ -62,6 +66,10 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto num_args = args.len()
 
     auto fixed_strings# = false
+    auto regexp# = false
+    auto word_regexp# = false
+    auto line_regexp# = false
+    auto no_prefilter# = false
     auto line_number# = true
     auto files_with_matches# = false
     auto count# = false
@@ -96,6 +104,30 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 
         if view == "-F" || view == "--fixed-strings" {
             fixed_strings = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-E" || view == "--regexp" {
+            regexp = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-w" || view == "--word-regexp" {
+            word_regexp = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-x" || view == "--line-regexp" {
+            line_regexp = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--no-prefilter" {
+            no_prefilter = true
             i = i + 1
             continue
         }
@@ -271,13 +303,16 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
-        // Handle short flag clusters e.g. -nli, -Fnl, -iF (reject clusters containing digits or unknown characters)
+        // Handle short flag clusters e.g. -nli, -Fnl, -iF, -Ew, -ix (reject clusters containing digits or unknown characters)
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
             auto c_idx# = 1:usize
             loop c_idx < view.len {
                 auto ch = view.byte_at(c_idx)
                 if ch == ('F' as char) { fixed_strings = true }
+                else if ch == ('E' as char) { regexp = true }
+                else if ch == ('w' as char) { word_regexp = true }
+                else if ch == ('x' as char) { line_regexp = true }
                 else if ch == ('n' as char) { line_number = true }
                 else if ch == ('l' as char) { files_with_matches = true }
                 else if ch == ('c' as char) { count = true }
@@ -318,6 +353,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         return Result<CliOptions, string>::Err(string::from("Missing search pattern. Use 'trg -h' for usage."))
     }
 
+    // Mutual exclusion: -E and -F cannot be combined
+    if fixed_strings && regexp {
+        return Result<CliOptions, string>::Err(string::from("Flag -E (--regexp) cannot be combined with -F (--fixed-strings)"))
+    }
+
     // Flag conflict validation: --json cannot be combined with -l, -c, or --files
     if json_mode && (files_with_matches || count || files_mode) {
         return Result<CliOptions, string>::Err(string::from("Flag --json cannot be combined with -l (--files-with-matches), -c (--count), or --files"))
@@ -343,6 +383,10 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         pattern = cede pattern,
         paths = cede paths,
         fixed_strings = fixed_strings,
+        regexp = regexp,
+        word_regexp = word_regexp,
+        line_regexp = line_regexp,
+        no_prefilter = no_prefilter,
         line_number = line_number,
         files_with_matches = files_with_matches,
         count = count,

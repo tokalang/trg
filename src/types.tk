@@ -12,6 +12,10 @@ pub shape CliOptions (
     pattern: string,
     paths: Vec<string>,
     fixed_strings: bool,
+    regexp: bool,
+    word_regexp: bool,
+    line_regexp: bool,
+    no_prefilter: bool,
     line_number: bool,
     files_with_matches: bool,
     count: bool,
@@ -23,6 +27,16 @@ pub shape CliOptions (
     before_context: usize,
     after_context: usize,
     globs: Vec<GlobRule>
+)
+
+pub shape MatchRange (
+    start: usize,
+    end: usize
+)
+
+pub shape MatchDecision (
+    matched: bool,
+    ranges: Vec<MatchRange>
 )
 
 pub shape SubMatch (

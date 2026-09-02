@@ -4,7 +4,8 @@ import core/str::{str}
 import core/option::{Option}
 import std/vec::{Vec}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
-import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult}
+import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult, MatchRange, MatchDecision}
+import src/matcher::{SearchPlan}
 import src/posix::{posix_ferror}
 import src/printer::{
     emit_json_begin,
@@ -83,62 +84,13 @@ fn is_binary_chunk(content: str) -> bool {
     return false
 }
 
-fn index_of_str_ascii_case(haystack: str, needle: str) -> Option<usize> {
-    if needle.len == 0 { return Option<usize>::Some(0:usize) }
-    if needle.len > haystack.len { return Option<usize>::None }
-
-    auto max_i = haystack.len - needle.len
-    auto i# = 0:usize
-    loop i <= max_i {
-        auto sub = haystack.substr(i, needle.len)
-        if sub.eq_ignore_ascii_case(needle) {
-            return Option<usize>::Some(i)
-        }
-        i = i + 1
-    }
-    return Option<usize>::None
-}
-
-fn find_all_submatches(line: str, needle: str, ignore_case: bool) -> Vec<SubMatch> {
-    auto list# = Vec<SubMatch>::new()
-    if needle.len == 0 { return cede list }
-
-    auto offset# = 0:usize
-    loop offset < line.len {
-        auto rem = line.substr(offset, line.len - offset)
-        auto found_opt# = Option<usize>::None
-        if ignore_case {
-            found_opt = index_of_str_ascii_case(rem, needle)
-        } else {
-            found_opt = rem.index_of_str(needle)
-        }
-
-        if found_opt.is_none() { break }
-        auto match_idx = found_opt.unwrap()
-        auto start = offset + match_idx
-        auto end = start + needle.len
-
-        auto match_text = string::from(line.substr(start, needle.len))
-        auto sm = SubMatch(
-            match_text = cede match_text,
-            start = start,
-            end = end
-        )
-        list#.push(cede sm)
-
-        offset = end
-        if needle.len == 0 { break }
-    }
-    return cede list
-}
-
 fn process_logical_line(
     cede line: LogicalLine,
     line_matches: bool,
+    ranges: Vec<MatchRange>,
     opts: CliOptions,
     state#: ContextState,
     target_path: str,
-    needle: str,
     multiple_files: bool
 ) -> LineProcessOutcome {
     if line_matches {
@@ -193,8 +145,20 @@ fn process_logical_line(
         // Emit match event
         if opts.json_mode {
             auto submatches# = Vec<SubMatch>::new()
-            if needle.len > 0 {
-                submatches = find_all_submatches(line.text.as_str(), needle, opts.ignore_case)
+            if !opts.invert_match {
+                auto s_idx# = 0:usize
+                loop s_idx < ranges.len() {
+                    auto r = ranges.get(s_idx)
+                    if r.end >= r.start && r.end <= line.text.len() {
+                        auto match_text = string::from(line.text.as_str().substr(r.start, r.end - r.start))
+                        submatches#.push(SubMatch(
+                            match_text = cede match_text,
+                            start = r.start,
+                            end = r.end
+                        ))
+                    }
+                    s_idx = s_idx + 1:usize
+                }
             }
             auto ev = MatchEvent(
                 path = string::from(target_path),
@@ -281,6 +245,7 @@ fn process_logical_line(
 pub fn scan_file_stream(
     target_path: string,
     opts: CliOptions,
+    plan: SearchPlan,
     multiple_files: bool
 ) -> ScanResult {
     auto is_stdin = target_path.as_str() == "-"
@@ -344,7 +309,6 @@ pub fn scan_file_stream(
             }
         }
 
-        auto needle = opts.pattern.as_str()
         auto carry# = string::new()
         auto line_num# = 1:usize
         auto abs_offset# = 0:usize
@@ -422,20 +386,12 @@ pub fn scan_file_stream(
                     break
                 }
 
-                auto is_needle_found# = false
-                if needle.len == 0 {
-                    is_needle_found = true
-                } else if opts.ignore_case {
-                    is_needle_found = index_of_str_ascii_case(line_text, needle).is_some()
-                } else {
-                    is_needle_found = line_text.index_of_str(needle).is_some()
-                }
-
+                auto decision = plan.evaluate(line_text)
                 auto line_matches# = false
                 if !opts.invert_match {
-                    line_matches = is_needle_found
+                    line_matches = decision.matched
                 } else {
-                    line_matches = !is_needle_found
+                    line_matches = !decision.matched
                 }
 
                 if line_matches {
@@ -460,10 +416,10 @@ pub fn scan_file_stream(
                     auto outcome = process_logical_line(
                         cede l_record,
                         line_matches,
+                        decision.ranges,
                         opts,
                         context_state#,
                         target_path.as_str(),
-                        needle,
                         multiple_files
                     )
                     match outcome {
@@ -505,20 +461,12 @@ pub fn scan_file_stream(
                 log_scanner_err(target_path.as_str(), "Maximum logical line length exceeded (1MB limit)")
                 had_error = true
             } else {
-                auto is_needle_found# = false
-                if needle.len == 0 {
-                    is_needle_found = true
-                } else if opts.ignore_case {
-                    is_needle_found = index_of_str_ascii_case(line_text, needle).is_some()
-                } else {
-                    is_needle_found = line_text.index_of_str(needle).is_some()
-                }
-
+                auto decision = plan.evaluate(line_text)
                 auto line_matches# = false
                 if !opts.invert_match {
-                    line_matches = is_needle_found
+                    line_matches = decision.matched
                 } else {
-                    line_matches = !is_needle_found
+                    line_matches = !decision.matched
                 }
 
                 if line_matches {
@@ -542,10 +490,10 @@ pub fn scan_file_stream(
                     auto outcome = process_logical_line(
                         cede l_record,
                         line_matches,
+                        decision.ranges,
                         opts,
                         context_state#,
                         target_path.as_str(),
-                        needle,
                         multiple_files
                     )
                     match outcome {

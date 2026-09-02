@@ -1,0 +1,186 @@
+// SearchPlan, MatchDecision, and unified match evaluation for trg.
+import core/option::{Option}
+import core/result::{Result}
+import std/vec::{Vec}
+import official/regex::{Regex, RegexOptions, RegexAnalysis, CompiledRegex, RegexError}
+import src/types::{CliOptions, MatchRange, MatchDecision}
+
+pub shape LiteralMatcher (
+    needle: string,
+    ignore_case: bool,
+    word_regexp: bool,
+    line_regexp: bool
+)
+
+pub shape RegexMatcher (
+    compiled: CompiledRegex,
+    required_literal: Option<string>,
+    no_prefilter: bool
+)
+
+pub shape SearchPlan (
+    Literal(LiteralMatcher) = 0 |
+    RegexPlan(RegexMatcher) = 1
+)
+
+fn is_ascii_word_byte(b: u8) -> bool {
+    return (b >= 'a' as u8 && b <= 'z' as u8) ||
+           (b >= 'A' as u8 && b <= 'Z' as u8) ||
+           (b >= '0' as u8 && b <= '9' as u8) ||
+           (b == '_' as u8)
+}
+
+fn index_of_str_ascii_case(haystack: str, needle: str) -> Option<usize> {
+    if needle.len == 0 { return Option<usize>::Some(0:usize) }
+    if needle.len > haystack.len { return Option<usize>::None }
+
+    auto max_i = haystack.len - needle.len
+    auto i# = 0:usize
+    loop i <= max_i {
+        auto sub = haystack.substr(i, needle.len)
+        if sub.eq_ignore_ascii_case(needle) {
+            return Option<usize>::Some(i)
+        }
+        i = i + 1
+    }
+    return Option<usize>::None
+}
+
+impl LiteralMatcher {
+    pub fn evaluate(self, line: str) -> MatchDecision {
+        auto needle = self.needle.as_str()
+        auto ranges# = Vec<MatchRange>::new()
+
+        if needle.len == 0 {
+            // Empty pattern matches entire line at position 0
+            if self.line_regexp && line.len > 0 {
+                return MatchDecision(matched = false, ranges = cede ranges)
+            }
+            ranges#.push(MatchRange(start = 0:usize, end = 0:usize))
+            return MatchDecision(matched = true, ranges = cede ranges)
+        }
+
+        auto offset# = 0:usize
+        loop offset <= line.len {
+            if offset + needle.len > line.len { break }
+            auto rem = line.substr(offset, line.len - offset)
+            auto found_opt# = Option<usize>::None
+            if self.ignore_case {
+                found_opt = index_of_str_ascii_case(rem, needle)
+            } else {
+                found_opt = rem.index_of_str(needle)
+            }
+
+            if found_opt.is_none() { break }
+            auto match_idx = found_opt.unwrap()
+            auto start = offset + match_idx
+            auto end = start + needle.len
+
+            auto valid# = true
+            if self.word_regexp {
+                auto prev_is_word = start > 0 && is_ascii_word_byte(line.byte_at(start - 1:usize) as u8)
+                auto next_is_word = end < line.len && is_ascii_word_byte(line.byte_at(end) as u8)
+                if prev_is_word || next_is_word {
+                    valid = false
+                }
+            }
+
+            if self.line_regexp {
+                if start != 0 || end != line.len {
+                    valid = false
+                }
+            }
+
+            if valid {
+                ranges#.push(MatchRange(start = start, end = end))
+            }
+
+            offset = end
+            if needle.len == 0 { break }
+        }
+
+        auto is_match = ranges.len() > 0
+        return MatchDecision(matched = is_match, ranges = cede ranges)
+    }
+}
+
+impl RegexMatcher {
+    pub fn evaluate(self, line: str) -> MatchDecision {
+        // Line-level conservative Required Literal Prefilter
+        if !self.no_prefilter {
+            match self.required_literal {
+                auto Option<string>::Some(&req_lit) => {
+                    auto req_str = req_lit.as_str()
+                    if req_str.len > 0 {
+                        auto prefilter_hit# = false
+                        if self.compiled.options().ignore_ascii_case {
+                            prefilter_hit = index_of_str_ascii_case(line, req_str).is_some()
+                        } else {
+                            prefilter_hit = line.index_of_str(req_str).is_some()
+                        }
+                        if !prefilter_hit {
+                            return MatchDecision(matched = false, ranges = Vec<MatchRange>::new())
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        auto matches = self.compiled.find_all(line)
+        auto ranges# = Vec<MatchRange>::new()
+        auto i# = 0:usize
+        loop i < matches.len() {
+            auto m = matches.get(i)
+            ranges#.push(MatchRange(start = m.start_offset(), end = m.end_offset()))
+            i = i + 1:usize
+        }
+
+        auto is_match = ranges.len() > 0
+        return MatchDecision(matched = is_match, ranges = cede ranges)
+    }
+}
+
+impl SearchPlan {
+    pub fn create(opts: CliOptions) -> Result<SearchPlan, string> {
+        if opts.regexp {
+            auto regex_opts = RegexOptions(
+                ignore_ascii_case = opts.ignore_case,
+                word_regexp = opts.word_regexp,
+                line_regexp = opts.line_regexp
+            )
+            auto compile_res = Regex::compile_with_options(opts.pattern.as_str(), regex_opts)
+            if compile_res.is_err() {
+                auto err = compile_res.unwrap_err()
+                auto err_msg# = string::from("regex parse error: ")
+                err_msg#.push_str(err.message().as_str())
+                return Result<SearchPlan, string>::Err(cede err_msg)
+            }
+            auto compiled = compile_res.unwrap()
+            auto required = compiled.required_literal()
+            return Result<SearchPlan, string>::Ok(SearchPlan::RegexPlan(RegexMatcher(
+                compiled = cede compiled,
+                required_literal = cede required,
+                no_prefilter = opts.no_prefilter
+            )))
+        }
+
+        return Result<SearchPlan, string>::Ok(SearchPlan::Literal(LiteralMatcher(
+            needle = opts.pattern.clone(),
+            ignore_case = opts.ignore_case,
+            word_regexp = opts.word_regexp,
+            line_regexp = opts.line_regexp
+        )))
+    }
+
+    pub fn evaluate(self, line: str) -> MatchDecision {
+        match self {
+            auto SearchPlan::Literal(lit) => {
+                return lit.evaluate(line)
+            }
+            auto SearchPlan::RegexPlan(reg) => {
+                return reg.evaluate(line)
+            }
+        }
+    }
+}

@@ -4,6 +4,7 @@ import std/vec::{Vec}
 import src/types::{CliOptions, GlobalStats}
 import src/posix::{posix_init_signals}
 import src/cli::{parse_cli_args}
+import src/matcher::{SearchPlan}
 import src/walker::{collect_search_targets, WalkResult}
 import src/scanner::{scan_file_stream}
 import src/printer::{print_files_list, print_summary_json}
@@ -36,6 +37,12 @@ fn main() -> i32 {
 
     auto opts = cli_res.unwrap()
 
+    auto plan_res = SearchPlan::create(opts)
+    if !opts.files_mode && plan_res.is_err() {
+        print_err(plan_res.unwrap_err().as_str())
+        return 2
+    }
+
     auto walk_res = collect_search_targets(opts)
     auto global_had_error# = walk_res.had_error
     auto files = walk_res.files.clone()
@@ -55,6 +62,8 @@ fn main() -> i32 {
         }
         return 1
     }
+
+    auto plan = plan_res.unwrap()
 
     if num_files == 0 {
         if opts.json_mode {
@@ -85,7 +94,7 @@ fn main() -> i32 {
     auto i# = 0:usize
     loop i < num_files {
         auto &target_file = files.borrow(i)
-        auto scan_res = scan_file_stream(target_file.clone(), opts, multiple_files)
+        auto scan_res = scan_file_stream(target_file.clone(), opts, plan, multiple_files)
 
         if scan_res.had_error {
             global_had_error = true

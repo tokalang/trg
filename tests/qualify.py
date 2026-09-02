@@ -100,6 +100,7 @@ def main():
         tokac_bin,
         "-I", std_lib,
         "-I", str(repo_root),
+        "-I", str(repo_root.parent / "regex" / "lib"),
         str(repo_root / "src" / "main.tk"),
         "-o", str(direct_bin_path)
     ]
@@ -575,12 +576,150 @@ def main():
     assert p1.returncode == 0, f"Broken pipe failed: process exited with {p1.returncode} instead of 0"
     assert len(head_ctx_out.strip()) > 0
 
+    # Test 40: Regex search -E
+    log("Test 40: Regex search -E (grouping, alternation, quantifiers, classes)")
+    r_re1 = run_cmd([trg, "-E", "fn\\s+[a-z_]+", str(repo_root / "src" / "cli.tk")])
+    assert r_re1.returncode == 0
+    assert "fn print_help" in r_re1.stdout
+    assert "fn print_version" in r_re1.stdout
+
+    r_re_alt = run_cmd([trg, "-E", "print_help|print_version", str(repo_root / "src" / "cli.tk")])
+    assert r_re_alt.returncode == 0
+    assert "print_help" in r_re_alt.stdout
+    assert "print_version" in r_re_alt.stdout
+
+    # Test 41: Regex case-insensitive -E -i
+    log("Test 41: Regex case-insensitive -E -i")
+    r_re_ci = run_cmd([trg, "-E", "-i", "PUB\\s+FN\\s+PRINT_HELP", str(repo_root / "src" / "cli.tk")])
+    assert r_re_ci.returncode == 0
+    assert "pub fn print_help" in r_re_ci.stdout
+
+    # Test 42: Word regexp -w (literal and regex)
+    log("Test 42: Word regexp -w (literal and regex)")
+    w_fixture = fixtures_dir / "test_word_boundary.txt"
+    w_fixture.write_text("a foo b\nfoobar\nbarfoo\nfoo\nbar\n", encoding="utf-8")
+    try:
+        r_w_lit = run_cmd([trg, "-w", "foo", str(w_fixture)])
+        assert r_w_lit.returncode == 0
+        w_lines = r_w_lit.stdout.strip().split("\n")
+        assert any("a foo b" in l for l in w_lines)
+        assert any("foo" in l for l in w_lines)
+        assert not any("foobar" in l for l in w_lines)
+        assert not any("barfoo" in l for l in w_lines)
+
+        r_w_re = run_cmd([trg, "-E", "-w", "foo|bar", str(w_fixture)])
+        assert r_w_re.returncode == 0
+        w_re_lines = r_w_re.stdout.strip().split("\n")
+        assert any("a foo b" in l for l in w_re_lines)
+        assert any("foo" in l for l in w_re_lines)
+        assert any("bar" in l for l in w_re_lines)
+        assert not any("foobar" in l for l in w_re_lines)
+        assert not any("barfoo" in l for l in w_re_lines)
+    finally:
+        if w_fixture.exists():
+            w_fixture.unlink()
+
+    # Test 43: Line regexp -x (literal and regex)
+    log("Test 43: Line regexp -x (literal and regex)")
+    x_fixture = fixtures_dir / "test_line_boundary.txt"
+    x_fixture.write_text("abc\na\nxabcy\n", encoding="utf-8")
+    try:
+        r_x_lit = run_cmd([trg, "-x", "abc", str(x_fixture)])
+        assert r_x_lit.returncode == 0
+        assert "abc" in r_x_lit.stdout
+        assert "xabcy" not in r_x_lit.stdout
+
+        r_x_re = run_cmd([trg, "-E", "-x", "a|abc", str(x_fixture)])
+        assert r_x_re.returncode == 0
+        x_re_lines = [l for l in r_x_re.stdout.strip().split("\n") if l.strip()]
+        assert len(x_re_lines) == 2
+        assert any("abc" in l for l in x_re_lines)
+        assert any("a" in l for l in x_re_lines)
+        assert not any("xabcy" in l for l in x_re_lines)
+    finally:
+        if x_fixture.exists():
+            x_fixture.unlink()
+
+    # Test 44: Regex with context lines -E -C 2
+    log("Test 44: Regex with context lines -E -C 2")
+    r_re_ctx = run_cmd([trg, "-n", "-E", "-C", "1", "pub fn print_help\\(\\)", str(repo_root / "src" / "cli.tk")])
+    assert r_re_ctx.returncode == 0
+    assert "pub fn print_help()" in r_re_ctx.stdout
+    assert "trg 0.2.0" in r_re_ctx.stdout
+
+    # Test 45: Regex JSONL schema and submatch extraction
+    log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
+    r_re_json = run_cmd([trg, "--json", "-E", "fn\\s+[a-z_]+", str(repo_root / "src" / "cli.tk")])
+    assert r_re_json.returncode == 0
+    lines = [json.loads(line) for line in r_re_json.stdout.strip().split("\n") if line.strip()]
+    assert any(ev.get("type") == "begin" and ev.get("schema") == "trg-json-v2" for ev in lines)
+    match_events = [ev for ev in lines if ev.get("type") == "match"]
+    assert len(match_events) > 0
+    first_m = match_events[0]
+    assert len(first_m["data"]["submatches"]) > 0
+    first_sm = first_m["data"]["submatches"][0]
+    assert first_sm["match"]["text"].startswith("fn ")
+
+    # Test 46: Mutual exclusion of -E and -F
+    log("Test 46: Mutual exclusion of -E and -F (exit code 2)")
+    r_ef = run_cmd([trg, "-E", "-F", "foo", str(repo_root / "src")], check=False)
+    assert r_ef.returncode == 2
+    assert "cannot be combined" in r_ef.stderr
+
+    # Test 47: Regex pattern parse error propagation
+    log("Test 47: Regex pattern parse error propagation (exit code 2)")
+    r_err = run_cmd([trg, "-E", "([a-z", str(repo_root / "src")], check=False)
+    assert r_err.returncode == 2
+    assert "regex parse error" in r_err.stderr
+
+    # Test 48: Regex -E -v, -E -l, -E -c
+    log("Test 48: Regex -E with -v, -l, -c")
+    r_re_l = run_cmd([trg, "-E", "-l", "pub fn", str(repo_root / "src")])
+    assert r_re_l.returncode == 0
+    assert "src/cli.tk" in r_re_l.stdout
+
+    r_re_c = run_cmd([trg, "-E", "-c", "pub fn", str(repo_root / "src" / "cli.tk")])
+    assert r_re_c.returncode == 0
+    assert int(r_re_c.stdout.strip()) >= 2
+
+    # Test 49: Differential prefilter equivalence gate
+    log("Test 49: Differential prefilter equivalence gate (prefilter ON vs OFF 100% byte-for-byte identical)")
+    test_patterns = [
+        "fn\\s+[a-z_]+",
+        "pub fn [A-Z]+",
+        "foo(bar)?",
+        "a*",
+        "foo|bar",
+        "([a-z]+)-([0-9]+)",
+    ]
+    for pat in test_patterns:
+        # 1. Plain text search comparison
+        r_norm = run_cmd([trg, "-E", pat, str(repo_root / "src")], check=False)
+        r_nopf = run_cmd([trg, "-E", "--no-prefilter", pat, str(repo_root / "src")], check=False)
+        assert r_norm.stdout == r_nopf.stdout, f"Differential stdout mismatch for pattern {pat}"
+        assert r_norm.stderr == r_nopf.stderr, f"Differential stderr mismatch for pattern {pat}"
+        assert r_norm.returncode == r_nopf.returncode, f"Differential returncode mismatch for pattern {pat}"
+
+        # 2. JSON streaming comparison
+        r_json_norm = run_cmd([trg, "--json", "-E", pat, str(repo_root / "src")], check=False)
+        r_json_nopf = run_cmd([trg, "--json", "-E", "--no-prefilter", pat, str(repo_root / "src")], check=False)
+        assert r_json_norm.stdout == r_json_nopf.stdout, f"Differential JSON stdout mismatch for pattern {pat}"
+        assert r_json_norm.stderr == r_json_nopf.stderr, f"Differential JSON stderr mismatch for pattern {pat}"
+        assert r_json_norm.returncode == r_json_nopf.returncode, f"Differential JSON returncode mismatch for pattern {pat}"
+
+        # 3. Context lines comparison (-C 2)
+        r_ctx_norm = run_cmd([trg, "-n", "-C", "2", "-E", pat, str(repo_root / "src")], check=False)
+        r_ctx_nopf = run_cmd([trg, "-n", "-C", "2", "-E", "--no-prefilter", pat, str(repo_root / "src")], check=False)
+        assert r_ctx_norm.stdout == r_ctx_nopf.stdout, f"Differential context stdout mismatch for pattern {pat}"
+        assert r_ctx_norm.stderr == r_ctx_nopf.stderr, f"Differential context stderr mismatch for pattern {pat}"
+        assert r_ctx_norm.returncode == r_ctx_nopf.returncode, f"Differential context returncode mismatch for pattern {pat}"
+
     # Clean up fixture
     if ctx_fixture.exists():
         ctx_fixture.unlink()
 
     log("=" * 60)
-    log("ALL 39 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.2.0)!")
+    log("ALL 49 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
     log("=" * 60)
 
 if __name__ == "__main__":
