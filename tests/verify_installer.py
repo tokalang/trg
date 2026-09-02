@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
-VERSION = "v0.5.1"
+VERSION = "v0.6.0"
 
 
 def fail(message: str) -> None:
@@ -39,7 +39,7 @@ def make_release(release_dir: pathlib.Path) -> pathlib.Path:
     payload_root = release_dir / f"trg-{VERSION}-{target}"
     payload_root.mkdir(parents=True)
     binary = payload_root / "trg"
-    binary.write_text("#!/bin/sh\necho 'trg 0.5.1 (installer fixture)'\n", encoding="utf-8")
+    binary.write_text("#!/bin/sh\necho 'trg 0.6.0 (installer fixture)'\n", encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     archive = release_dir / archive_name
