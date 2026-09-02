@@ -101,6 +101,27 @@ trg --json -C 1 "posix_isatty" src/posix.tk
 
 ---
 
+## Performance Benchmarks (macOS arm64, Apple Silicon)
+
+Benchmark measuring median execution times across 10 iterations comparing `trg v0.2.0` (single-threaded Toka) against `ripgrep 15.1.0` (`rg -j1` single-threaded, `rg` multi-threaded):
+
+| Benchmark Scenario | `trg` (v0.2.0) | `rg -j1` (1-Thread) | `rg` (Multi-Thread) | `trg / rg-1T` Slowdown |
+|:---|:---:|:---:|:---:|:---:|
+| **91.5 MB Streaming File: Literal** | **145.55 ms** (628 MB/s) | 11.44 ms | 11.28 ms | ~12.7x |
+| **91.5 MB Streaming File: Context `-C 3`** | **146.75 ms** (623 MB/s) | 11.43 ms | 11.45 ms | ~12.8x |
+| **91.5 MB Streaming File: Case-Insensitive `-i`** | **135.54 ms** (675 MB/s) | 18.03 ms | 17.63 ms | ~7.5x |
+| **`toka/lib`: Literal `"pub fn"`** | **10.75 ms** | 7.22 ms | 8.71 ms | **1.49x** |
+| **`toka/lib`: Context `"pub fn" -C 2`** | **15.32 ms** | 7.47 ms | 7.36 ms | **2.05x** |
+| **`toka/` (Whole Repo): Literal `"struct"`** | **318.82 ms** | 139.72 ms | 71.45 ms | **2.28x** |
+| **`toka/` (Whole Repo): Context `"struct" -C 2`** | **345.97 ms** | 144.26 ms | 71.56 ms | **2.40x** |
+| **`toka/` (Whole Repo): `--files` Directory Listing** | **65.79 ms** | 43.29 ms | 21.39 ms | **1.52x** |
+
+> **Key Observations**:
+> - Context line overhead is **near zero** (only +1.20 ms on a 91.5MB file for `-C 3`), confirming the effectiveness of the $O(1)$ circular `BeforeRing`.
+> - On medium and whole-codebase directory crawls, single-threaded `trg` performs within **1.49x ~ 2.4x** of single-threaded Rust `ripgrep`.
+
+---
+
 ## Qualification Test Suite
 
 Run the full automated qualification test suite:
