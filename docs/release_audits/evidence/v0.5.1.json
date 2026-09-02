@@ -1,0 +1,38 @@
+{
+  "schema": "toka.trg-release-audit-v1",
+  "version": "0.5.1",
+  "release_tag": "v0.5.1",
+  "commit": "31face4",
+  "published_at": "2026-09-02T09:06:53Z",
+  "checksums": {
+    "trg-0.5.1.tar.gz": "12d0391ee3309ea2c2de7783c3a9f0eff718342fd3160c69b5f17889cefd8202",
+    "trg-v0.5.1-macos-arm64.tar.gz": "f8f01aefc7309cf05740e8952ba37e72ea2d33a2ea3f0df597c82e7d473a66a8",
+    "trg-v0.5.1-linux-x64.tar.gz": "30ec26cef637d07c06feebe6c310ae88e705da07d522610e6300eb798834f69d"
+  },
+  "benchmark_long_lines": {
+    "scaling_ratio_32_16": 1.94,
+    "scaling_ratio_16_4": 3.31,
+    "timings": {
+      "4MiB": 0.0163,
+      "16MiB": 0.0541,
+      "32MiB": 0.1051
+    },
+    "scaling_status": "STRICTLY_LINEAR"
+  },
+  "qualification": {
+    "total_tests": 65,
+    "status": "PASS",
+    "platforms": ["macos-arm64", "linux-x64"]
+  },
+  "registry": {
+    "name": "trg",
+    "version": "0.5.1",
+    "pr": 16,
+    "status": "MERGED"
+  },
+  "consumer_verification": {
+    "live_url_replay": "PASS",
+    "offline_replay": "PASS",
+    "version_verified": "trg 0.5.1 (Toka)"
+  }
+}
