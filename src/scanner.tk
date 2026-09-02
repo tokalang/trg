@@ -38,7 +38,7 @@ pub shape ContextState (
 fn make_context_state(before_cap: usize) -> ContextState {
     return ContextState(
         ring = BeforeRing(
-            lines = Vec<LogicalLine>::new(),
+            lines = Vec<LogicalLine>::with_capacity(before_cap),
             head = 0:usize,
             count = 0:usize,
             capacity = before_cap,
@@ -51,7 +51,7 @@ fn make_context_state(before_cap: usize) -> ContextState {
 }
 
 fn ring_clear(ring#: BeforeRing) {
-    ring.lines = Vec<LogicalLine>::new()
+    ring.lines#.clear()
     ring.head = 0:usize
     ring.count = 0:usize
     ring.bytes = 0:usize
