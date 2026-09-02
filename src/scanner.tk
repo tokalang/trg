@@ -242,6 +242,78 @@ fn process_logical_line(
     return LineProcessOutcome::Continue
 }
 
+fn scan_and_process_line(
+    plan: SearchPlan,
+    opts: CliOptions,
+    context_state#: ContextState,
+    target_path: str,
+    multiple_files: bool,
+    line_text: str,
+    line_num: usize,
+    abs_offset: usize,
+    delim_len: usize,
+    matches_count#: usize,
+    has_match#: bool,
+    max_count_reached#: bool
+) -> LineProcessOutcome {
+    auto line_matches# = false
+    auto ranges# = Vec<MatchRange>::new()
+
+    if !max_count_reached {
+        if opts.json_mode {
+            auto decision = plan.find_matches(line_text)
+            if !opts.invert_match {
+                line_matches = decision.matched
+            } else {
+                line_matches = !decision.matched
+            }
+            ranges = cede decision.ranges
+        } else {
+            auto matched = plan.is_match(line_text)
+            if !opts.invert_match {
+                line_matches = matched
+            } else {
+                line_matches = !matched
+            }
+        }
+
+        if line_matches {
+            has_match = true
+            matches_count = matches_count + 1
+            if opts.max_count_enabled && matches_count >= opts.max_count {
+                max_count_reached = true
+            }
+
+            if opts.files_with_matches {
+                auto w_res = write_line(target_path)
+                if w_res == 1 { return LineProcessOutcome::BrokenPipe }
+                if w_res == 2 { return LineProcessOutcome::FatalError }
+                return LineProcessOutcome::Continue
+            }
+        }
+    }
+
+    if !opts.files_with_matches && !opts.count {
+        auto l_record = LogicalLine(
+            text = string::from(line_text),
+            line_number = line_num,
+            absolute_offset = abs_offset,
+            delim_len = delim_len
+        )
+        return process_logical_line(
+            cede l_record,
+            line_matches,
+            ranges,
+            opts,
+            context_state#,
+            target_path,
+            multiple_files
+        )
+    }
+
+    return LineProcessOutcome::Continue
+}
+
 pub fn scan_file_stream(
     target_path: string,
     opts: CliOptions,
@@ -309,7 +381,7 @@ pub fn scan_file_stream(
             }
         }
 
-        auto carry# = string::new()
+        auto line_buf# = string::new()
         auto line_num# = 1:usize
         auto abs_offset# = 0:usize
         auto matches_count# = 0:usize
@@ -356,84 +428,67 @@ pub fn scan_file_stream(
                 }
             }
 
-            auto block# = string::new()
-            if carry.len() > 0 {
-                block#.push_str(carry.as_str())
-            }
-            block#.push_str(chunk_view)
-
-            auto block_view = block.as_str()
             auto cursor# = 0:usize
 
-            loop cursor < block_view.len {
-                auto rem = block_view.substr(cursor, block_view.len - cursor)
+            loop cursor < chunk_view.len {
+                auto rem = chunk_view.substr(cursor, chunk_view.len - cursor)
                 auto nl_opt = rem.index_of('\n' as char)
                 if nl_opt.is_none() {
-                    carry = string::from(rem)
+                    // Transition 3: No newline found in remaining chunk slice
+                    line_buf#.push_str(rem)
                     break
                 }
+
                 auto nl_pos = nl_opt.unwrap()
-                auto line_raw = rem.substr(0, nl_pos)
-                auto line_text# = line_raw
-                auto delim_len# = 1:usize
-                if line_raw.len > 0 && line_raw.byte_at(line_raw.len - 1) == ('\r' as char) {
-                    line_text = line_raw.substr(0, line_raw.len - 1)
-                    delim_len = 2:usize
-                }
+                auto chunk_slice = rem.substr(0, nl_pos)
+                auto had_line_buf = line_buf.len() > 0
+                auto advance_len# = 0:usize
 
-                auto line_matches# = false
-                auto ranges# = Vec<MatchRange>::new()
-
-                if !max_count_reached {
-                    if opts.json_mode {
-                        auto decision = plan.find_matches(line_text)
-                        if !opts.invert_match {
-                            line_matches = decision.matched
-                        } else {
-                            line_matches = !decision.matched
-                        }
-                        ranges = cede decision.ranges
-                    } else {
-                        auto matched = plan.is_match(line_text)
-                        if !opts.invert_match {
-                            line_matches = matched
-                        } else {
-                            line_matches = !matched
-                        }
+                if !had_line_buf {
+                    // Transition 1: In-chunk fast-path (zero extra copy)
+                    auto line_text# = chunk_slice
+                    auto delim_len# = 1:usize
+                    if chunk_slice.len > 0 && chunk_slice.byte_at(chunk_slice.len - 1) == ('\r' as char) {
+                        line_text = chunk_slice.substr(0, chunk_slice.len - 1)
+                        delim_len = 2:usize
                     }
-
-                    if line_matches {
-                        has_match = true
-                        matches_count = matches_count + 1
-                        if opts.max_count_enabled && matches_count >= opts.max_count {
-                            max_count_reached = true
+                    advance_len = line_text.len + delim_len
+                    auto outcome = scan_and_process_line(
+                        plan, opts, context_state#, target_path.as_str(), multiple_files,
+                        line_text, line_num, abs_offset, delim_len,
+                        matches_count#, has_match#, max_count_reached#
+                    )
+                    match outcome {
+                        LineProcessOutcome::Continue => {}
+                        LineProcessOutcome::BrokenPipe => {
+                            is_broken_pipe = true
+                            break
                         }
-
-                        if opts.files_with_matches {
-                            auto w_res = write_line(target_path.as_str())
-                            if w_res == 1 { is_broken_pipe = true }
-                            else if w_res == 2 { had_error = true }
+                        LineProcessOutcome::FatalError => {
+                            had_error = true
                             break
                         }
                     }
-                }
-
-                if !opts.files_with_matches && !opts.count {
-                    auto l_record = LogicalLine(
-                        text = string::from(line_text),
-                        line_number = line_num,
-                        absolute_offset = abs_offset,
-                        delim_len = delim_len
-                    )
-                    auto outcome = process_logical_line(
-                        cede l_record,
-                        line_matches,
-                        ranges,
-                        opts,
-                        context_state#,
-                        target_path.as_str(),
-                        multiple_files
-                    )
+                } else {
+                    // Transition 2: Line completion across chunk boundaries
+                    line_buf#.push_str(chunk_slice)
+                    auto outcome# = LineProcessOutcome::Continue
+                    {
+                        auto full_view = line_buf.as_str()
+                        auto line_text# = full_view
+                        auto delim_len# = 1:usize
+                        if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                            line_text = full_view.substr(0, full_view.len - 1)
+                            delim_len = 2:usize
+                        }
+                        advance_len = line_text.len + delim_len
+                        outcome = scan_and_process_line(
+                            plan, opts, context_state#, target_path.as_str(), multiple_files,
+                            line_text, line_num, abs_offset, delim_len,
+                            matches_count#, has_match#, max_count_reached#
+                        )
+                    }
+                    line_buf#.clear()
                     match outcome {
                         LineProcessOutcome::Continue => {}
                         LineProcessOutcome::BrokenPipe => {
@@ -447,96 +502,57 @@ pub fn scan_file_stream(
                     }
                 }
 
-                abs_offset = abs_offset + line_text.len + delim_len
+                abs_offset = abs_offset + advance_len
                 line_num = line_num + 1
                 cursor = cursor + nl_pos + 1
-                carry = string::new()
 
+                if opts.files_with_matches && has_match {
+                    break
+                }
                 if max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0) {
                     break
                 }
             }
 
-            if is_broken_pipe || had_error || (opts.files_with_matches && has_match) || (max_count_reached && (opts.count || context_state.pending_after == 0)) {
+            if is_broken_pipe || had_error || (opts.files_with_matches && has_match) {
+                break
+            }
+            if max_count_reached && (opts.count || context_state.pending_after == 0) {
                 break
             }
         }
 
-        // Process leftover final line at EOF
-        if !is_binary && !had_error && !is_broken_pipe && carry.len() > 0 && !(opts.files_with_matches && has_match) {
+        // Transition 4: Process leftover final line at EOF
+        if !is_binary && !had_error && !is_broken_pipe && line_buf.len() > 0 && !(opts.files_with_matches && has_match) {
             if !(max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0)) {
-                auto line_raw = carry.as_str()
-                auto line_text# = line_raw
-                auto delim_len# = 0:usize
-                if line_raw.len > 0 && line_raw.byte_at(line_raw.len - 1) == ('\r' as char) {
-                    line_text = line_raw.substr(0, line_raw.len - 1)
-                    delim_len = 1:usize
-                }
-
-                auto line_matches# = false
-                auto ranges# = Vec<MatchRange>::new()
-
-                if !max_count_reached {
-                    if opts.json_mode {
-                        auto decision = plan.find_matches(line_text)
-                        if !opts.invert_match {
-                            line_matches = decision.matched
-                        } else {
-                            line_matches = !decision.matched
-                        }
-                        ranges = cede decision.ranges
-                    } else {
-                        auto matched = plan.is_match(line_text)
-                        if !opts.invert_match {
-                            line_matches = matched
-                        } else {
-                            line_matches = !matched
-                        }
+                auto advance_len# = 0:usize
+                auto outcome# = LineProcessOutcome::Continue
+                {
+                    auto full_view = line_buf.as_str()
+                    auto line_text# = full_view
+                    auto delim_len# = 0:usize
+                    if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                        line_text = full_view.substr(0, full_view.len - 1)
+                        delim_len = 1:usize
                     }
-
-                    if line_matches {
-                        has_match = true
-                        matches_count = matches_count + 1
-                        if opts.max_count_enabled && matches_count >= opts.max_count {
-                            max_count_reached = true
-                        }
-
-                        if opts.files_with_matches {
-                            auto w_res = write_line(target_path.as_str())
-                            if w_res == 1 { is_broken_pipe = true }
-                            else if w_res == 2 { had_error = true }
-                        }
-                    }
-                }
-
-                if !opts.files_with_matches && !opts.count {
-                    auto l_record = LogicalLine(
-                        text = string::from(line_text),
-                        line_number = line_num,
-                        absolute_offset = abs_offset,
-                        delim_len = delim_len
+                    advance_len = line_text.len + delim_len
+                    outcome = scan_and_process_line(
+                        plan, opts, context_state#, target_path.as_str(), multiple_files,
+                        line_text, line_num, abs_offset, delim_len,
+                        matches_count#, has_match#, max_count_reached#
                     )
-                    auto outcome = process_logical_line(
-                        cede l_record,
-                        line_matches,
-                        ranges,
-                        opts,
-                        context_state#,
-                        target_path.as_str(),
-                        multiple_files
-                    )
-                    match outcome {
-                        LineProcessOutcome::Continue => {}
-                        LineProcessOutcome::BrokenPipe => {
-                            is_broken_pipe = true
-                        }
-                        LineProcessOutcome::FatalError => {
-                            had_error = true
-                        }
+                }
+                line_buf#.clear()
+                match outcome {
+                    LineProcessOutcome::Continue => {}
+                    LineProcessOutcome::BrokenPipe => {
+                        is_broken_pipe = true
+                    }
+                    LineProcessOutcome::FatalError => {
+                        had_error = true
                     }
                 }
-
-                abs_offset = abs_offset + line_text.len + delim_len
+                abs_offset = abs_offset + advance_len
                 line_num = line_num + 1
             }
         }

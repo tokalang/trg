@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.5.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.5.1 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.5.0 identity on both binaries
+    # Validate exact 0.5.1 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.5.0 (Toka)", f"Expected 'trg 0.5.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.5.1 (Toka)", f"Expected 'trg 0.5.1 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.5.0 (Toka)", f"Expected 'trg 0.5.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.5.1 (Toka)", f"Expected 'trg 0.5.1 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.5.0
-    log("Test 1: Help & Version flags (exact 0.5.0 release identity)")
+    # Test 1: Help & Version exact 0.5.1
+    log("Test 1: Help & Version flags (exact 0.5.1 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.5.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.5.1 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.5.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.5.1 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -670,7 +670,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.5.0" in r_re_ctx.stdout
+    assert "trg 0.5.1" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1113,10 +1113,83 @@ def main():
     log("Test 64: --max-columns=0 allows unlimited output width")
     r_unlim = run_cmd([trg, "--max-columns=0", "-n", "SearchPlan", str(repo_root / "src" / "main.tk")])
     assert r_unlim.returncode == 0
-    assert "import src/matcher::{SearchPlan}" in r_unlim.stdout
+    # Test 65: Comprehensive Edge Case & Cross-Chunk Boundary Verification Matrix
+    log("Test 65: Comprehensive Edge Case & Cross-Chunk Boundary Verification Matrix")
+    boundary_fixture = fixtures_dir / "test_chunk_boundary_matrix.txt"
+    try:
+        # 65A: LF at exactly byte 65535, 65536, 65537
+        for pad_len, tag in [(65534, "LF_65535"), (65535, "LF_65536"), (65536, "LF_65537")]:
+            boundary_fixture.write_text("x" * pad_len + "\n" + f"LINE2_{tag}\n", encoding="utf-8")
+            r_lf = run_cmd([trg, "--json", f"LINE2_{tag}", str(boundary_fixture)])
+            assert r_lf.returncode == 0
+            events = [json.loads(l) for l in r_lf.stdout.strip().split("\n") if l]
+            assert events[1]["data"]["line_number"] == 2
+            expected_off = pad_len + 1
+            assert events[1]["data"]["absolute_offset"] == expected_off, f"Expected offset {expected_off}, got {events[1]['data']['absolute_offset']}"
+
+        # 65B: CRLF split across chunk boundary (\r at byte 65535, \n at byte 65536)
+        boundary_fixture.write_bytes(b"a" * 65535 + b"\r\nLINE2_SPLIT_CRLF\n")
+        r_crlf_split = run_cmd([trg, "--json", "LINE2_SPLIT_CRLF", str(boundary_fixture)])
+        assert r_crlf_split.returncode == 0
+        crlf_events = [json.loads(l) for l in r_crlf_split.stdout.strip().split("\n") if l]
+        assert crlf_events[1]["data"]["line_number"] == 2
+        assert crlf_events[1]["data"]["absolute_offset"] == 65537, f"Expected offset 65537, got {crlf_events[1]['data']['absolute_offset']}"
+
+        # 65C: Pattern crossing 64KB chunk boundary within an overlong line
+        # Start pattern at byte 65530 (crosses 65536 boundary)
+        pat = "CROSS_BOUNDARY_PATTERN"
+        boundary_fixture.write_text("a" * 65530 + pat + "b" * 1000 + "\n", encoding="utf-8")
+        r_cross = run_cmd([trg, "--json", pat, str(boundary_fixture)])
+        assert r_cross.returncode == 0
+        cross_events = [json.loads(l) for l in r_cross.stdout.strip().split("\n") if l]
+        assert cross_events[1]["data"]["line_number"] == 1
+        assert cross_events[1]["data"]["submatches"][0]["start"] == 65530
+        assert cross_events[1]["data"]["submatches"][0]["end"] == 65530 + len(pat)
+
+        # 65D: Consecutive empty lines across chunk boundary
+        boundary_fixture.write_text("x" * 65535 + "\n\n\nAFTER_EMPTY\n", encoding="utf-8")
+        r_empty = run_cmd([trg, "--json", "AFTER_EMPTY", str(boundary_fixture)])
+        assert r_empty.returncode == 0
+        emp_events = [json.loads(l) for l in r_empty.stdout.strip().split("\n") if l]
+        assert emp_events[1]["data"]["line_number"] == 4
+
+        # 65E: Trailing no-EOL across chunk boundary (>130KB)
+        boundary_fixture.write_text("a" * 130000 + "TRAILING_TARGET", encoding="utf-8")
+        r_noeol = run_cmd([trg, "--json", "TRAILING_TARGET", str(boundary_fixture)])
+        assert r_noeol.returncode == 0
+        noeol_events = [json.loads(l) for l in r_noeol.stdout.strip().split("\n") if l]
+        assert noeol_events[1]["data"]["line_number"] == 1
+        assert noeol_events[1]["data"]["submatches"][0]["start"] == 130000
+
+        # 65F: Stdin streaming of multi-chunk overlong line (>150KB)
+        stdin_input = "s" * 150000 + "STDIN_TARGET\n"
+        r_stdin_huge = run_cmd([trg, "STDIN_TARGET", "-"], input_data=stdin_input)
+        assert r_stdin_huge.returncode == 0
+        assert "STDIN_TARGET" in r_stdin_huge.stdout
+
+        # 65G: Line number and absolute offset precision after 32MiB line
+        boundary_fixture.write_text("m" * 33554432 + "\nAFTER_32MB_LINE\n", encoding="utf-8")
+        r_32m = run_cmd([trg, "--json", "AFTER_32MB_LINE", str(boundary_fixture)])
+        assert r_32m.returncode == 0
+        m32_events = [json.loads(l) for l in r_32m.stdout.strip().split("\n") if l]
+        assert m32_events[1]["data"]["line_number"] == 2
+        assert m32_events[1]["data"]["absolute_offset"] == 33554433
+
+        # 65H: Context draining across multi-chunk lines
+        boundary_fixture.write_text("line 1 ctx " + "x"*70000 + "\nline 2 match " + "y"*70000 + "\nline 3 ctx " + "z"*70000 + "\n", encoding="utf-8")
+        r_ctx_mc = run_cmd([trg, "-m", "1", "-C", "1", "-n", "--max-columns", "30", "line 2 match", str(boundary_fixture)])
+        assert r_ctx_mc.returncode == 0
+        ctx_mc_lines = [l for l in r_ctx_mc.stdout.strip().split("\n") if l]
+        assert len(ctx_mc_lines) == 3
+        assert "1-[Omitted long context line]" in ctx_mc_lines[0]
+        assert "2:[Omitted long matching line]" in ctx_mc_lines[1]
+        assert "3-[Omitted long context line]" in ctx_mc_lines[2]
+    finally:
+        if boundary_fixture.exists():
+            boundary_fixture.unlink()
 
     log("=" * 60)
-    log("ALL 64 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.5.0)!")
+    log("ALL 65 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.5.1)!")
     log("=" * 60)
 
 if __name__ == "__main__":

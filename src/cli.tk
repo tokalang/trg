@@ -9,7 +9,7 @@ import src/glob::{parse_glob_rule}
 import src/file_types::{lookup_type_extensions}
 
 pub fn print_help() {
-    println("trg 0.5.0 - Fast, agent-friendly code search tool")
+    println("trg 0.5.1 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -F [OPTIONS] <PATTERN> [PATH...]")
@@ -46,7 +46,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.5.0 (Toka)")
+    println("trg 0.5.1 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {

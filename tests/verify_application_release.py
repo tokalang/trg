@@ -118,8 +118,8 @@ def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
     # 4. Assert Version
     r_ver = run_cmd([str(app_bin), "-V"])
     version_out = r_ver.stdout.strip()
-    if version_out != "trg 0.5.0 (Toka)":
-        raise RuntimeError(f"Expected version 'trg 0.5.0 (Toka)', got '{version_out}'")
+    if version_out != "trg 0.5.1 (Toka)":
+        raise RuntimeError(f"Expected version 'trg 0.5.1 (Toka)', got '{version_out}'")
 
     # 5. Sanity tests
     log("Running functional sanity checks on built trg...")
@@ -156,7 +156,7 @@ def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
     r_off_build = run_cmd([toka_bin, "build"], cwd=extracted_root, env=env_offline)
     
     r_off_ver = run_cmd([str(app_bin), "-V"])
-    if r_off_ver.stdout.strip() != "trg 0.5.0 (Toka)":
+    if r_off_ver.stdout.strip() != "trg 0.5.1 (Toka)":
         raise RuntimeError("Offline binary failed version check")
 
     return {
@@ -178,24 +178,24 @@ def main():
     if not os.path.exists(toka_bin):
         candidate_sdks = [
             "/Users/zhyi/.toka-sdks/1.0.0-rc.11/bin/toka",
-            os.path.expanduser("~/.toka-sdks/1.0.0-rc.11/bin/toka")
+            str(pathlib.Path.home() / ".toka-sdks" / "1.0.0-rc.11" / "bin" / "toka"),
         ]
         for c in candidate_sdks:
-            if os.path.isfile(c):
+            if os.path.exists(c):
                 toka_bin = c
                 break
 
-    with tempfile.TemporaryDirectory(prefix="trg-verify-") as tmpdir:
-        tmp = pathlib.Path(tmpdir)
+    with tempfile.TemporaryDirectory(prefix="trg-verify-") as tmp_dir:
+        tmp = pathlib.Path(tmp_dir)
         archive_file = tmp / "trg.tar.gz"
 
-        if args.archive:
-            shutil.copyfile(args.archive, archive_file)
-        elif args.url:
+        if args.url:
             log(f"Downloading release archive from: {args.url}")
             urllib.request.urlretrieve(args.url, archive_file)
+        elif args.archive:
+            shutil.copy(args.archive, archive_file)
         else:
-            raise ValueError("Either --archive or --url must be provided")
+            raise ValueError("Either --archive or --url must be specified")
 
         log(f"Verifying archive: {archive_file}")
         archive_meta = verify_archive(archive_file, expected_sha=args.sha256)
@@ -221,7 +221,7 @@ def main():
 
         report = {
             "schema": "toka.trg-application-verification-v1",
-            "version": "0.5.0",
+            "version": "0.5.1",
             "result": "PASS",
             "archive": archive_meta,
             "verification": build_meta

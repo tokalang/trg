@@ -7,3 +7,6 @@ target/
 *.a
 .DS_Store
 __pycache__/
+*.tar.gz
+trg-*.tar.gz
+

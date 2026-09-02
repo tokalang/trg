@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Tag name to build binaries for'
         required: true
-        default: 'v0.3.1'
+        default: 'v0.5.1'
 
 permissions:
   contents: write
