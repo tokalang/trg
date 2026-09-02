@@ -1,0 +1,307 @@
+// Standalone file type definitions, lookup, and filtering for trg.
+import core/str::{str}
+import core/result::{Result}
+import std/vec::{Vec}
+import std/io::{print, println}
+
+pub shape FileTypeEntry (
+    canonical_name: string,
+    aliases: Vec<string>,
+    extensions: Vec<string>
+)
+
+fn make_entry_1(name: str, ext1: str, alias1: str) -> FileTypeEntry {
+    auto aliases# = Vec<string>::new()
+    if alias1.len > 0 {
+        aliases#.push(string::from(alias1))
+    }
+    auto exts# = Vec<string>::new()
+    exts#.push(string::from(ext1))
+    return FileTypeEntry(
+        canonical_name = string::from(name),
+        aliases = cede aliases,
+        extensions = cede exts
+    )
+}
+
+fn make_entry_2(name: str, ext1: str, ext2: str, alias1: str) -> FileTypeEntry {
+    auto aliases# = Vec<string>::new()
+    if alias1.len > 0 {
+        aliases#.push(string::from(alias1))
+    }
+    auto exts# = Vec<string>::new()
+    exts#.push(string::from(ext1))
+    exts#.push(string::from(ext2))
+    return FileTypeEntry(
+        canonical_name = string::from(name),
+        aliases = cede aliases,
+        extensions = cede exts
+    )
+}
+
+pub fn get_builtin_file_types() -> Vec<FileTypeEntry> {
+    auto types# = Vec<FileTypeEntry>::new()
+
+    // 1. c: *.c, *.h
+    types#.push(make_entry_2("c", "c", "h", ""))
+
+    // 2. cpp: *.cc, *.cpp, *.cxx, *.hh, *.hpp, *.hxx (aliases: c++, cc, cxx)
+    auto cpp_aliases# = Vec<string>::new()
+    cpp_aliases#.push(string::from("c++"))
+    cpp_aliases#.push(string::from("cc"))
+    cpp_aliases#.push(string::from("cxx"))
+    auto cpp_exts# = Vec<string>::new()
+    cpp_exts#.push(string::from("cc"))
+    cpp_exts#.push(string::from("cpp"))
+    cpp_exts#.push(string::from("cxx"))
+    cpp_exts#.push(string::from("hh"))
+    cpp_exts#.push(string::from("hpp"))
+    cpp_exts#.push(string::from("hxx"))
+    types#.push(FileTypeEntry(
+        canonical_name = string::from("cpp"),
+        aliases = cede cpp_aliases,
+        extensions = cede cpp_exts
+    ))
+
+    // 3. css: *.css, *.scss, *.less
+    auto css_exts# = Vec<string>::new()
+    css_exts#.push(string::from("css"))
+    css_exts#.push(string::from("scss"))
+    css_exts#.push(string::from("less"))
+    types#.push(FileTypeEntry(
+        canonical_name = string::from("css"),
+        aliases = Vec<string>::new(),
+        extensions = cede css_exts
+    ))
+
+    // 4. go: *.go (alias: golang)
+    types#.push(make_entry_1("go", "go", "golang"))
+
+    // 5. html: *.html, *.htm (alias: htm)
+    types#.push(make_entry_2("html", "html", "htm", "htm"))
+
+    // 6. js: *.js, *.jsx, *.mjs, *.cjs (alias: javascript)
+    auto js_aliases# = Vec<string>::new()
+    js_aliases#.push(string::from("javascript"))
+    auto js_exts# = Vec<string>::new()
+    js_exts#.push(string::from("js"))
+    js_exts#.push(string::from("jsx"))
+    js_exts#.push(string::from("mjs"))
+    js_exts#.push(string::from("cjs"))
+    types#.push(FileTypeEntry(
+        canonical_name = string::from("js"),
+        aliases = cede js_aliases,
+        extensions = cede js_exts
+    ))
+
+    // 7. json: *.json
+    types#.push(make_entry_1("json", "json", ""))
+
+    // 8. markdown: *.md, *.markdown (alias: md)
+    types#.push(make_entry_2("markdown", "md", "markdown", "md"))
+
+    // 9. python: *.py, *.pyi (alias: py)
+    types#.push(make_entry_2("python", "py", "pyi", "py"))
+
+    // 10. rust: *.rs (alias: rs)
+    types#.push(make_entry_1("rust", "rs", "rs"))
+
+    // 11. sh: *.sh, *.bash, *.zsh (aliases: bash, zsh, shell)
+    auto sh_aliases# = Vec<string>::new()
+    sh_aliases#.push(string::from("bash"))
+    sh_aliases#.push(string::from("zsh"))
+    sh_aliases#.push(string::from("shell"))
+    auto sh_exts# = Vec<string>::new()
+    sh_exts#.push(string::from("sh"))
+    sh_exts#.push(string::from("bash"))
+    sh_exts#.push(string::from("zsh"))
+    types#.push(FileTypeEntry(
+        canonical_name = string::from("sh"),
+        aliases = cede sh_aliases,
+        extensions = cede sh_exts
+    ))
+
+    // 12. toka: *.tk (alias: tk)
+    types#.push(make_entry_1("toka", "tk", "tk"))
+
+    // 13. toml: *.toml
+    types#.push(make_entry_1("toml", "toml", ""))
+
+    // 14. ts: *.ts, *.tsx, *.mts, *.cts (alias: typescript)
+    auto ts_aliases# = Vec<string>::new()
+    ts_aliases#.push(string::from("typescript"))
+    auto ts_exts# = Vec<string>::new()
+    ts_exts#.push(string::from("ts"))
+    ts_exts#.push(string::from("tsx"))
+    ts_exts#.push(string::from("mts"))
+    ts_exts#.push(string::from("cts"))
+    types#.push(FileTypeEntry(
+        canonical_name = string::from("ts"),
+        aliases = cede ts_aliases,
+        extensions = cede ts_exts
+    ))
+
+    // 15. yaml: *.yaml, *.yml (alias: yml)
+    types#.push(make_entry_2("yaml", "yaml", "yml", "yml"))
+
+    return cede types
+}
+
+fn to_ascii_lower(c: char) -> char {
+    if c >= ('A' as char) && c <= ('Z' as char) {
+        return (c as u8 + 32) as char
+    }
+    return c
+}
+
+pub fn eq_ignore_ascii_case(a: str, b: str) -> bool {
+    if a.len != b.len {
+        return false
+    }
+    auto i# = 0:usize
+    loop i < a.len {
+        if to_ascii_lower(a.byte_at(i)) != to_ascii_lower(b.byte_at(i)) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+pub fn lookup_type_extensions(name: str) -> Result<Vec<string>, string> {
+    auto types = get_builtin_file_types()
+    auto i# = 0:usize
+    loop i < types.len() {
+        auto &entry = types.borrow(i)
+        if eq_ignore_ascii_case(entry.canonical_name.as_str(), name) {
+            auto res# = Vec<string>::new()
+            auto j# = 0:usize
+            loop j < entry.extensions.len() {
+                auto &ext_item = entry.extensions.borrow(j)
+                res#.push(string::from(ext_item.as_str()))
+                j = j + 1
+            }
+            return Result<Vec<string>, string>::Ok(cede res)
+        }
+        auto k# = 0:usize
+        loop k < entry.aliases.len() {
+            if eq_ignore_ascii_case(entry.aliases.get(k).as_str(), name) {
+                auto res# = Vec<string>::new()
+                auto j# = 0:usize
+                loop j < entry.extensions.len() {
+                    auto &ext_item = entry.extensions.borrow(j)
+                    res#.push(string::from(ext_item.as_str()))
+                    j = j + 1
+                }
+                return Result<Vec<string>, string>::Ok(cede res)
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+
+    auto err_msg# = string::from("unrecognized file type '")
+    err_msg#.push_str(name)
+    err_msg#.push_str("'\nUse 'trg --type-list' to see all available types.")
+    return Result<Vec<string>, string>::Err(cede err_msg)
+}
+
+import src/printer::{write_line}
+
+pub fn print_type_list() {
+    auto types = get_builtin_file_types()
+    auto i# = 0:usize
+    loop i < types.len() {
+        auto &entry = types.borrow(i)
+        auto line# = string::from(entry.canonical_name.as_str())
+        line#.push_str(":")
+        
+        // Print extensions
+        auto j# = 0:usize
+        loop j < entry.extensions.len() {
+            line#.push_str(" *.")
+            line#.push_str(entry.extensions.get(j).as_str())
+            j = j + 1
+        }
+
+        // Print aliases if any
+        if entry.aliases.len() > 0 {
+            line#.push_str(" (aliases:")
+            auto k# = 0:usize
+            loop k < entry.aliases.len() {
+                line#.push_str(" ")
+                line#.push_str(entry.aliases.get(k).as_str())
+                k = k + 1
+            }
+            line#.push_str(")")
+        }
+        write_line(line.as_str())
+        i = i + 1
+    }
+}
+
+pub fn extract_file_extension(path: str) -> str <- path {
+    auto last_slash_opt = path.last_index_of('/' as char)
+    auto basename# = path
+    if last_slash_opt.is_some() {
+        auto slash_idx = last_slash_opt.unwrap()
+        if slash_idx + 1 < path.len {
+            basename = path.substr(slash_idx + 1, path.len - (slash_idx + 1))
+        } else {
+            return ""
+        }
+    }
+
+    auto last_dot_opt = basename.last_index_of('.' as char)
+    if last_dot_opt.is_none() {
+        return ""
+    }
+    auto dot_idx = last_dot_opt.unwrap()
+    if dot_idx == 0 || dot_idx + 1 >= basename.len {
+        return ""
+    }
+    return basename.substr(dot_idx + 1, basename.len - (dot_idx + 1))
+}
+
+pub fn match_type_filter(file_path: str, include_exts: Vec<string>, exclude_exts: Vec<string>) -> bool {
+    // If no type filters are configured, accept all files
+    if include_exts.len() == 0 && exclude_exts.len() == 0 {
+        return true
+    }
+
+    auto ext = extract_file_extension(file_path)
+
+    // Check include filter
+    if include_exts.len() > 0 {
+        if ext.len == 0 {
+            return false
+        }
+        auto matched_include# = false
+        auto i# = 0:usize
+        loop i < include_exts.len() {
+            auto &inc_ext = include_exts.borrow(i)
+            if eq_ignore_ascii_case(ext, inc_ext.as_str()) {
+                matched_include = true
+                break
+            }
+            i = i + 1
+        }
+        if !matched_include {
+            return false
+        }
+    }
+
+    // Check exclude filter
+    if exclude_exts.len() > 0 && ext.len > 0 {
+        auto i# = 0:usize
+        loop i < exclude_exts.len() {
+            auto &exc_ext = exclude_exts.borrow(i)
+            if eq_ignore_ascii_case(ext, exc_ext.as_str()) {
+                return false
+            }
+            i = i + 1
+        }
+    }
+
+    return true
+}

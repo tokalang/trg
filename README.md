@@ -26,6 +26,13 @@
   - `-C <NUM>` / `--context <NUM>`: Print NUM lines before and after each match.
   - Overlapping and contiguous context windows merge seamlessly with zero duplicate lines.
   - Non-contiguous match groups are separated by `--` in human mode.
+- **Boolean `is_match` Fast-Path**: Direct non-allocating short-circuit matching for `-l`, `-c`, and human terminal output with mathematical equivalence to `find_matches`.
+- **File Type Filtering (`-t`, `-T`, `--type-list`)**:
+  - `-t <TYPE>` / `--type <TYPE>`: Only search files matching TYPE (supports canonical names and aliases, e.g. `toka`, `python`/`py`, `rust`/`rs`, `c`, `cpp`, `js`, `ts`, `go`, `json`, `yaml`, `toml`, `markdown`, `sh`, `html`, `css`). Multiple `-t` arguments combine as a union.
+  - `-T <TYPE>` / `--type-not <TYPE>`: Exclude files matching TYPE.
+  - `--type-list`: List all supported file types, aliases, and extensions alphabetically and exit 0 without needing a pattern.
+  - Case-insensitive extension matching (e.g. `.TK` matches `toka`).
+  - Strict unknown type validation with immediate fail-closed error reporting (exit code `2`).
 - **Bounded Context & Line Memory**:
   - Maximum context lines parameter is bounded to `1000`.
   - `BeforeRing` cumulative memory is strictly bounded to `64 MiB` (exit code 2 on breach).
@@ -86,6 +93,14 @@ trg -E -x "a|abc" file.txt
 
 # Search with surrounding context lines (-C 2)
 trg -n -C 2 "posix_stat" src
+
+# Filter by file type (-t / --type)
+trg -t toka "pub const" .
+trg -t py -t rust "fn|def" .
+trg -t toka -T toka "pattern" . # Exclude toka files
+
+# List all supported file types
+trg --type-list
 
 # Output structured JSONL stream (trg-json-v2)
 trg --json -E -C 1 "fn\\s+[a-z_]+" src

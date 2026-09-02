@@ -6,14 +6,16 @@ import std/env as env
 import std/io::{println}
 import src/types::{CliOptions, GlobRule}
 import src/glob::{parse_glob_rule}
+import src/file_types::{lookup_type_extensions}
 
 pub fn print_help() {
-    println("trg 0.3.1 - Fast, agent-friendly code search tool")
+    println("trg 0.4.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -F [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -E [OPTIONS] <PATTERN> [PATH...]")
     println("  trg --files [OPTIONS] [PATH...]")
+    println("  trg --type-list")
     println("")
     println("Options:")
     println("  -F, --fixed-strings        Treat the pattern as a fixed literal string (default)")
@@ -25,6 +27,9 @@ pub fn print_help() {
     println("  -c, --count                Only print the count of matching lines per file")
     println("  -v, --invert-match         Invert the match (select non-matching lines)")
     println("  -i, --ignore-case          Case-insensitive search (ASCII)")
+    println("  -t, --type <TYPE>          Only search files matching TYPE (can be used multiple times)")
+    println("  -T, --type-not <TYPE>      Do not search files matching TYPE (can be used multiple times)")
+    println("      --type-list            Show all supported file types and exit")
     println("  -A, --after-context <NUM>  Show NUM lines after each match (max 1000)")
     println("  -B, --before-context <NUM> Show NUM lines before each match (max 1000)")
     println("  -C, --context <NUM>        Show NUM lines before and after each match (max 1000)")
@@ -37,7 +42,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.3.1 (Toka)")
+    println("trg 0.4.0 (Toka)")
 }
 
 fn parse_context_num(s: str) -> Result<usize, string> {
@@ -61,6 +66,29 @@ fn parse_context_num(s: str) -> Result<usize, string> {
     return Result<usize, string>::Ok(val)
 }
 
+fn merge_extensions(cede target: Vec<string>, exts: Vec<string>) -> Vec<string> {
+    auto res# = cede target
+    auto i# = 0:usize
+    loop i < exts.len() {
+        auto &ext_item = exts.borrow(i)
+        auto ext_str = ext_item.as_str()
+        auto already_present# = false
+        auto j# = 0:usize
+        loop j < res.len() {
+            if res.borrow(j).as_str().equals(ext_str) {
+                already_present = true
+                break
+            }
+            j = j + 1
+        }
+        if !already_present {
+            res#.push(string::from(ext_str))
+        }
+        i = i + 1
+    }
+    return cede res
+}
+
 pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto args = env::args()
     auto num_args = args.len()
@@ -78,10 +106,13 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto files_mode# = false
     auto json_mode# = false
     auto hidden# = false
+    auto type_list_only# = false
     auto before_context# = 0:usize
     auto after_context# = 0:usize
     auto context_set_explicitly# = false
     auto globs# = Vec<GlobRule>::new()
+    auto include_type_exts# = Vec<string>::new()
+    auto exclude_type_exts# = Vec<string>::new()
 
     auto pattern# = string::from("")
     auto paths# = Vec<string>::new()
@@ -100,6 +131,12 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         if view == "-V" || view == "--version" {
             print_version()
             return Result<CliOptions, string>::Err(string::from("VERSION_EXIT"))
+        }
+
+        if view == "--type-list" {
+            type_list_only = true
+            i = i + 1
+            continue
         }
 
         if view == "-F" || view == "--fixed-strings" {
@@ -176,6 +213,82 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 
         if view == "--hidden" {
             hidden = true
+            i = i + 1
+            continue
+        }
+
+        // -t / --type options
+        if view == "-t" || view == "--type" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -t / --type requires an argument"))
+            }
+            i = i + 1
+            auto &type_arg = args.borrow(i)
+            auto exts_res = lookup_type_extensions(type_arg.as_str())
+            if exts_res.is_err() {
+                return Result<CliOptions, string>::Err(exts_res.unwrap_err())
+            }
+            include_type_exts = merge_extensions(cede include_type_exts, exts_res.unwrap())
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--type=") {
+            auto type_name = view.substr(7:usize, view.len - 7:usize)
+            auto exts_res = lookup_type_extensions(type_name)
+            if exts_res.is_err() {
+                return Result<CliOptions, string>::Err(exts_res.unwrap_err())
+            }
+            include_type_exts = merge_extensions(cede include_type_exts, exts_res.unwrap())
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-t") && view.len > 2 {
+            auto type_name = view.substr(2:usize, view.len - 2:usize)
+            auto exts_res = lookup_type_extensions(type_name)
+            if exts_res.is_err() {
+                return Result<CliOptions, string>::Err(exts_res.unwrap_err())
+            }
+            include_type_exts = merge_extensions(cede include_type_exts, exts_res.unwrap())
+            i = i + 1
+            continue
+        }
+
+        // -T / --type-not options
+        if view == "-T" || view == "--type-not" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -T / --type-not requires an argument"))
+            }
+            i = i + 1
+            auto &type_arg = args.borrow(i)
+            auto exts_res = lookup_type_extensions(type_arg.as_str())
+            if exts_res.is_err() {
+                return Result<CliOptions, string>::Err(exts_res.unwrap_err())
+            }
+            exclude_type_exts = merge_extensions(cede exclude_type_exts, exts_res.unwrap())
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--type-not=") {
+            auto type_name = view.substr(11:usize, view.len - 11:usize)
+            auto exts_res = lookup_type_extensions(type_name)
+            if exts_res.is_err() {
+                return Result<CliOptions, string>::Err(exts_res.unwrap_err())
+            }
+            exclude_type_exts = merge_extensions(cede exclude_type_exts, exts_res.unwrap())
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-T") && view.len > 2 {
+            auto type_name = view.substr(2:usize, view.len - 2:usize)
+            auto exts_res = lookup_type_extensions(type_name)
+            if exts_res.is_err() {
+                return Result<CliOptions, string>::Err(exts_res.unwrap_err())
+            }
+            exclude_type_exts = merge_extensions(cede exclude_type_exts, exts_res.unwrap())
             i = i + 1
             continue
         }
@@ -303,7 +416,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
-        // Handle short flag clusters e.g. -nli, -Fnl, -iF, -Ew, -ix (reject clusters containing digits or unknown characters)
+        // Handle short flag clusters e.g. -nli, -Fnl, -iF, -Ew, -ix
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
             auto c_idx# = 1:usize
@@ -347,6 +460,32 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         }
 
         i = i + 1
+    }
+
+    if type_list_only {
+        return Result<CliOptions, string>::Ok(CliOptions(
+            pattern = string::from(""),
+            paths = Vec<string>::new(),
+            fixed_strings = false,
+            regexp = false,
+            word_regexp = false,
+            line_regexp = false,
+            no_prefilter = false,
+            line_number = false,
+            files_with_matches = false,
+            count = false,
+            invert_match = false,
+            ignore_case = false,
+            files_mode = false,
+            json_mode = false,
+            hidden = false,
+            type_list_only = true,
+            before_context = 0,
+            after_context = 0,
+            globs = Vec<GlobRule>::new(),
+            include_type_exts = Vec<string>::new(),
+            exclude_type_exts = Vec<string>::new()
+        ))
     }
 
     if !files_mode && !pattern_set {
@@ -395,8 +534,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         files_mode = files_mode,
         json_mode = json_mode,
         hidden = hidden,
+        type_list_only = false,
         before_context = before_context,
         after_context = after_context,
-        globs = cede globs
+        globs = cede globs,
+        include_type_exts = cede include_type_exts,
+        exclude_type_exts = cede exclude_type_exts
     ))
 }

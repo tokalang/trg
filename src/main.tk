@@ -8,6 +8,7 @@ import src/matcher::{SearchPlan}
 import src/walker::{collect_search_targets, WalkResult}
 import src/scanner::{scan_file_stream}
 import src/printer::{print_files_list, print_summary_json}
+import src/file_types::{print_type_list}
 
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
 
@@ -36,6 +37,11 @@ fn main() -> i32 {
     }
 
     auto opts = cli_res.unwrap()
+
+    if opts.type_list_only {
+        print_type_list()
+        return 0
+    }
 
     auto plan_res = SearchPlan::create(opts)
     if !opts.files_mode && plan_res.is_err() {

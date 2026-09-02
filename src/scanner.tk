@@ -386,12 +386,24 @@ pub fn scan_file_stream(
                     break
                 }
 
-                auto decision = plan.evaluate(line_text)
                 auto line_matches# = false
-                if !opts.invert_match {
-                    line_matches = decision.matched
+                auto ranges# = Vec<MatchRange>::new()
+
+                if opts.json_mode {
+                    auto decision = plan.find_matches(line_text)
+                    if !opts.invert_match {
+                        line_matches = decision.matched
+                    } else {
+                        line_matches = !decision.matched
+                    }
+                    ranges = cede decision.ranges
                 } else {
-                    line_matches = !decision.matched
+                    auto matched = plan.is_match(line_text)
+                    if !opts.invert_match {
+                        line_matches = matched
+                    } else {
+                        line_matches = !matched
+                    }
                 }
 
                 if line_matches {
@@ -416,7 +428,7 @@ pub fn scan_file_stream(
                     auto outcome = process_logical_line(
                         cede l_record,
                         line_matches,
-                        decision.ranges,
+                        ranges,
                         opts,
                         context_state#,
                         target_path.as_str(),
@@ -461,12 +473,24 @@ pub fn scan_file_stream(
                 log_scanner_err(target_path.as_str(), "Maximum logical line length exceeded (1MB limit)")
                 had_error = true
             } else {
-                auto decision = plan.evaluate(line_text)
                 auto line_matches# = false
-                if !opts.invert_match {
-                    line_matches = decision.matched
+                auto ranges# = Vec<MatchRange>::new()
+
+                if opts.json_mode {
+                    auto decision = plan.find_matches(line_text)
+                    if !opts.invert_match {
+                        line_matches = decision.matched
+                    } else {
+                        line_matches = !decision.matched
+                    }
+                    ranges = cede decision.ranges
                 } else {
-                    line_matches = !decision.matched
+                    auto matched = plan.is_match(line_text)
+                    if !opts.invert_match {
+                        line_matches = matched
+                    } else {
+                        line_matches = !matched
+                    }
                 }
 
                 if line_matches {
@@ -490,7 +514,7 @@ pub fn scan_file_stream(
                     auto outcome = process_logical_line(
                         cede l_record,
                         line_matches,
-                        decision.ranges,
+                        ranges,
                         opts,
                         context_state#,
                         target_path.as_str(),

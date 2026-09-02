@@ -24,9 +24,12 @@ pub shape CliOptions (
     files_mode: bool,
     json_mode: bool,
     hidden: bool,
+    type_list_only: bool,
     before_context: usize,
     after_context: usize,
-    globs: Vec<GlobRule>
+    globs: Vec<GlobRule>,
+    include_type_exts: Vec<string>,
+    exclude_type_exts: Vec<string>
 )
 
 pub shape MatchRange (

@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.3.1 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.4.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.3.1 identity on both binaries
+    # Validate exact 0.4.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.3.1 (Toka)", f"Expected 'trg 0.3.1 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.4.0 (Toka)", f"Expected 'trg 0.4.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.3.1 (Toka)", f"Expected 'trg 0.3.1 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.4.0 (Toka)", f"Expected 'trg 0.4.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.3.1
-    log("Test 1: Help & Version flags (exact 0.3.1 release identity)")
+    # Test 1: Help & Version exact 0.4.0
+    log("Test 1: Help & Version flags (exact 0.4.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.3.1 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.4.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.3.1 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.4.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -672,7 +672,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.3.1" in r_re_ctx.stdout
+    assert "trg 0.4.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -780,8 +780,159 @@ def main():
         if ctx_fixture.exists():
             ctx_fixture.unlink()
 
+    # Test 50: --type-list output formatting and exit 0 without pattern
+    log("Test 50: --type-list output formatting and exit 0 without pattern")
+    r_types = run_cmd([trg, "--type-list"])
+    assert r_types.returncode == 0, f"--type-list failed with exit code {r_types.returncode}"
+    type_lines = [l.strip() for l in r_types.stdout.strip().split("\n") if l.strip()]
+    assert len(type_lines) >= 14, f"Expected at least 14 builtin types, got {len(type_lines)}"
+    # Verify alphabetical sorting
+    type_names = [l.split(":")[0] for l in type_lines]
+    assert type_names == sorted(type_names), f"Types not sorted alphabetically: {type_names}"
+    assert "toka: *.tk (aliases: tk)" in r_types.stdout
+    assert "python: *.py *.pyi (aliases: py)" in r_types.stdout
+    assert "rust: *.rs (aliases: rs)" in r_types.stdout
+
+    # Test 51: File type inclusion (-t / --type) with canonical names and aliases
+    log("Test 51: File type inclusion (-t / --type) with canonical names and aliases")
+    r_t_toka = run_cmd([trg, "-t", "toka", "-l", "import", str(repo_root)])
+    assert r_t_toka.returncode == 0
+    toka_files = [l.strip() for l in r_t_toka.stdout.strip().split("\n") if l.strip()]
+    assert all(f.endswith(".tk") for f in toka_files), f"Non-tk files in -t toka: {toka_files}"
+    assert any("src/main.tk" in f for f in toka_files)
+
+    r_t_py = run_cmd([trg, "-t", "py", "-l", "import", str(repo_root)])
+    assert r_t_py.returncode == 0
+    py_files = [l.strip() for l in r_t_py.stdout.strip().split("\n") if l.strip()]
+    assert all(f.endswith(".py") for f in py_files), f"Non-py files in -t py: {py_files}"
+
+    # Alias parity: -t python vs -t py
+    r_t_python = run_cmd([trg, "-t", "python", "-l", "import", str(repo_root)])
+    assert r_t_python.stdout == r_t_py.stdout
+
+    # Union of multiple types: -t toka -t python
+    r_t_union = run_cmd([trg, "-t", "toka", "-t", "python", "-l", "import", str(repo_root)])
+    assert r_t_union.returncode == 0
+    union_files = [l.strip() for l in r_t_union.stdout.strip().split("\n") if l.strip()]
+    assert set(union_files) == (set(toka_files) | set(py_files))
+
+    # Test 52: File type exclusion (-T / --type-not)
+    log("Test 52: File type exclusion (-T / --type-not)")
+    r_t_not = run_cmd([trg, "-t", "toka", "-t", "python", "-T", "python", "-l", "import", str(repo_root)])
+    assert r_t_not.returncode == 0
+    assert r_t_not.stdout == r_t_toka.stdout
+
+    # Include and exclude same type -> empty result, exit code 1
+    r_t_empty = run_cmd([trg, "-t", "toka", "-T", "toka", "-l", "import", str(repo_root)], check=False)
+    assert r_t_empty.returncode == 1
+
+    # Test 53: Intersection between -t and -g
+    log("Test 53: Intersection between -t and -g")
+    r_t_g = run_cmd([trg, "-t", "toka", "-g", "*main*", "-l", "fn", str(repo_root)])
+    assert r_t_g.returncode == 0
+    g_files = [l.strip() for l in r_t_g.stdout.strip().split("\n") if l.strip()]
+    assert len(g_files) == 1 and g_files[0].endswith("src/main.tk")
+
+    # Test 54: Case-insensitive file extensions (.TK, .tk)
+    log("Test 54: Case-insensitive file extensions")
+    upper_tk_file = fixtures_dir / "test_upper_ext.TK"
+    try:
+        upper_tk_file.write_text("pub fn test_uppercase_extension() {}\n", encoding="utf-8")
+        r_upper = run_cmd([trg, "-t", "toka", "-l", "test_uppercase_extension", str(fixtures_dir)])
+        assert r_upper.returncode == 0
+        assert "test_upper_ext.TK" in r_upper.stdout
+    finally:
+        if upper_tk_file.exists():
+            upper_tk_file.unlink()
+
+    # Test 55: Direct file arguments with matching and mismatching type filters
+    log("Test 55: Direct file arguments with matching and mismatching type filters")
+    r_direct_match = run_cmd([trg, "-t", "toka", "-c", "pub fn", str(repo_root / "src" / "cli.tk")])
+    assert r_direct_match.returncode == 0
+    assert int(r_direct_match.stdout.strip()) >= 1
+
+    r_direct_mismatch = run_cmd([trg, "-t", "python", "pub fn", str(repo_root / "src" / "cli.tk")], check=False)
+    assert r_direct_mismatch.returncode == 1
+
+    # Test 56: Unknown type validation (exit code 2)
+    log("Test 56: Unknown type validation (exit code 2)")
+    r_unknown = run_cmd([trg, "-t", "non_existent_type_xyz", "foo", str(repo_root)], check=False)
+    assert r_unknown.returncode == 2
+    assert "unrecognized file type 'non_existent_type_xyz'" in r_unknown.stderr
+    assert "Use 'trg --type-list'" in r_unknown.stderr
+
+    # Test 57: SearchPlan::is_match vs find_matches differential parity gate
+    log("Test 57: SearchPlan::is_match vs find_matches differential parity gate across all pattern modes")
+    diff_fixture2 = fixtures_dir / "test_is_match_diff.txt"
+    diff_fixture2.write_text(
+        "pub fn search_plan_is_match() {}\n"
+        "fn is_match_boolean_fast_path() {}\n"
+        "line with words and special_characters-123\n"
+        "UPPERCASE WORD MATCH\n"
+        "   exact   whitespace   line   \n"
+        "regex123match456\n"
+        "\n"
+        "single_line\n",
+        encoding="utf-8"
+    )
+
+    diff_cases = [
+        # (flags, pattern)
+        ([], "search_plan"),
+        (["-i"], "SEARCH_PLAN"),
+        (["-w"], "search_plan"),
+        (["-x"], "single_line"),
+        (["-v"], "pub fn"),
+        (["-E"], "fn\\s+[a-z_]+"),
+        (["-E", "-i"], "FN\\s+[A-Z_]+"),
+        (["-E", "-w"], "search_plan|is_match"),
+        (["-E", "-x"], "single_line"),
+        (["-E", "-v"], "special_characters"),
+        (["-E", "--no-prefilter"], "is_match_boolean"),
+    ]
+
+    try:
+        for flags, pat in diff_cases:
+            # Mode A: Count mode (uses is_match)
+            cmd_count = [trg] + flags + ["-c", pat, str(diff_fixture2)]
+            r_count = run_cmd(cmd_count, check=False)
+
+            # Mode B: Files with matches (uses is_match)
+            cmd_files = [trg] + flags + ["-l", pat, str(diff_fixture2)]
+            r_files = run_cmd(cmd_files, check=False)
+
+            # Mode C: JSON mode (uses find_matches)
+            cmd_json = [trg] + flags + ["--json", pat, str(diff_fixture2)]
+            r_json = run_cmd(cmd_json, check=False)
+
+            # Extract number of match events from JSON output
+            json_matches = 0
+            for line in r_json.stdout.strip().split("\n"):
+                if not line:
+                    continue
+                data = json.loads(line)
+                if data.get("type") == "match":
+                    json_matches += 1
+
+            # Assert count mode equals JSON match events count exactly
+            if r_count.returncode == 0:
+                count_val = int(r_count.stdout.strip())
+                assert count_val == json_matches, (
+                    f"Differential parity mismatch between is_match (-c: {count_val}) "
+                    f"and find_matches (--json: {json_matches}) for flags={flags}, pat='{pat}'"
+                )
+                assert r_files.returncode == 0, f"Expected -l to return 0 when count > 0 for {flags}, '{pat}'"
+            else:
+                assert json_matches == 0, (
+                    f"Differential parity mismatch: -c returned {r_count.returncode} but JSON found {json_matches} matches"
+                )
+                assert r_files.returncode == 1, f"Expected -l to return 1 when count == 0 for {flags}, '{pat}'"
+    finally:
+        if diff_fixture2.exists():
+            diff_fixture2.unlink()
+
     log("=" * 60)
-    log("ALL 49 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.3.1)!")
+    log("ALL 57 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.4.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

@@ -47,6 +47,68 @@ fn index_of_str_ascii_case(haystack: str, needle: str) -> Option<usize> {
 }
 
 impl LiteralMatcher {
+    pub fn is_match(self, line: str) -> bool {
+        auto needle = self.needle.as_str()
+
+        if needle.len == 0 {
+            if self.line_regexp && line.len > 0 {
+                return false
+            }
+            return true
+        }
+
+        // Fast path: no word boundary and no whole-line boundary
+        if !self.word_regexp && !self.line_regexp {
+            if self.ignore_case {
+                return index_of_str_ascii_case(line, needle).is_some()
+            } else {
+                return line.index_of_str(needle).is_some()
+            }
+        }
+
+        // Boundary-aware search loop
+        auto offset# = 0:usize
+        loop offset <= line.len {
+            if offset + needle.len > line.len { break }
+            auto rem = line.substr(offset, line.len - offset)
+            auto found_opt# = Option<usize>::None
+            if self.ignore_case {
+                found_opt = index_of_str_ascii_case(rem, needle)
+            } else {
+                found_opt = rem.index_of_str(needle)
+            }
+
+            if found_opt.is_none() { break }
+            auto match_idx = found_opt.unwrap()
+            auto start = offset + match_idx
+            auto end = start + needle.len
+
+            auto valid# = true
+            if self.word_regexp {
+                auto prev_is_word = start > 0 && is_ascii_word_byte(line.byte_at(start - 1:usize) as u8)
+                auto next_is_word = end < line.len && is_ascii_word_byte(line.byte_at(end) as u8)
+                if prev_is_word || next_is_word {
+                    valid = false
+                }
+            }
+
+            if self.line_regexp {
+                if start != 0 || end != line.len {
+                    valid = false
+                }
+            }
+
+            if valid {
+                return true
+            }
+
+            offset = end
+            if needle.len == 0 { break }
+        }
+
+        return false
+    }
+
     pub fn evaluate(self, line: str) -> MatchDecision {
         auto needle = self.needle.as_str()
         auto ranges# = Vec<MatchRange>::new()
@@ -105,6 +167,31 @@ impl LiteralMatcher {
 }
 
 impl RegexMatcher {
+    pub fn is_match(self, line: str) -> bool {
+        // Line-level conservative Required Literal Prefilter
+        if !self.no_prefilter {
+            match self.required_literal {
+                auto Option<string>::Some(&req_lit) => {
+                    auto req_str = req_lit.as_str()
+                    if req_str.len > 0 {
+                        auto prefilter_hit# = false
+                        if self.compiled.options().ignore_ascii_case {
+                            prefilter_hit = index_of_str_ascii_case(line, req_str).is_some()
+                        } else {
+                            prefilter_hit = line.index_of_str(req_str).is_some()
+                        }
+                        if !prefilter_hit {
+                            return false
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        return self.compiled.is_match(line)
+    }
+
     pub fn evaluate(self, line: str) -> MatchDecision {
         // Line-level conservative Required Literal Prefilter
         if !self.no_prefilter {
@@ -173,7 +260,18 @@ impl SearchPlan {
         )))
     }
 
-    pub fn evaluate(self, line: str) -> MatchDecision {
+    pub fn is_match(self, line: str) -> bool {
+        match self {
+            auto SearchPlan::Literal(lit) => {
+                return lit.is_match(line)
+            }
+            auto SearchPlan::RegexPlan(reg) => {
+                return reg.is_match(line)
+            }
+        }
+    }
+
+    pub fn find_matches(self, line: str) -> MatchDecision {
         match self {
             auto SearchPlan::Literal(lit) => {
                 return lit.evaluate(line)
@@ -182,5 +280,9 @@ impl SearchPlan {
                 return reg.evaluate(line)
             }
         }
+    }
+
+    pub fn evaluate(self, line: str) -> MatchDecision {
+        return self.find_matches(line)
     }
 }

@@ -6,6 +6,7 @@ import src/types::{CliOptions, GlobRule}
 import src/posix::{posix_stat, posix_opendir, posix_readdir, posix_closedir, posix_get_errno}
 import src/ignore::{IgnoreStack}
 import src/glob::{is_glob_allowed}
+import src/file_types::{match_type_filter}
 
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
 
@@ -111,6 +112,11 @@ fn walk_dir_recursive(
                 continue
             }
 
+            // Check file type filter (-t / -T)
+            if !match_type_filter(full_path.as_str(), opts.include_type_exts, opts.exclude_type_exts) {
+                continue
+            }
+
             // Check CLI glob filter (last-match-wins)
             if !is_glob_allowed(full_path.as_str(), false, opts.globs) {
                 continue
@@ -151,8 +157,8 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
 
         auto stat = stat_res.unwrap()
         if stat.is_file {
-            // Direct file argument
-            if is_glob_allowed(path_view, false, opts.globs) {
+            // Direct file argument: apply type filter and glob filter
+            if match_type_filter(path_view, opts.include_type_exts, opts.exclude_type_exts) && is_glob_allowed(path_view, false, opts.globs) {
                 files#.push(path_arg.clone())
             }
         } else if stat.is_dir {
@@ -161,7 +167,9 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
         } else {
             // If it's a symlink at the root argument level, do not follow by default
             if !stat.is_symlink {
-                files#.push(path_arg.clone())
+                if match_type_filter(path_view, opts.include_type_exts, opts.exclude_type_exts) && is_glob_allowed(path_view, false, opts.globs) {
+                    files#.push(path_arg.clone())
+                }
             }
         }
 
