@@ -1,0 +1,117 @@
+{
+  "schema": "toka.release-audit-v1",
+  "package": "trg",
+  "version": "0.3.0",
+  "candidate_commit": "51491f03bf0dceaabdab9e5155d21f33bf49e986",
+  "timestamp": "2026-09-02T03:32:00Z",
+  "platform": {
+    "host_os": "Darwin",
+    "kernel": "25.5.0",
+    "arch": "arm64",
+    "qualification_scope": "macOS arm64 qualified (host environment)"
+  },
+  "toolchain": {
+    "toka_version": "1.0.0-rc.8",
+    "compiler_version": "1.0.0-rc.8",
+    "target_spec": "1.0.0-rc.11",
+    "clang_version": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
+  },
+  "supply_chain": {
+    "dependency": "official/regex",
+    "tag": "v0.3.0",
+    "tag_commit": "02114477c4cd1bdb1c9554f200fcc31bf79ab52f",
+    "tarball_url": "https://github.com/tokalang/regex/releases/download/v0.3.0/regex-0.3.0.tar.gz",
+    "archive_sha256": "cf365755da461ff9bb48df211aca8ddbcf2c630cc1caedd8395b5200a8d8beb9",
+    "tree_sha256": "c0a8b50305ae4e6e7ee82c1505ca314dd0bc98968d088d5e631dc39104db68a1",
+    "catalog_url": "https://pkg.tokalang.dev/catalog.json",
+    "catalog_status": "verified_active",
+    "registry_pr": "tokalang/toka-registry#11",
+    "lock_entry": "package\tregex\tregistry\tregex\t0.3.0\tcf365755da461ff9bb48df211aca8ddbcf2c630cc1caedd8395b5200a8d8beb9\tc0a8b50305ae4e6e7ee82c1505ca314dd0bc98968d088d5e631dc39104db68a1\t-"
+  },
+  "gates": {
+    "supply_chain_integrity": {
+      "status": "PASS",
+      "checks": [
+        "github_release_non_draft_non_prerelease",
+        "archive_sha256_recalculated_match",
+        "archive_no_git_no_binaries_no_path_escapes",
+        "extracted_tree_sha256_match",
+        "package_lock_registry_kind"
+      ]
+    },
+    "clean_consumer_replay": {
+      "status": "PASS",
+      "online_fetch_and_build": "PASS",
+      "offline_isolated_replay": "PASS",
+      "lock_drift": "NONE"
+    },
+    "package_qualification": {
+      "status": "PASS",
+      "toka_doctor": "PASS",
+      "toka_check": "PASS",
+      "toka_build_online": "PASS",
+      "toka_build_offline": "PASS",
+      "direct_tokac_build": "PASS",
+      "qualify_suite_tests_passed": 49,
+      "qualify_suite_total": 49,
+      "primary_test_subject": "target/debug/trg"
+    },
+    "regex_prefilter_differential": {
+      "status": "PASS",
+      "total_configurations_tested": 864,
+      "stdout_parity": "100%",
+      "stderr_parity": "100%",
+      "returncode_parity": "100%",
+      "json_framing_parity": "100%",
+      "invariant_can_match_empty_verified": true
+    },
+    "resource_safety_limits": {
+      "status": "PASS",
+      "line_limit_1mb_exact_accepted": true,
+      "line_limit_1mb_plus_1_rejected_exit_2": true,
+      "beforering_64mb_limit_rejected_exit_2": true,
+      "pattern_length_limit_4096_rejected_exit_2": true,
+      "group_depth_limit_128_rejected_exit_2": true,
+      "adversarial_non_backtracking_execution_ms": 4.0,
+      "symlink_cycle_prevention": true,
+      "ripgrep_error_precedence_exit_2": true,
+      "early_regex_compile_error_before_walk": true,
+      "unbroken_json_framing_on_errors": true,
+      "broken_pipe_sigpipe_graceful_exit_0": true
+    },
+    "performance_benchmarks": {
+      "status": "PASS",
+      "dataset_sha256": "f87f8d95144ba99152573e3ac672f4d51b5e24aa5d134abcaa1375c4aa3f1db5",
+      "iterations": 21,
+      "results_median_ms": {
+        "literal_default": 3.680,
+        "literal_F": 3.633,
+        "literal_ignore_case": 3.466,
+        "literal_word": 3.487,
+        "literal_context_C2": 3.424,
+        "regex_with_prefilter": 3.682,
+        "regex_without_prefilter": 7.783,
+        "regex_alternation": 11.658,
+        "regex_word": 7.790,
+        "regex_line": 3.335,
+        "rg_literal_baseline": 3.679,
+        "rg_regex_baseline": 3.905
+      },
+      "prefilter_speedup": "2.11x",
+      "literal_fastpath_regression": "0.0%"
+    }
+  },
+  "defects": {
+    "p0_count": 0,
+    "p1_count": 0,
+    "p2_count": 1,
+    "p2_items": [
+      {
+        "id": "TRG-P2-01",
+        "description": "Human and count output modes evaluate full MatchRange vector instead of short-circuit boolean is_match.",
+        "impact": "No correctness impact. Opportunity for short-circuit optimization in Phase 2."
+      }
+    ]
+  },
+  "audit_decision": "GO_FOR_RELEASE_CANDIDATE"
+}
