@@ -31,8 +31,11 @@ def compute_sha256(path: pathlib.Path) -> str:
     h.update(path.read_bytes())
     return h.hexdigest()
 
-def run_cmd(cmd, cwd=None, env=None, check=True):
+def run_cmd(cmd, cwd=None, env=None, unset_env=None, check=True):
     merged_env = os.environ.copy()
+    if unset_env:
+        for k in unset_env:
+            merged_env.pop(k, None)
     if env:
         merged_env.update(env)
     res = subprocess.run(
@@ -55,6 +58,10 @@ def verify_archive(archive_path: pathlib.Path, expected_sha: str = None) -> dict
     with tarfile.open(archive_path, "r:gz") as tar:
         names = tar.getnames()
         for member in tar.getmembers():
+            if member.issym() or member.islnk():
+                raise ValueError(f"Security violation: archive contains link entry '{member.name}' -> '{member.linkname}'")
+            if member.isdev() or member.ischr() or member.isblk() or member.isfifo():
+                raise ValueError(f"Security violation: archive contains special device/fifo entry '{member.name}'")
             if member.name.startswith("/") or ".." in member.name:
                 raise ValueError(f"Security violation: path escape in archive entry '{member.name}'")
             if member.name.endswith((".o", ".a", ".dylib", ".so")):
@@ -83,19 +90,15 @@ def verify_archive(archive_path: pathlib.Path, expected_sha: str = None) -> dict
 
 def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
     # 1. toka doctor and check
-    r_doc = run_cmd([toka_bin, "doctor"], cwd=extracted_root)
-    r_chk = run_cmd([toka_bin, "check", "--json", "package.tk"], cwd=extracted_root)
+    r_doc = run_cmd([toka_bin, "doctor"], cwd=extracted_root, unset_env=["TOKA_REGISTRY_URL", "TOKA_OFFLINE"])
+    r_chk = run_cmd([toka_bin, "check", "--json", "package.tk"], cwd=extracted_root, unset_env=["TOKA_REGISTRY_URL", "TOKA_OFFLINE"])
     chk_json = json.loads(r_chk.stdout)
     if not chk_json.get("success"):
         raise RuntimeError(f"toka check failed: {r_chk.stdout}")
 
     # 2. Online fetch via public registry
-    env_online = dict(os.environ)
-    env_online.pop("TOKA_REGISTRY_URL", None)
-    env_online.pop("TOKA_OFFLINE", None)
-    
     log("Running online toka fetch against default registry...")
-    r_fetch = run_cmd([toka_bin, "fetch"], cwd=extracted_root, env=env_online)
+    r_fetch = run_cmd([toka_bin, "fetch"], cwd=extracted_root, unset_env=["TOKA_REGISTRY_URL", "TOKA_OFFLINE"])
     
     lock_file = extracted_root / "package.lock"
     if not lock_file.exists():
@@ -106,7 +109,7 @@ def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
 
     # 3. toka build
     log("Compiling application with toka build...")
-    r_build = run_cmd([toka_bin, "build"], cwd=extracted_root, env=env_online)
+    r_build = run_cmd([toka_bin, "build"], cwd=extracted_root, unset_env=["TOKA_REGISTRY_URL", "TOKA_OFFLINE"])
     
     app_bin = extracted_root / "target" / "debug" / "trg"
     if not app_bin.exists():
@@ -144,11 +147,10 @@ def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
     # 6. Offline replay test
     log("Testing offline build replay...")
     shutil.rmtree(extracted_root / ".toka" / "packages", ignore_errors=True)
-    shutil.rmtree(extracted_root / "target", ignore_errors=True)
-    
-    env_offline = dict(env_online)
-    env_offline["TOKA_REGISTRY_URL"] = "http://127.0.0.1:9"
-    env_offline["TOKA_OFFLINE"] = "1"
+    env_offline = {
+        "TOKA_REGISTRY_URL": "http://127.0.0.1:9",
+        "TOKA_OFFLINE": "1"
+    }
     
     r_off_fetch = run_cmd([toka_bin, "fetch"], cwd=extracted_root, env=env_offline)
     r_off_build = run_cmd([toka_bin, "build"], cwd=extracted_root, env=env_offline)
