@@ -57,17 +57,44 @@
 
 ---
 
-## Installation & Build
+## Installation
+
+### 1. One-Line Install (Recommended, No Toka SDK Required)
+
+Install the standalone precompiled binary directly for macOS (Apple Silicon) and Linux (x86_64):
 
 ```bash
-# 1. Fetch dependencies and generate package.lock (first time online)
-toka fetch
+curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh | bash
+```
 
-# 2. Build trg via Toka package manager (supports TOKA_OFFLINE=1 once fetched)
+Custom installation directory:
+```bash
+INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh | bash
+```
+
+### 2. Manual Precompiled Binary Download
+
+You can also download standalone archives directly from [GitHub Releases](https://github.com/tokalang/trg/releases/latest):
+
+- **macOS (Apple Silicon / arm64)**:
+  ```bash
+  curl -fsSL https://github.com/tokalang/trg/releases/download/v0.4.0/trg-v0.4.0-macos-arm64.tar.gz | tar -xz && sudo mv trg-v0.4.0-macos-arm64/trg /usr/local/bin/
+  ```
+
+- **Linux (x86_64)**:
+  ```bash
+  curl -fsSL https://github.com/tokalang/trg/releases/download/v0.4.0/trg-v0.4.0-linux-x64.tar.gz | tar -xz && sudo mv trg-v0.4.0-linux-x64/trg /usr/local/bin/
+  ```
+
+### 3. Build from Source (via Toka Package Manager)
+
+```bash
+# Fetch dependencies and build
+toka fetch
 toka build
 
-# 3. Verify installation
-target/debug/trg --version
+# Verify build
+./target/debug/trg --version
 ```
 
 ---
