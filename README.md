@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh | bash
 
 Custom installation directory:
 ```bash
-INSTALL_DIR="$HOME/.local/bin" curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh | INSTALL_DIR="$HOME/.local/bin" bash
 ```
 
 ### 2. Manual Precompiled Binary Download
