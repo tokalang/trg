@@ -116,16 +116,16 @@ def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
         raise RuntimeError(f"Built binary {app_bin} does not exist")
 
     # 4. Assert Version
-    r_ver = run_cmd([str(app_bin), "-V"])
+    r_ver = run_cmd([str(app_bin), "--version"])
     version_out = r_ver.stdout.strip()
-    if version_out != "trg 0.6.0 (Toka)":
-        raise RuntimeError(f"Expected version 'trg 0.6.0 (Toka)', got '{version_out}'")
+    if version_out != "trg 0.7.0 (Toka)":
+        raise RuntimeError(f"Unexpected version output: {version_out}")
 
-    # 5. Sanity tests
-    log("Running functional sanity checks on built trg...")
+    # 5. Functional Sanity
+    log("Running functional sanity checks...")
     # Literal search
-    r_lit = run_cmd([str(app_bin), "-n", "pub const PACKAGE", "package.tk"], cwd=extracted_root)
-    if "1:pub const PACKAGE" not in r_lit.stdout:
+    r_lit = run_cmd([str(app_bin), "-F", "trg", "package.tk"], cwd=extracted_root)
+    if "name = \"trg\"" not in r_lit.stdout:
         raise RuntimeError(f"Literal search failed: {r_lit.stdout}")
 
     # Regex word search
@@ -156,7 +156,7 @@ def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
     r_off_build = run_cmd([toka_bin, "build"], cwd=extracted_root, env=env_offline)
     
     r_off_ver = run_cmd([str(app_bin), "-V"])
-    if r_off_ver.stdout.strip() != "trg 0.6.0 (Toka)":
+    if r_off_ver.stdout.strip() != "trg 0.7.0 (Toka)":
         raise RuntimeError("Offline binary failed version check")
 
     return {
@@ -221,7 +221,7 @@ def main():
 
         report = {
             "schema": "toka.trg-application-verification-v1",
-            "version": "0.6.0",
+            "version": "0.7.0",
             "result": "PASS",
             "archive": archive_meta,
             "verification": build_meta

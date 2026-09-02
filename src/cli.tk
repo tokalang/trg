@@ -6,13 +6,13 @@ import sys/libc::{libc_fopen, libc_fread, libc_fclose, libc_malloc, libc_free}
 import std/vec::{Vec}
 import std/env as env
 import std/io::{println}
-import src/types::{CliOptions, GlobRule, CaseMode, SortMode}
+import src/types::{CliOptions, GlobRule, CaseMode, SortMode, BudgetLimits}
 import src/glob::{parse_glob_rule}
 import src/file_types::{lookup_type_extensions}
 import src/posix::{posix_ferror}
 
 pub fn print_help() {
-    println("trg 0.6.0 - Fast, agent-friendly code search tool")
+    println("trg 0.7.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -42,6 +42,10 @@ pub fn print_help() {
     println("  -S, --smart-case           Smart case search (case-insensitive unless pattern has uppercase)")
     println("  -m, --max-count <NUM>      Stop reading a file after NUM matching lines")
     println("      --max-columns <NUM>    Omit matching lines longer than NUM bytes in human output")
+    println("      --max-total-matches <NUM>    Stop searching after NUM total matching lines across all files")
+    println("      --max-result-bytes <SIZE>    Stop searching when result payload bytes reach SIZE (e.g. 64K, 1M)")
+    println("      --max-files-with-matches <NUM> Stop searching after NUM files with matches")
+    println("      --no-truncation-notice       Do not print the trailing truncation notice on stderr")
     println("      --no-ignore            Do not respect .gitignore files")
     println("      --sort <TYPE>          Sort search results by TYPE (path, none)")
     println("      --sortr <TYPE>         Sort search results by TYPE in reverse order (path, none)")
@@ -61,7 +65,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.6.0 (Toka)")
+    println("trg 0.7.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
@@ -82,6 +86,12 @@ fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
             return Result<usize, string>::Err(cede err)
         }
         auto digit = (ch as usize) - ('0' as usize)
+        if val > (9223372036854775807:usize - digit) / 10:usize {
+            auto err# = string::from("Flag ")
+            err#.push_str(flag_name)
+            err#.push_str(" value exceeds maximum integer limit")
+            return Result<usize, string>::Err(cede err)
+        }
         val = val * 10:usize + digit
         i = i + 1
     }
@@ -100,6 +110,9 @@ fn parse_context_num(s: str) -> Result<usize, string> {
             return Result<usize, string>::Err(string::from("Context line count must be a non-negative integer"))
         }
         auto digit = (ch as usize) - ('0' as usize)
+        if val > (1000:usize - digit) / 10:usize {
+            return Result<usize, string>::Err(string::from("Context lines limit exceeded (maximum is 1000)"))
+        }
         val = val * 10:usize + digit
         if val > 1000:usize {
             return Result<usize, string>::Err(string::from("Context lines limit exceeded (maximum is 1000)"))
@@ -107,6 +120,102 @@ fn parse_context_num(s: str) -> Result<usize, string> {
         i = i + 1
     }
     return Result<usize, string>::Ok(val)
+}
+
+fn parse_usize_strict(s: str, option_name: str) -> Result<usize, string> {
+    if s.len == 0 {
+        auto err# = string::from("Value for ")
+        err#.push_str(option_name)
+        err#.push_str(" cannot be empty")
+        return Result<usize, string>::Err(cede err)
+    }
+    auto val# = 0:usize
+    auto i# = 0:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i)
+        if ch < ('0' as char) || ch > ('9' as char) {
+            auto err# = string::from("Invalid integer value '")
+            err#.push_str(s)
+            err#.push_str("' for ")
+            err#.push_str(option_name)
+            return Result<usize, string>::Err(cede err)
+        }
+        auto digit = (ch as usize) - ('0' as usize)
+        if val > (9223372036854775807:usize - digit) / 10:usize {
+            auto err# = string::from("Value '")
+            err#.push_str(s)
+            err#.push_str("' for ")
+            err#.push_str(option_name)
+            err#.push_str(" exceeds maximum integer limit")
+            return Result<usize, string>::Err(cede err)
+        }
+        val = val * 10:usize + digit
+        i = i + 1
+    }
+    return Result<usize, string>::Ok(val)
+}
+
+fn parse_size_bytes_strict(s: str, option_name: str) -> Result<usize, string> {
+    if s.len == 0 {
+        auto err# = string::from("Value for ")
+        err#.push_str(option_name)
+        err#.push_str(" cannot be empty")
+        return Result<usize, string>::Err(cede err)
+    }
+    auto mult# = 1:usize
+    auto num_len# = s.len
+    auto last_ch = s.byte_at(s.len - 1)
+    if last_ch == ('k' as char) || last_ch == ('K' as char) {
+        mult = 1024:usize
+        num_len = s.len - 1
+    } else if last_ch == ('m' as char) || last_ch == ('M' as char) {
+        mult = 1048576:usize
+        num_len = s.len - 1
+    }
+
+    if num_len == 0 {
+        auto err# = string::from("Invalid size value '")
+        err#.push_str(s)
+        err#.push_str("' for ")
+        err#.push_str(option_name)
+        return Result<usize, string>::Err(cede err)
+    }
+
+    auto val# = 0:usize
+    auto i# = 0:usize
+    loop i < num_len {
+        auto ch = s.byte_at(i)
+        if ch < ('0' as char) || ch > ('9' as char) {
+            auto err# = string::from("Invalid size value '")
+            err#.push_str(s)
+            err#.push_str("' for ")
+            err#.push_str(option_name)
+            return Result<usize, string>::Err(cede err)
+        }
+        auto digit = (ch as usize) - ('0' as usize)
+        if val > (9223372036854775807:usize - digit) / 10:usize {
+            auto err# = string::from("Value '")
+            err#.push_str(s)
+            err#.push_str("' for ")
+            err#.push_str(option_name)
+            err#.push_str(" exceeds maximum integer limit")
+            return Result<usize, string>::Err(cede err)
+        }
+        val = val * 10:usize + digit
+        i = i + 1
+    }
+
+    if mult > 1:usize && val > 9223372036854775807:usize / mult {
+        auto err# = string::from("Value '")
+        err#.push_str(s)
+        err#.push_str("' for ")
+        err#.push_str(option_name)
+        err#.push_str(" exceeds maximum size limit")
+        return Result<usize, string>::Err(cede err)
+    }
+
+    auto res = val * mult
+    return Result<usize, string>::Ok(res)
 }
 
 fn merge_extensions(cede target: Vec<string>, exts: Vec<string>) -> Vec<string> {
@@ -246,6 +355,13 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto max_count_enabled# = false
     auto max_count# = 0:usize
     auto max_columns# = 0:usize
+    auto max_total_matches_enabled# = false
+    auto max_total_matches# = 0:usize
+    auto max_result_bytes_enabled# = false
+    auto max_result_bytes# = 0:usize
+    auto max_files_with_matches_enabled# = false
+    auto max_files_with_matches# = 0:usize
+    auto no_truncation_notice# = false
     auto files_mode# = false
     auto json_mode# = false
     auto hidden# = false
@@ -639,6 +755,84 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
+        if view == "--max-total-matches" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag --max-total-matches requires an argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_usize_strict(val_arg.as_str(), "--max-total-matches")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_total_matches = parse_res.unwrap()
+            max_total_matches_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--max-total-matches=") {
+            auto val_str = view.substr(20:usize, view.len - 20:usize)
+            auto parse_res = parse_usize_strict(val_str, "--max-total-matches")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_total_matches = parse_res.unwrap()
+            max_total_matches_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--max-result-bytes" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag --max-result-bytes requires an argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_size_bytes_strict(val_arg.as_str(), "--max-result-bytes")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_result_bytes = parse_res.unwrap()
+            max_result_bytes_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--max-result-bytes=") {
+            auto val_str = view.substr(19:usize, view.len - 19:usize)
+            auto parse_res = parse_size_bytes_strict(val_str, "--max-result-bytes")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_result_bytes = parse_res.unwrap()
+            max_result_bytes_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--max-files-with-matches" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag --max-files-with-matches requires an argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_usize_strict(val_arg.as_str(), "--max-files-with-matches")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_files_with_matches = parse_res.unwrap()
+            max_files_with_matches_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--max-files-with-matches=") {
+            auto val_str = view.substr(25:usize, view.len - 25:usize)
+            auto parse_res = parse_usize_strict(val_str, "--max-files-with-matches")
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_files_with_matches = parse_res.unwrap()
+            max_files_with_matches_enabled = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--no-truncation-notice" {
+            no_truncation_notice = true
+            i = i + 1
+            continue
+        }
+
         if view == "--files" {
             files_mode = true
             i = i + 1
@@ -968,6 +1162,30 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         i = i + 1
     }
 
+    auto is_any_budget = max_total_matches_enabled || max_result_bytes_enabled || max_files_with_matches_enabled
+    if count && is_any_budget {
+        return Result<CliOptions, string>::Err(string::from("Flag -c (--count) cannot be combined with budget options (--max-total-matches, --max-result-bytes, --max-files-with-matches)"))
+    }
+    if quiet && is_any_budget {
+        return Result<CliOptions, string>::Err(string::from("Flag -q (--quiet) cannot be combined with budget options"))
+    }
+    if type_list_only && is_any_budget {
+        return Result<CliOptions, string>::Err(string::from("Flag --type-list cannot be combined with budget options"))
+    }
+    if files_mode && (max_total_matches_enabled || max_files_with_matches_enabled) {
+        return Result<CliOptions, string>::Err(string::from("Flag --files cannot be combined with match budgets (--max-total-matches, --max-files-with-matches)"))
+    }
+
+    auto budget_limits = BudgetLimits(
+        max_total_matches_enabled = max_total_matches_enabled,
+        max_total_matches = max_total_matches,
+        max_result_bytes_enabled = max_result_bytes_enabled,
+        max_result_bytes = max_result_bytes,
+        max_files_with_matches_enabled = max_files_with_matches_enabled,
+        max_files_with_matches = max_files_with_matches,
+        no_truncation_notice = no_truncation_notice
+    )
+
     if type_list_only {
         return Result<CliOptions, string>::Ok(CliOptions(
             patterns = Vec<string>::new(),
@@ -997,6 +1215,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             max_count_enabled = false,
             max_count = 0,
             max_columns = 0,
+            budget_limits = budget_limits,
             globs = Vec<GlobRule>::new(),
             include_type_exts = Vec<string>::new(),
             exclude_type_exts = Vec<string>::new()
@@ -1091,6 +1310,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         max_count_enabled = max_count_enabled,
         max_count = max_count,
         max_columns = max_columns,
+        budget_limits = budget_limits,
         globs = cede globs,
         include_type_exts = cede include_type_exts,
         exclude_type_exts = cede exclude_type_exts

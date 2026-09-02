@@ -171,3 +171,27 @@ pub fn posix_write_stdout(s: str) -> i32 {
         return 0
     }
 }
+
+pub fn posix_write_stderr(s: str) {
+    if s.len == 0 { return }
+    unsafe {
+        auto base_addr = s.raw_ptr() as Addr
+        auto rem# = s.len
+        auto offset# = 0:usize
+        loop rem > 0 {
+            auto *p = (base_addr + offset) as *void
+            auto n = write(2:i32, *p, rem)
+            if n <= 0 {
+                return
+            }
+            offset = offset + (n as usize)
+            rem = rem - (n as usize)
+        }
+    }
+}
+
+pub fn print_err(msg: str) {
+    posix_write_stderr("trg: ")
+    posix_write_stderr(msg)
+    posix_write_stderr("\n")
+}

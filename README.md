@@ -4,6 +4,23 @@
 
 ## Features & Guarantees
 
+- **Agent Protection & Output Budgets (`--max-total-matches`, `--max-result-bytes`, `--max-files-with-matches`, `--no-truncation-notice`)**:
+  - `--max-total-matches <NUM>`: Stop searching globally after NUM matching lines across all files. Explicit `0` is supported (zero results emitted, exit code 0).
+  - `--max-result-bytes <SIZE>`: Hard result payload budget supporting strict suffix notation (`K`, `M`, or raw bytes, e.g. `64K`, `1M`, `1048576`). Prevents context explosion while bounding protocol overhead. Also applies to `--files`.
+  - `--max-files-with-matches <NUM>`: Stop searching globally after NUM files with matching lines.
+  - `--no-truncation-notice`: Suppress trailing truncation warning message on stderr (`trg: search stopped early: ... limit reached (additional matches may exist)`).
+  - **Atomic OpeningMatchBatch**: Preflights group separators, pending before-context lines, and the first matching line as a single atomic unit. Before-context is never emitted without its matching line.
+  - **Lazy JSON Framing**: Under `--json` and active budgets, `begin`/`end` framing events are only emitted for files with at least one emitted match event, preventing control frame context blowout on 10,000+ zero-match file traversals.
+  - **Deterministic Termination Reason Priority**: Strict priority order `max_total_matches` > `max_files_with_matches` > `max_result_bytes`.
+- **Result Integrity Summary Protocol (`trg-json-v2`)**:
+  - `summary` event carries definitive search completeness status:
+    - `"complete": true|false`: `true` if and only if entire search completed without truncation and without path/read errors.
+    - `"truncated": true|false`: `true` if search stopped due to an active budget threshold.
+    - `"had_error": true|false`: `true` if any file I/O or directory walk error occurred.
+    - `"termination_reason"`: `"completed"` | `"max_total_matches"` | `"max_result_bytes"` | `"max_files_with_matches"` | `"search_error"`.
+    - `"limits"`: Active budget thresholds (`null` if disabled, `0` for explicit zero).
+    - `"stats"`: Comprehensive byte and record metrics (`result_payload_bytes_emitted`, `protocol_bytes_emitted`, `stdout_bytes_emitted`, `matched_lines_observed`, `matched_lines_emitted`, `files_scanned`, etc.).
+    - `"stopped_at"`: `{ "path": str, "line_number": usize }` pointing directly to where the search stopped.
 - **Literal Fast-Path Search (Default & `-F`)**: Clean fixed-string literal search path with zero regex overhead.
 - **Pattern Specification (`-e`, `--regexp <PATTERN>`, `-f <FILE>`)**:
   - `-e <PATTERN>` / `--regexp <PATTERN>`: Specify multiple search patterns combined as a union with leftmost-first ordering.
@@ -217,8 +234,17 @@ trg --sort path -l "pub fn" src/
 trg -c "pub fn" src/
 trg -c --include-zero "pub fn" src/
 
-# Suppress line numbers (-N)
-trg -N "pub fn" src/
+# Cap search at 10 total matches globally across all files
+trg --max-total-matches 10 "pub fn" src/
+
+# Cap result payload to 64KB (prevent LLM context window explosion)
+trg --max-result-bytes 64K "error" src/
+
+# Stop after discovering matches in 3 files
+trg --max-files-with-matches 3 "impl" src/
+
+# Agent JSONL streaming with hard payload limit and silent stderr
+trg --json --max-result-bytes 1M --no-truncation-notice "fn" src/
 
 # Output structured JSONL stream (trg-json-v2)
 trg --json -E -C 1 "fn\\s+[a-z_]+" src

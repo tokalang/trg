@@ -1,9 +1,102 @@
-// Output formatting module supporting Human, -l, -c, --files, context lines, and trg-json-v2 JSONL streaming.
+// Output formatting module supporting Human, -l, -c, --files, context lines, trg-json-v2 JSONL streaming, and OutputBudgetWriter.
 import core/types::{usize, char}
 import core/str::{str}
 import std/vec::{Vec}
-import src/types::{CliOptions, MatchEvent, SubMatch, GlobalStats}
-import src/posix::{posix_write_stdout}
+import src/types::{CliOptions, MatchEvent, SubMatch, GlobalStats, BudgetState, BudgetLimits}
+import src/posix::{posix_write_stdout, print_err}
+
+pub shape EmitOutcome (
+    Written = 0 |
+    Truncated = 1 |
+    BrokenPipe = 2 |
+    FatalError = 3
+)
+
+pub shape FileFrameState (
+    target_path: string,
+    begin_emitted#: bool
+)
+
+pub shape OutputBatch (
+    payload_str: string,
+    path: string,
+    line_number: usize,
+    is_payload: bool
+)
+
+pub shape OutputBudgetWriter (
+    is_json_mode: bool,
+    is_budget_active: bool
+)
+
+impl OutputBudgetWriter {
+    pub fn new(is_json_mode: bool, is_budget_active: bool) -> OutputBudgetWriter {
+        return OutputBudgetWriter(
+            is_json_mode = is_json_mode,
+            is_budget_active = is_budget_active
+        )
+    }
+
+    pub fn emit_payload(
+        self,
+        budget_state#: BudgetState,
+        frame_state#: FileFrameState,
+        batch: OutputBatch
+    ) -> EmitOutcome {
+        if budget_state.is_truncated {
+            return EmitOutcome::Truncated
+        }
+
+        auto payload_len = batch.payload_str.len()
+
+        // Preflight byte budget
+        if budget_state.limits.max_result_bytes_enabled {
+            if budget_state.result_payload_bytes_emitted >= budget_state.limits.max_result_bytes ||
+               payload_len > budget_state.limits.max_result_bytes - budget_state.result_payload_bytes_emitted {
+                budget_state.is_truncated = true
+                budget_state.truncation_reason = string::from("max_result_bytes")
+                budget_state.stopped_path = batch.path.clone()
+                budget_state.stopped_line_num = batch.line_number
+                return EmitOutcome::Truncated
+            }
+        }
+
+        // Lazy JSON begin framing: write begin first, and on success immediately set begin_emitted = true
+        if self.is_json_mode && !frame_state.begin_emitted {
+            auto b_str = format_json_begin(frame_state.target_path.as_str())
+            auto b_res = posix_write_stdout(b_str.as_str())
+            if b_res == 1 { return EmitOutcome::BrokenPipe }
+            else if b_res == 2 { return EmitOutcome::FatalError }
+            frame_state.begin_emitted = true
+            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + b_str.len()
+        }
+
+        // Write wire payload
+        auto w_res = posix_write_stdout(batch.payload_str.as_str())
+        if w_res == 1 { return EmitOutcome::BrokenPipe }
+        else if w_res == 2 { return EmitOutcome::FatalError }
+
+        if batch.is_payload {
+            budget_state.result_payload_bytes_emitted = budget_state.result_payload_bytes_emitted + payload_len
+        } else {
+            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + payload_len
+        }
+
+        return EmitOutcome::Written
+    }
+
+    pub fn emit_protocol_frame(
+        self,
+        budget_state#: BudgetState,
+        frame_str: str
+    ) -> EmitOutcome {
+        auto w_res = posix_write_stdout(frame_str)
+        if w_res == 1 { return EmitOutcome::BrokenPipe }
+        else if w_res == 2 { return EmitOutcome::FatalError }
+        budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + frame_str.len
+        return EmitOutcome::Written
+    }
+}
 
 fn hex_digit(v: u8) -> char {
     if v < 10:u8 {
@@ -74,33 +167,15 @@ pub fn write_line(line: str) -> i32 {
     return posix_write_stdout(s.as_str())
 }
 
-pub fn print_files_list(files: Vec<string>) -> i32 {
-    auto num_files = files.len()
-    auto i# = 0:usize
-    loop i < num_files {
-        auto &path_str = files.borrow(i)
-        auto res = write_line(path_str.as_str())
-        if res != 0 {
-            return res
-        }
-        i = i + 1
-    }
-    return 0
-}
-
-pub fn emit_group_separator() -> i32 {
-    return write_line("--")
-}
-
-pub fn emit_json_begin(path: str) -> i32 {
+pub fn format_json_begin(path: str) -> string {
     auto begin_json# = string::from("{\"type\":\"begin\",\"schema\":\"trg-json-v2\",\"data\":{\"path\":{\"text\":\"")
     auto esc_path = json_escape(path)
     begin_json#.push_str(esc_path.as_str())
-    begin_json#.push_str("\"}}}")
-    return write_line(begin_json.as_str())
+    begin_json#.push_str("\"}}}\n")
+    return cede begin_json
 }
 
-pub fn emit_json_match(ev: MatchEvent) -> i32 {
+pub fn format_json_match(ev: MatchEvent) -> string {
     auto esc_path = json_escape(ev.path.as_str())
     auto match_json# = string::from("{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"")
     match_json#.push_str(esc_path.as_str())
@@ -135,11 +210,11 @@ pub fn emit_json_match(ev: MatchEvent) -> i32 {
         s_idx = s_idx + 1
     }
 
-    match_json#.push_str("]}}")
-    return write_line(match_json.as_str())
+    match_json#.push_str("]}}\n")
+    return cede match_json
 }
 
-pub fn emit_json_context(ev: MatchEvent) -> i32 {
+pub fn format_json_context(ev: MatchEvent) -> string {
     auto esc_path = json_escape(ev.path.as_str())
     auto ctx_json# = string::from("{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"")
     ctx_json#.push_str(esc_path.as_str())
@@ -152,28 +227,48 @@ pub fn emit_json_context(ev: MatchEvent) -> i32 {
     ctx_json#.push_str(",\"absolute_offset\":")
     auto abs_str = u64_to_string(ev.absolute_offset as u64)
     ctx_json#.push_str(abs_str.as_str())
-    ctx_json#.push_str(",\"submatches\":[]}}")
-    return write_line(ctx_json.as_str())
+    ctx_json#.push_str(",\"submatches\":[]}}\n")
+    return cede ctx_json
 }
 
-pub fn emit_json_end(path: str, matches_count: usize) -> i32 {
+pub fn format_json_end(path: str, matches_emitted: usize) -> string {
     auto esc_path = json_escape(path)
     auto end_json# = string::from("{\"type\":\"end\",\"data\":{\"path\":{\"text\":\"")
     end_json#.push_str(esc_path.as_str())
     end_json#.push_str("\"},\"binary_offset\":null,\"stats\":{\"elapsed\":{\"secs\":0,\"nanos\":0},\"searches\":1,\"matches\":")
-    auto cnt_str = u64_to_string(matches_count as u64)
+    auto cnt_str = u64_to_string(matches_emitted as u64)
     end_json#.push_str(cnt_str.as_str())
-    end_json#.push_str("}}}")
-    return write_line(end_json.as_str())
+    end_json#.push_str("}}}\n")
+    return cede end_json
 }
 
-pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> i32 {
+pub fn emit_json_begin(path: str) -> i32 {
+    auto s = format_json_begin(path)
+    return posix_write_stdout(s.as_str())
+}
+
+pub fn emit_json_match(ev: MatchEvent) -> i32 {
+    auto s = format_json_match(ev)
+    return posix_write_stdout(s.as_str())
+}
+
+pub fn emit_json_context(ev: MatchEvent) -> i32 {
+    auto s = format_json_context(ev)
+    return posix_write_stdout(s.as_str())
+}
+
+pub fn emit_json_end(path: str, matches_emitted: usize) -> i32 {
+    auto s = format_json_end(path, matches_emitted)
+    return posix_write_stdout(s.as_str())
+}
+
+pub fn format_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> string {
     if opts.only_matching {
+        auto out# = string::new()
         auto num_sub = ev.submatches.len()
         auto s_idx# = 0:usize
         loop s_idx < num_sub {
             auto &sm = ev.submatches.borrow(s_idx)
-            auto out# = string::new()
             if multiple_files && ev.path.len() > 0 {
                 out#.push_str(ev.path.as_str())
                 out#.push_str(":")
@@ -186,11 +281,10 @@ pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) 
             }
 
             out#.push_str(sm.match_text.as_str())
-            auto w_res = write_line(out.as_str())
-            if w_res != 0 { return w_res }
+            out#.push_str("\n")
             s_idx = s_idx + 1
         }
-        return 0
+        return cede out
     }
 
     auto out# = string::new()
@@ -206,48 +300,194 @@ pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) 
     }
 
     if opts.max_columns > 0 && ev.line_text.len() > opts.max_columns {
-        out#.push_str("[Omitted long matching line]")
+        out#.push_str("[Omitted long matching line]\n")
     } else {
         out#.push_str(ev.line_text.as_str())
+        out#.push_str("\n")
     }
-    return write_line(out.as_str())
+    return cede out
+}
+
+pub fn format_human_context(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> string {
+    if opts.only_matching {
+        return string::from("")
+    }
+
+    auto out# = string::new()
+    if multiple_files && ev.path.len() > 0 {
+        out#.push_str(ev.path.as_str())
+        out#.push_str("-")
+    }
+
+    if opts.line_number {
+        auto lnum_str = u64_to_string(ev.line_number as u64)
+        out#.push_str(lnum_str.as_str())
+        out#.push_str("-")
+    }
+
+    if opts.max_columns > 0 && ev.line_text.len() > opts.max_columns {
+        out#.push_str("[Omitted long context line]\n")
+    } else {
+        out#.push_str(ev.line_text.as_str())
+        out#.push_str("\n")
+    }
+    return cede out
+}
+
+pub fn format_group_separator() -> string {
+    return string::from("--\n")
+}
+
+pub fn emit_group_separator() -> i32 {
+    return posix_write_stdout("--\n")
+}
+
+pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> i32 {
+    auto s = format_human_match(ev, opts, multiple_files)
+    return posix_write_stdout(s.as_str())
 }
 
 pub fn emit_human_context(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> i32 {
-    if opts.only_matching {
-        return 0
+    auto s = format_human_context(ev, opts, multiple_files)
+    if s.len() == 0 { return 0 }
+    return posix_write_stdout(s.as_str())
+}
+
+fn format_summary_json_raw(
+    stats: GlobalStats,
+    budget_state: BudgetState,
+    had_error: bool,
+    protocol_bytes: usize,
+    stdout_bytes: usize
+) -> string {
+    auto is_trunc = budget_state.is_truncated
+    auto is_comp = !is_trunc && !had_error
+    auto term_reason# = string::from("completed")
+    if is_trunc {
+        term_reason = budget_state.truncation_reason.clone()
+    } else if had_error {
+        term_reason = string::from("search_error")
     }
 
-    auto out# = string::new()
-    if multiple_files && ev.path.len() > 0 {
-        out#.push_str(ev.path.as_str())
-        out#.push_str("-")
-    }
-
-    if opts.line_number {
-        auto lnum_str = u64_to_string(ev.line_number as u64)
-        out#.push_str(lnum_str.as_str())
-        out#.push_str("-")
-    }
-
-    if opts.max_columns > 0 && ev.line_text.len() > opts.max_columns {
-        out#.push_str("[Omitted long context line]")
+    auto s# = string::from("{\"type\":\"summary\",\"data\":{\"complete\":")
+    if is_comp { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"truncated\":")
+    if is_trunc { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"had_error\":")
+    if had_error { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"termination_reason\":\"")
+    s#.push_str(term_reason.as_str())
+    s#.push_str("\",\"limits\":{\"max_total_matches\":")
+    if budget_state.limits.max_total_matches_enabled {
+        s#.push_str(u64_to_string(budget_state.limits.max_total_matches as u64).as_str())
     } else {
-        out#.push_str(ev.line_text.as_str())
+        s#.push_str("null")
     }
-    return write_line(out.as_str())
+    s#.push_str(",\"max_result_bytes\":")
+    if budget_state.limits.max_result_bytes_enabled {
+        s#.push_str(u64_to_string(budget_state.limits.max_result_bytes as u64).as_str())
+    } else {
+        s#.push_str("null")
+    }
+    s#.push_str(",\"max_files_with_matches\":")
+    if budget_state.limits.max_files_with_matches_enabled {
+        s#.push_str(u64_to_string(budget_state.limits.max_files_with_matches as u64).as_str())
+    } else {
+        s#.push_str("null")
+    }
+    s#.push_str("},\"stats\":{\"elapsed_total\":{\"secs\":0,\"nanos\":0},\"files_selected\":")
+    s#.push_str(u64_to_string(budget_state.files_selected as u64).as_str())
+    s#.push_str(",\"files_scanned\":")
+    s#.push_str(u64_to_string(budget_state.files_scanned as u64).as_str())
+    s#.push_str(",\"files_with_match_observed\":")
+    s#.push_str(u64_to_string(budget_state.files_with_match_observed as u64).as_str())
+    s#.push_str(",\"files_with_match_emitted\":")
+    s#.push_str(u64_to_string(budget_state.files_with_match_emitted as u64).as_str())
+    s#.push_str(",\"matched_lines_observed\":")
+    s#.push_str(u64_to_string(budget_state.matched_lines_observed as u64).as_str())
+    s#.push_str(",\"matched_lines_emitted\":")
+    s#.push_str(u64_to_string(budget_state.matched_lines_emitted as u64).as_str())
+    s#.push_str(",\"submatches_emitted\":")
+    s#.push_str(u64_to_string(budget_state.submatches_emitted as u64).as_str())
+    s#.push_str(",\"result_payload_bytes_emitted\":")
+    s#.push_str(u64_to_string(budget_state.result_payload_bytes_emitted as u64).as_str())
+    s#.push_str(",\"protocol_bytes_emitted\":")
+    s#.push_str(u64_to_string(protocol_bytes as u64).as_str())
+    s#.push_str(",\"stdout_bytes_emitted\":")
+    s#.push_str(u64_to_string(stdout_bytes as u64).as_str())
+    s#.push_str(",\"searches\":")
+    s#.push_str(u64_to_string(stats.total_files as u64).as_str())
+    s#.push_str(",\"searches_with_match\":")
+    s#.push_str(u64_to_string(stats.files_with_match as u64).as_str())
+    s#.push_str(",\"matches\":")
+    s#.push_str(u64_to_string(stats.total_matches as u64).as_str())
+    s#.push_str("},\"stopped_at\":")
+    if is_trunc && budget_state.stopped_path.len() > 0 {
+        s#.push_str("{\"path\":\"")
+        auto esc_p = json_escape(budget_state.stopped_path.as_str())
+        s#.push_str(esc_p.as_str())
+        s#.push_str("\",\"line_number\":")
+        s#.push_str(u64_to_string(budget_state.stopped_line_num as u64).as_str())
+        s#.push_str("}")
+    } else {
+        s#.push_str("null")
+    }
+    s#.push_str("}}\n")
+    return cede s
+}
+
+pub fn format_summary_json(
+    stats: GlobalStats,
+    budget_state: BudgetState,
+    had_error: bool
+) -> string {
+    auto p_prior = budget_state.protocol_bytes_emitted
+    auto r_emitted = budget_state.result_payload_bytes_emitted
+
+    // Fixed-point iteration to include summary string length in protocol_bytes_emitted and stdout_bytes_emitted
+    auto guess_len# = 400:usize
+    auto s# = string::new()
+    auto iter# = 0:usize
+    loop iter < 5:usize {
+        auto p_test = p_prior + guess_len
+        auto stdout_test = r_emitted + p_test
+        s = format_summary_json_raw(stats, budget_state, had_error, p_test, stdout_test)
+        if s.len() == guess_len {
+            break
+        }
+        guess_len = s.len()
+        iter = iter + 1
+    }
+    return cede s
 }
 
 pub fn print_summary_json(stats: GlobalStats) -> i32 {
-    auto sum_json# = string::from("{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"secs\":0,\"nanos\":0},\"stats\":{\"searches\":")
-    auto total_files_str = u64_to_string(stats.total_files as u64)
-    sum_json#.push_str(total_files_str.as_str())
-    sum_json#.push_str(",\"searches_with_match\":")
-    auto match_files_str = u64_to_string(stats.files_with_match as u64)
-    sum_json#.push_str(match_files_str.as_str())
-    sum_json#.push_str(",\"matches\":")
-    auto total_matches_str = u64_to_string(stats.total_matches as u64)
-    sum_json#.push_str(total_matches_str.as_str())
-    sum_json#.push_str("}}}")
-    return write_line(sum_json.as_str())
+    auto default_limits = BudgetLimits::new()
+    auto default_budget = BudgetState::new(default_limits)
+    auto s = format_summary_json(stats, default_budget, false)
+    return posix_write_stdout(s.as_str())
+}
+
+pub fn print_truncation_notice_stderr(budget_state: BudgetState) {
+    if !budget_state.is_truncated || budget_state.limits.no_truncation_notice {
+        return
+    }
+    auto msg# = string::from("search stopped early: ")
+    msg#.push_str(budget_state.truncation_reason.as_str())
+    msg#.push_str(" limit reached (additional matches may exist)")
+    print_err(msg.as_str())
+}
+
+pub fn print_files_list(files: Vec<string>) -> i32 {
+    auto num_files = files.len()
+    auto i# = 0:usize
+    loop i < num_files {
+        auto &path_str = files.borrow(i)
+        auto res = write_line(path_str.as_str())
+        if res != 0 {
+            return res
+        }
+        i = i + 1
+    }
+    return 0
 }

@@ -20,6 +20,108 @@ pub shape GlobRule (
     dir_only: bool
 )
 
+pub shape BudgetLimits (
+    max_total_matches_enabled: bool,
+    max_total_matches: usize,
+    max_result_bytes_enabled: bool,
+    max_result_bytes: usize,
+    max_files_with_matches_enabled: bool,
+    max_files_with_matches: usize,
+    no_truncation_notice: bool
+)
+
+impl BudgetLimits {
+    pub fn new() -> BudgetLimits {
+        return BudgetLimits(
+            max_total_matches_enabled = false,
+            max_total_matches = 0,
+            max_result_bytes_enabled = false,
+            max_result_bytes = 0,
+            max_files_with_matches_enabled = false,
+            max_files_with_matches = 0,
+            no_truncation_notice = false
+        )
+    }
+
+    pub fn is_budget_active(self) -> bool {
+        return self.max_total_matches_enabled ||
+               self.max_result_bytes_enabled ||
+               self.max_files_with_matches_enabled
+    }
+}
+
+pub shape BudgetState (
+    limits: BudgetLimits,
+    files_selected#: usize,
+    files_scanned#: usize,
+    files_with_match_observed#: usize,
+    files_with_match_emitted#: usize,
+    matched_lines_observed#: usize,
+    matched_lines_emitted#: usize,
+    submatches_emitted#: usize,
+    result_payload_bytes_emitted#: usize,
+    protocol_bytes_emitted#: usize,
+    is_truncated#: bool,
+    truncation_reason#: string,
+    stopped_path#: string,
+    stopped_line_num#: usize
+)
+
+impl BudgetState {
+    pub fn new(limits: BudgetLimits) -> BudgetState {
+        return BudgetState(
+            limits = limits,
+            files_selected = 0,
+            files_scanned = 0,
+            files_with_match_observed = 0,
+            files_with_match_emitted = 0,
+            matched_lines_observed = 0,
+            matched_lines_emitted = 0,
+            submatches_emitted = 0,
+            result_payload_bytes_emitted = 0,
+            protocol_bytes_emitted = 0,
+            is_truncated = false,
+            truncation_reason = string::from(""),
+            stopped_path = string::from(""),
+            stopped_line_num = 0
+        )
+    }
+
+    pub fn reserve_match(self#, path: str, line_num: usize, is_first_observed_for_file: bool) -> bool {
+        if self.is_truncated { return false }
+        self.matched_lines_observed = self.matched_lines_observed + 1
+        if is_first_observed_for_file {
+            self.files_with_match_observed = self.files_with_match_observed + 1
+        }
+
+        // Priority 1: max_total_matches
+        if self.limits.max_total_matches_enabled && self.matched_lines_emitted >= self.limits.max_total_matches {
+            self.is_truncated = true
+            self.truncation_reason = string::from("max_total_matches")
+            self.stopped_path = string::from(path)
+            self.stopped_line_num = line_num
+            return false
+        }
+        // Priority 2: max_files_with_matches
+        if self.limits.max_files_with_matches_enabled && is_first_observed_for_file && self.files_with_match_emitted >= self.limits.max_files_with_matches {
+            self.is_truncated = true
+            self.truncation_reason = string::from("max_files_with_matches")
+            self.stopped_path = string::from(path)
+            self.stopped_line_num = line_num
+            return false
+        }
+        return true
+    }
+
+    pub fn commit_match_emitted(self#, submatch_count: usize, is_first_emitted_for_file: bool) {
+        self.matched_lines_emitted = self.matched_lines_emitted + 1
+        self.submatches_emitted = self.submatches_emitted + submatch_count
+        if is_first_emitted_for_file {
+            self.files_with_match_emitted = self.files_with_match_emitted + 1
+        }
+    }
+}
+
 pub shape CliOptions (
     patterns: Vec<string>,
     paths: Vec<string>,
@@ -48,6 +150,7 @@ pub shape CliOptions (
     max_count_enabled: bool,
     max_count: usize,
     max_columns: usize,
+    budget_limits: BudgetLimits,
     globs: Vec<GlobRule>,
     include_type_exts: Vec<string>,
     exclude_type_exts: Vec<string>

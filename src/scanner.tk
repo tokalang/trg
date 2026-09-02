@@ -1,20 +1,26 @@
-// True incremental 64KB chunk-buffered streaming scanner with O(1) circular BeforeRing, 1MB line limit, 64MB context bound, and trg-json-v2 framing.
+// True incremental 64KB chunk-buffered streaming scanner with O(1) circular BeforeRing, OpeningMatchBatch atomic preflight, and lazy JSON framing.
 import core/types::{usize, char, Addr}
 import core/str::{str}
 import core/option::{Option}
 import std/vec::{Vec}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
-import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult, MatchRange, MatchDecision}
+import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult, MatchRange, MatchDecision, BudgetState}
 import src/matcher::{SearchPlan}
 import src/posix::{posix_ferror}
 import src/printer::{
+    OutputBudgetWriter,
+    FileFrameState,
+    OutputBatch,
+    EmitOutcome,
+    format_json_begin,
+    format_json_match,
+    format_json_context,
+    format_json_end,
+    format_human_match,
+    format_human_context,
+    format_group_separator,
     emit_json_begin,
-    emit_json_match,
-    emit_json_context,
     emit_json_end,
-    emit_human_match,
-    emit_human_context,
-    emit_group_separator,
     write_line,
     u64_to_string
 }
@@ -91,10 +97,24 @@ fn process_logical_line(
     opts: CliOptions,
     state#: ContextState,
     target_path: str,
-    multiple_files: bool
+    multiple_files: bool,
+    writer: OutputBudgetWriter,
+    budget_state#: BudgetState,
+    frame_state#: FileFrameState,
+    file_matched_lines_emitted#: usize,
+    file_has_emitted_match#: bool,
+    file_match_observed#: bool
 ) -> LineProcessOutcome {
     if line_matches {
-        // Group separator logic (human mode only, active when context is requested)
+        auto is_first_obs = !file_match_observed
+        file_match_observed = true
+        auto res_ok = budget_state#.reserve_match(target_path, line.line_number, is_first_obs)
+        if !res_ok {
+            return LineProcessOutcome::Continue
+        }
+
+        auto batch_payload# = string::new()
+        // 1. Group separator
         auto has_context = opts.before_context > 0 || opts.after_context > 0
         if has_context && state.last_emitted_line_num > 0 && state.had_emitted_group {
             auto first_to_emit# = line.line_number
@@ -106,14 +126,12 @@ fn process_logical_line(
             }
             if first_to_emit > state.last_emitted_line_num + 1 {
                 if !opts.json_mode {
-                    auto sep_res = emit_group_separator()
-                    if sep_res == 1 { return LineProcessOutcome::BrokenPipe }
-                    if sep_res == 2 { return LineProcessOutcome::FatalError }
+                    batch_payload#.push_str(format_group_separator().as_str())
                 }
             }
         }
 
-        // Flush before_ring in O(1) FIFO order
+        // 2. Before-context lines
         auto num_ring = state.ring.count
         auto r_idx# = 0:usize
         loop r_idx < num_ring {
@@ -128,13 +146,9 @@ fn process_logical_line(
                     submatches = Vec<SubMatch>::new()
                 )
                 if opts.json_mode {
-                    auto c_res = emit_json_context(ev)
-                    if c_res == 1 { return LineProcessOutcome::BrokenPipe }
-                    if c_res == 2 { return LineProcessOutcome::FatalError }
+                    batch_payload#.push_str(format_json_context(ev).as_str())
                 } else {
-                    auto h_res = emit_human_context(ev, opts, multiple_files)
-                    if h_res == 1 { return LineProcessOutcome::BrokenPipe }
-                    if h_res == 2 { return LineProcessOutcome::FatalError }
+                    batch_payload#.push_str(format_human_context(ev, opts, multiple_files).as_str())
                 }
                 state.last_emitted_line_num = r_line.line_number
             }
@@ -142,7 +156,7 @@ fn process_logical_line(
         }
         ring_clear(state.ring#)
 
-        // Emit match event
+        // 3. Match record
         auto submatches# = Vec<SubMatch>::new()
         if opts.json_mode || opts.only_matching {
             if !opts.invert_match {
@@ -161,6 +175,7 @@ fn process_logical_line(
                 }
             }
         }
+        auto submatch_count = submatches.len()
 
         auto ev = MatchEvent(
             path = string::from(target_path),
@@ -169,21 +184,41 @@ fn process_logical_line(
             absolute_offset = line.absolute_offset,
             submatches = cede submatches
         )
-
         if opts.json_mode {
-            auto m_res = emit_json_match(ev)
-            if m_res == 1 { return LineProcessOutcome::BrokenPipe }
-            if m_res == 2 { return LineProcessOutcome::FatalError }
+            batch_payload#.push_str(format_json_match(ev).as_str())
         } else {
-            auto m_res = emit_human_match(ev, opts, multiple_files)
-            if m_res == 1 { return LineProcessOutcome::BrokenPipe }
-            if m_res == 2 { return LineProcessOutcome::FatalError }
+            batch_payload#.push_str(format_human_match(ev, opts, multiple_files).as_str())
         }
 
-        state.last_emitted_line_num = line.line_number
-        state.pending_after = opts.after_context
-        state.had_emitted_group = true
-        return LineProcessOutcome::Continue
+        // 4. Emit via Writer (Atomic OpeningMatchBatch)
+        auto is_first_emitted = !file_has_emitted_match
+        auto batch = OutputBatch(
+            payload_str = cede batch_payload,
+            path = string::from(target_path),
+            line_number = line.line_number,
+            is_payload = true
+        )
+        auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
+        match outcome {
+            EmitOutcome::Written => {
+                budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
+                file_has_emitted_match = true
+                file_matched_lines_emitted = file_matched_lines_emitted + 1
+                state.last_emitted_line_num = line.line_number
+                state.pending_after = opts.after_context
+                state.had_emitted_group = true
+                return LineProcessOutcome::Continue
+            }
+            EmitOutcome::Truncated => {
+                return LineProcessOutcome::Continue
+            }
+            EmitOutcome::BrokenPipe => {
+                return LineProcessOutcome::BrokenPipe
+            }
+            EmitOutcome::FatalError => {
+                return LineProcessOutcome::FatalError
+            }
+        }
     }
 
     // Non-matching line
@@ -196,16 +231,35 @@ fn process_logical_line(
                 absolute_offset = line.absolute_offset,
                 submatches = Vec<SubMatch>::new()
             )
+            auto ctx_payload# = string::new()
             if opts.json_mode {
-                auto c_res = emit_json_context(ev)
-                if c_res == 1 { return LineProcessOutcome::BrokenPipe }
-                if c_res == 2 { return LineProcessOutcome::FatalError }
+                ctx_payload = format_json_context(ev)
             } else {
-                auto h_res = emit_human_context(ev, opts, multiple_files)
-                if h_res == 1 { return LineProcessOutcome::BrokenPipe }
-                if h_res == 2 { return LineProcessOutcome::FatalError }
+                ctx_payload = format_human_context(ev, opts, multiple_files)
             }
-            state.last_emitted_line_num = line.line_number
+            if ctx_payload.len() > 0 {
+                auto batch = OutputBatch(
+                    payload_str = cede ctx_payload,
+                    path = string::from(target_path),
+                    line_number = line.line_number,
+                    is_payload = true
+                )
+                auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
+                match outcome {
+                    EmitOutcome::Written => {
+                        state.last_emitted_line_num = line.line_number
+                    }
+                    EmitOutcome::Truncated => {
+                        return LineProcessOutcome::Continue
+                    }
+                    EmitOutcome::BrokenPipe => {
+                        return LineProcessOutcome::BrokenPipe
+                    }
+                    EmitOutcome::FatalError => {
+                        return LineProcessOutcome::FatalError
+                    }
+                }
+            }
         }
         state.pending_after = state.pending_after - 1
         return LineProcessOutcome::Continue
@@ -251,7 +305,13 @@ fn scan_and_process_line(
     delim_len: usize,
     matches_count#: usize,
     has_match#: bool,
-    max_count_reached#: bool
+    max_count_reached#: bool,
+    writer: OutputBudgetWriter,
+    budget_state#: BudgetState,
+    frame_state#: FileFrameState,
+    file_matched_lines_emitted#: usize,
+    file_has_emitted_match#: bool,
+    file_match_observed#: bool
 ) -> LineProcessOutcome {
     auto line_matches# = false
     auto ranges# = Vec<MatchRange>::new()
@@ -282,14 +342,47 @@ fn scan_and_process_line(
             }
 
             if opts.quiet {
+                auto is_first_obs = !file_match_observed
+                file_match_observed = true
+                budget_state.matched_lines_observed = budget_state.matched_lines_observed + 1
+                if is_first_obs {
+                    budget_state.files_with_match_observed = budget_state.files_with_match_observed + 1
+                }
                 return LineProcessOutcome::Continue
             }
 
             if opts.files_with_matches {
-                auto w_res = write_line(target_path)
-                if w_res == 1 { return LineProcessOutcome::BrokenPipe }
-                if w_res == 2 { return LineProcessOutcome::FatalError }
-                return LineProcessOutcome::Continue
+                auto is_first = !file_has_emitted_match
+                auto res_ok = budget_state#.reserve_match(target_path, line_num, is_first)
+                if !res_ok {
+                    return LineProcessOutcome::Continue
+                }
+                auto path_line# = string::from(target_path)
+                path_line#.push_str("\n")
+                auto batch = OutputBatch(
+                    payload_str = cede path_line,
+                    path = string::from(target_path),
+                    line_number = line_num,
+                    is_payload = true
+                )
+                auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
+                match outcome {
+                    EmitOutcome::Written => {
+                        budget_state#.commit_match_emitted(0, is_first)
+                        file_has_emitted_match = true
+                        file_matched_lines_emitted = file_matched_lines_emitted + 1
+                        return LineProcessOutcome::Continue
+                    }
+                    EmitOutcome::Truncated => {
+                        return LineProcessOutcome::Continue
+                    }
+                    EmitOutcome::BrokenPipe => {
+                        return LineProcessOutcome::BrokenPipe
+                    }
+                    EmitOutcome::FatalError => {
+                        return LineProcessOutcome::FatalError
+                    }
+                }
             }
         }
     }
@@ -308,7 +401,13 @@ fn scan_and_process_line(
             opts,
             context_state#,
             target_path,
-            multiple_files
+            multiple_files,
+            writer,
+            budget_state#,
+            frame_state#,
+            file_matched_lines_emitted#,
+            file_has_emitted_match#,
+            file_match_observed#
         )
     }
 
@@ -319,8 +418,12 @@ pub fn scan_file_stream(
     target_path: string,
     opts: CliOptions,
     plan: SearchPlan,
-    multiple_files: bool
+    multiple_files: bool,
+    writer: OutputBudgetWriter,
+    budget_state#: BudgetState
 ) -> ScanResult {
+    budget_state.files_scanned = budget_state.files_scanned + 1
+
     auto is_stdin = target_path.as_str() == "-"
     auto open_path# = target_path.clone()
     if is_stdin {
@@ -352,6 +455,7 @@ pub fn scan_file_stream(
         auto nul *raw_buf = libc_malloc(65536:usize)
         if *raw_buf == null {
             libc_fclose(*file)
+            log_scanner_err(target_path.as_str(), "Out of memory allocating chunk buffer")
             return ScanResult(
                 path = target_path.clone(),
                 matches_count = 0,
@@ -363,133 +467,113 @@ pub fn scan_file_stream(
         }
         auto *buf = raw_buf.unwrap()
 
-        // In JSON mode, emit begin event immediately upon file opening (trg-json-v2) unless in quiet mode
-        if opts.json_mode && !opts.quiet {
-            auto b_res = emit_json_begin(target_path.as_str())
-            if b_res != 0 {
-                libc_free(*buf)
-                libc_fclose(*file)
-                auto is_bp = b_res == 1
-                auto had_err = b_res == 2
-                return ScanResult(
-                    path = target_path.clone(),
-                    matches_count = 0,
-                    has_match = false,
-                    is_binary = false,
-                    had_error = had_err,
-                    is_broken_pipe = is_bp
-                )
-            }
-        }
-
-        auto line_buf# = string::new()
-        auto line_num# = 1:usize
-        auto abs_offset# = 0:usize
         auto matches_count# = 0:usize
         auto has_match# = false
-        auto is_first_chunk# = true
         auto is_binary# = false
         auto had_error# = false
         auto is_broken_pipe# = false
-        auto max_count_reached# = false
-        if opts.max_count_enabled && opts.max_count == 0 {
-            max_count_reached = true
+        auto first_chunk# = true
+        auto max_count_reached# = opts.max_count_enabled && opts.max_count == 0
+
+        auto file_matched_lines_emitted# = 0:usize
+        auto file_match_observed# = false
+        auto file_has_emitted_match# = false
+        auto frame_state# = FileFrameState(
+            target_path = target_path.clone(),
+            begin_emitted = false
+        )
+
+        // If not in budget mode, JSON begins immediately on file open
+        if opts.json_mode && !opts.quiet && !opts.budget_limits.is_budget_active() {
+            auto b_res = emit_json_begin(target_path.as_str())
+            if b_res == 1 { is_broken_pipe = true }
+            else if b_res == 2 { had_error = true }
+            frame_state.begin_emitted = true
+            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + format_json_begin(target_path.as_str()).len()
         }
 
         auto context_state# = make_context_state(opts.before_context)
+        auto line_num# = 1:usize
+        auto abs_offset# = 0:usize
+        auto line_buf# = string::new()
 
-        loop true {
-            if max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0) {
-                break
-            }
-
-            auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
-            if n == 0 {
+        loop !is_broken_pipe && !had_error && !budget_state.is_truncated {
+            auto bytes_read = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            if bytes_read == 0 {
                 if posix_ferror((*file) as Addr) {
-                    log_scanner_err(target_path.as_str(), "Read error occurred during file streaming")
                     had_error = true
+                    log_scanner_err(target_path.as_str(), "I/O read error")
                 }
                 break
             }
 
             auto *c_ptr = ((*buf) as Addr) as *char
-            auto chunk_str = string::from_with_len(*c_ptr, n)
+            auto chunk_str = string::from_with_len(*c_ptr, bytes_read)
             auto chunk_view = chunk_str.as_str()
 
-            if is_first_chunk {
-                is_first_chunk = false
+            if first_chunk {
+                first_chunk = false
                 if is_binary_chunk(chunk_view) {
                     is_binary = true
-                    if opts.json_mode {
-                        auto end_res = emit_json_end(target_path.as_str(), 0)
-                        if end_res == 1 { is_broken_pipe = true }
-                        else if end_res == 2 { had_error = true }
-                    }
                     break
                 }
             }
 
-            auto cursor# = 0:usize
+            auto chunk_pos# = 0:usize
+            loop chunk_pos < chunk_view.len && !is_broken_pipe && !had_error && !budget_state.is_truncated {
+                auto rem_chunk = chunk_view.substr(chunk_pos, chunk_view.len - chunk_pos)
+                auto nl_opt = rem_chunk.index_of('\n' as char)
 
-            loop cursor < chunk_view.len {
-                auto rem = chunk_view.substr(cursor, chunk_view.len - cursor)
-                auto nl_opt = rem.index_of('\n' as char)
                 if nl_opt.is_none() {
-                    // Transition 3: No newline found in remaining chunk slice
-                    line_buf#.push_str(rem)
-                    break
-                }
-
-                auto nl_pos = nl_opt.unwrap()
-                auto chunk_slice = rem.substr(0, nl_pos)
-                auto had_line_buf = line_buf.len() > 0
-                auto advance_len# = 0:usize
-
-                if !had_line_buf {
-                    // Transition 1: In-chunk fast-path (zero extra copy)
-                    auto line_text# = chunk_slice
-                    auto delim_len# = 1:usize
-                    if chunk_slice.len > 0 && chunk_slice.byte_at(chunk_slice.len - 1) == ('\r' as char) {
-                        line_text = chunk_slice.substr(0, chunk_slice.len - 1)
-                        delim_len = 2:usize
-                    }
-                    advance_len = line_text.len + delim_len
-                    auto outcome = scan_and_process_line(
-                        plan, opts, context_state#, target_path.as_str(), multiple_files,
-                        line_text, line_num, abs_offset, delim_len,
-                        matches_count#, has_match#, max_count_reached#
-                    )
-                    match outcome {
-                        LineProcessOutcome::Continue => {}
-                        LineProcessOutcome::BrokenPipe => {
-                            is_broken_pipe = true
-                            break
-                        }
-                        LineProcessOutcome::FatalError => {
-                            had_error = true
-                            break
-                        }
-                    }
+                    // Transition 3: no newline in remaining chunk -> buffer and advance to next chunk
+                    line_buf#.push_str(rem_chunk)
+                    chunk_pos = chunk_view.len
                 } else {
-                    // Transition 2: Line completion across chunk boundaries
-                    line_buf#.push_str(chunk_slice)
+                    auto nl_idx = nl_opt.unwrap()
                     auto outcome# = LineProcessOutcome::Continue
-                    {
-                        auto full_view = line_buf.as_str()
-                        auto line_text# = full_view
+                    auto advance_len# = 0:usize
+
+                    if line_buf.len() == 0 {
+                        // Transition 1: Fast-path in-chunk line
+                        auto raw_slice = rem_chunk.substr(0, nl_idx)
+                        auto line_text# = raw_slice
                         auto delim_len# = 1:usize
-                        if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
-                            line_text = full_view.substr(0, full_view.len - 1)
+                        if line_text.len > 0 && line_text.byte_at(line_text.len - 1) == ('\r' as char) {
+                            line_text = line_text.substr(0, line_text.len - 1)
                             delim_len = 2:usize
                         }
-                        advance_len = line_text.len + delim_len
+                        advance_len = nl_idx + 1:usize
                         outcome = scan_and_process_line(
                             plan, opts, context_state#, target_path.as_str(), multiple_files,
                             line_text, line_num, abs_offset, delim_len,
-                            matches_count#, has_match#, max_count_reached#
+                            matches_count#, has_match#, max_count_reached#,
+                            writer, budget_state#, frame_state#,
+                            file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
                         )
+                    } else {
+                        // Transition 2: Multi-chunk line completion
+                        line_buf#.push_str(rem_chunk.substr(0, nl_idx))
+                        advance_len = line_buf.len() + 1:usize
+                        {
+                            auto raw_line = line_buf.as_str()
+                            auto line_text# = raw_line
+                            auto delim_len# = 1:usize
+                            if line_text.len > 0 && line_text.byte_at(line_text.len - 1) == ('\r' as char) {
+                                line_text = line_text.substr(0, line_text.len - 1)
+                                delim_len = 2:usize
+                            }
+                            outcome = scan_and_process_line(
+                                plan, opts, context_state#, target_path.as_str(), multiple_files,
+                                line_text, line_num, abs_offset, delim_len,
+                                matches_count#, has_match#, max_count_reached#,
+                                writer, budget_state#, frame_state#,
+                                file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
+                            )
+                        }
+                        line_buf#.clear()
                     }
-                    line_buf#.clear()
+
+                    chunk_pos = chunk_pos + nl_idx + 1:usize
                     match outcome {
                         LineProcessOutcome::Continue => {}
                         LineProcessOutcome::BrokenPipe => {
@@ -501,21 +585,19 @@ pub fn scan_file_stream(
                             break
                         }
                     }
-                }
+                    abs_offset = abs_offset + advance_len
+                    line_num = line_num + 1
 
-                abs_offset = abs_offset + advance_len
-                line_num = line_num + 1
-                cursor = cursor + nl_pos + 1
-
-                if has_match && (opts.files_with_matches || opts.quiet) {
-                    break
-                }
-                if max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0) {
-                    break
+                    if has_match && (opts.files_with_matches || opts.quiet) {
+                        break
+                    }
+                    if max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0) {
+                        break
+                    }
                 }
             }
 
-            if is_broken_pipe || had_error {
+            if is_broken_pipe || had_error || budget_state.is_truncated {
                 break
             }
             if has_match && (opts.files_with_matches || opts.quiet) {
@@ -527,23 +609,25 @@ pub fn scan_file_stream(
         }
 
         // Transition 4: Process leftover final line at EOF
-        if !is_binary && !had_error && !is_broken_pipe && line_buf.len() > 0 && !(has_match && (opts.files_with_matches || opts.quiet)) {
+        if !is_binary && !had_error && !is_broken_pipe && !budget_state.is_truncated && line_buf.len() > 0 && !(has_match && (opts.files_with_matches || opts.quiet)) {
             if !(max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0)) {
                 auto advance_len# = 0:usize
                 auto outcome# = LineProcessOutcome::Continue
                 {
-                    auto full_view = line_buf.as_str()
-                    auto line_text# = full_view
+                    auto raw_line = line_buf.as_str()
+                    auto line_text# = raw_line
                     auto delim_len# = 0:usize
-                    if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
-                        line_text = full_view.substr(0, full_view.len - 1)
+                    if line_text.len > 0 && line_text.byte_at(line_text.len - 1) == ('\r' as char) {
+                        line_text = line_text.substr(0, line_text.len - 1)
                         delim_len = 1:usize
                     }
                     advance_len = line_text.len + delim_len
                     outcome = scan_and_process_line(
                         plan, opts, context_state#, target_path.as_str(), multiple_files,
                         line_text, line_num, abs_offset, delim_len,
-                        matches_count#, has_match#, max_count_reached#
+                        matches_count#, has_match#, max_count_reached#,
+                        writer, budget_state#, frame_state#,
+                        file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
                     )
                 }
                 line_buf#.clear()
@@ -576,19 +660,25 @@ pub fn scan_file_stream(
             }
         }
 
-        // Always emit matching end event in JSON mode if begin was emitted
-        if !is_binary && opts.json_mode && !opts.quiet && !is_broken_pipe {
-            auto e_res = emit_json_end(target_path.as_str(), matches_count)
+        // In JSON mode: emit end event only if begin was emitted
+        if opts.json_mode && !opts.quiet && !is_broken_pipe && frame_state.begin_emitted {
+            auto e_res = emit_json_end(target_path.as_str(), file_matched_lines_emitted)
             if e_res == 1 { is_broken_pipe = true }
             else if e_res == 2 { had_error = true }
+            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + format_json_end(target_path.as_str(), file_matched_lines_emitted).len()
         }
 
         libc_free(*buf)
         libc_fclose(*file)
 
+        auto ret_matches# = file_matched_lines_emitted
+        if opts.quiet {
+            ret_matches = matches_count
+        }
+
         return ScanResult(
             path = target_path.clone(),
-            matches_count = matches_count,
+            matches_count = ret_matches,
             has_match = has_match,
             is_binary = is_binary,
             had_error = had_error,

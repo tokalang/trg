@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.6.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.7.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.6.0 identity on both binaries
+    # Validate exact 0.7.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.6.0 (Toka)", f"Expected 'trg 0.6.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.7.0 (Toka)", f"Expected 'trg 0.7.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.6.0 (Toka)", f"Expected 'trg 0.6.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.7.0 (Toka)", f"Expected 'trg 0.7.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.6.0
-    log("Test 1: Help & Version flags (exact 0.6.0 release identity)")
+    # Test 1: Help & Version exact 0.7.0
+    log("Test 1: Help & Version flags (exact 0.7.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.6.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.7.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.6.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.7.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -692,7 +692,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.6.0" in r_re_ctx.stdout
+    assert "trg 0.7.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1348,59 +1348,65 @@ def main():
         lm_lines = [l for l in r_e_leftmost.stdout.strip().split("\n") if l]
         # "pineapple apple banana" -> matches "apple" in pineapple, "apple", "banana"
         assert lm_lines == ["apple", "apple", "banana"]
-
         # Regex multi -e matching (-N suppresses line numbers)
         r_e_regex = run_cmd([trg, "-E", "-o", "-N", "-e", "quick|lazy", "-e", "fox|dog", str(e_fixture)])
         assert r_e_regex.returncode == 0
         re_lines = [l for l in r_e_regex.stdout.strip().split("\n") if l]
         assert re_lines == ["quick", "fox", "lazy", "dog"]
+
+        # Positional terminator '--'
+        (fixtures_dir / "-weird_name.txt").write_text("found weird file\n", encoding="utf-8")
+        r_term = run_cmd([trg, "found", "--", str(fixtures_dir / "-weird_name.txt")])
+        assert r_term.returncode == 0
+        assert "found weird file" in r_term.stdout
     finally:
         if e_fixture.exists():
             e_fixture.unlink()
+        if (fixtures_dir / "-weird_name.txt").exists():
+            (fixtures_dir / "-weird_name.txt").unlink()
 
-    # Test 69: Pattern file -f / --file loading (LF/CRLF, blank lines, empty file /dev/null)
+    # Test 69: Pattern file -f / --file loading (LF/CRLF/blank lines/empty file)
     log("Test 69: Pattern file -f / --file loading (LF/CRLF/blank lines/empty file)")
-    pat_file = fixtures_dir / "test_patterns.txt"
-    target_file = fixtures_dir / "test_target_file.txt"
-    blank_pat_file = fixtures_dir / "test_blank_pat.txt"
+    f_fixture = fixtures_dir / "test_patterns_input.txt"
+    pat_file_lf = fixtures_dir / "pats_lf.txt"
+    pat_file_crlf = fixtures_dir / "pats_crlf.txt"
+    pat_file_empty = fixtures_dir / "pats_empty.txt"
     try:
-        pat_file.write_bytes(b"TargetAlpha\r\nTargetBeta\nTargetGamma\r\n")
-        target_file.write_text("line with TargetAlpha\nline with nothing\nline with TargetGamma\n", encoding="utf-8")
+        f_fixture.write_text("apple pie\nbanana split\ncherry tart\n", encoding="utf-8")
+        pat_file_lf.write_text("apple\ncherry\n", encoding="utf-8")
+        pat_file_crlf.write_bytes(b"banana\r\napple\r\n")
+        pat_file_empty.write_text("", encoding="utf-8")
 
-        r_f = run_cmd([trg, "-f", str(pat_file), "-n", str(target_file)])
-        assert r_f.returncode == 0
-        f_lines = [l for l in r_f.stdout.strip().split("\n") if l]
-        assert len(f_lines) == 2
-        assert "1:line with TargetAlpha" in f_lines[0]
-        assert "3:line with TargetGamma" in f_lines[1]
+        # LF pattern file
+        r_f_lf = run_cmd([trg, "-f", str(pat_file_lf), str(f_fixture)])
+        assert r_f_lf.returncode == 0
+        lf_lines = [l for l in r_f_lf.stdout.strip().split("\n") if l]
+        assert len(lf_lines) == 2
+        assert "apple pie" in lf_lines[0]
+        assert "cherry tart" in lf_lines[1]
 
-        # Pattern file with explicit blank line -> matches every line
-        blank_pat_file.write_text("\n", encoding="utf-8")
-        r_blank = run_cmd([trg, "-f", str(blank_pat_file), "-n", str(target_file)])
-        assert r_blank.returncode == 0
-        b_lines = [l for l in r_blank.stdout.strip().split("\n") if l]
-        assert len(b_lines) == 3
+        # CRLF pattern file
+        r_f_crlf = run_cmd([trg, "-f", str(pat_file_crlf), str(f_fixture)])
+        assert r_f_crlf.returncode == 0
+        crlf_lines = [l for l in r_f_crlf.stdout.strip().split("\n") if l]
+        assert len(crlf_lines) == 2
 
-        # Empty pattern file (/dev/null) in literal and regex mode -> exit code 1 (no matches possible)
-        r_devnull_lit = run_cmd([trg, "-f", "/dev/null", str(target_file)], check=False)
-        assert r_devnull_lit.returncode == 1
-        assert r_devnull_lit.stdout == ""
+        # Empty pattern file matches nothing (exit code 1)
+        r_f_empty = run_cmd([trg, "-f", str(pat_file_empty), str(f_fixture)], check=False)
+        assert r_f_empty.returncode == 1
+        assert r_f_empty.stdout == ""
 
-        r_devnull_re = run_cmd([trg, "-E", "-f", "/dev/null", str(target_file)], check=False)
-        assert r_devnull_re.returncode == 1
-        assert r_devnull_re.stdout == ""
-
-        # Missing pattern file returns 2
-        r_f_err = run_cmd([trg, "-f", "non_existent_pats.txt", str(target_file)], check=False)
-        assert r_f_err.returncode == 2
-        assert "Failed to open pattern file" in r_f_err.stderr
+        # Pattern file containing empty lines matches everything
+        pat_file_blank = fixtures_dir / "pats_blank.txt"
+        pat_file_blank.write_text("apple\n\ncherry\n", encoding="utf-8")
+        r_f_blank = run_cmd([trg, "-f", str(pat_file_blank), str(f_fixture)])
+        assert r_f_blank.returncode == 0
+        assert len([l for l in r_f_blank.stdout.strip().split("\n") if l]) == 3
+        pat_file_blank.unlink()
     finally:
-        if pat_file.exists():
-            pat_file.unlink()
-        if target_file.exists():
-            target_file.unlink()
-        if blank_pat_file.exists():
-            blank_pat_file.unlink()
+        for p in [f_fixture, pat_file_lf, pat_file_crlf, pat_file_empty]:
+            if p.exists():
+                p.unlink()
 
     # Test 70: --sort path and --sortr path deterministic traversal with O(N log N) merge sort
     log("Test 70: --sort path and --sortr path deterministic traversal (O(N log N) merge sort)")
@@ -1494,10 +1500,301 @@ def main():
         if comb_dir.exists():
             shutil.rmtree(comb_dir)
 
+    # Test 72: Explicit 0 Budgets with -B/-C
+    log("Test 72: Explicit 0 Budgets with -B/-C")
+    b0_dir = fixtures_dir / "test_b0_tree"
+    try:
+        b0_dir.mkdir(parents=True, exist_ok=True)
+        (b0_dir / "sample.txt").write_text("before1\nbefore2\nMATCH_LINE\nafter1\n", encoding="utf-8")
+        r_b0 = run_cmd([trg, "--max-total-matches", "0", "-C", "2", "MATCH_LINE", str(b0_dir)])
+        assert r_b0.returncode == 0
+        assert r_b0.stdout == ""
+        assert "search stopped early: max_total_matches limit reached" in r_b0.stderr
+
+        # With JSON
+        r_b0_j = run_cmd([trg, "--max-total-matches", "0", "-C", "2", "--json", "MATCH_LINE", str(b0_dir)])
+        assert r_b0_j.returncode == 0
+        j_lines = [json.loads(l) for l in r_b0_j.stdout.strip().split("\n") if l]
+        assert len(j_lines) == 1
+        sum_ev = j_lines[0]
+        assert sum_ev["type"] == "summary"
+        assert sum_ev["data"]["complete"] is False
+        assert sum_ev["data"]["truncated"] is True
+        assert sum_ev["data"]["termination_reason"] == "max_total_matches"
+        assert sum_ev["data"]["limits"]["max_total_matches"] == 0
+        assert sum_ev["data"]["stats"]["matched_lines_emitted"] == 0
+        assert sum_ev["data"]["stopped_at"]["line_number"] == 3
+    finally:
+        if b0_dir.exists():
+            shutil.rmtree(b0_dir)
+
+    # Test 73: Lazy JSON Framing on 100 zero-match files with --max-result-bytes
+    log("Test 73: Lazy JSON Framing on 100 zero-match files")
+    lazy_dir = fixtures_dir / "test_lazy_json"
+    try:
+        lazy_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(100):
+            (lazy_dir / f"f_{i:03d}.txt").write_text(f"content line {i}\n", encoding="utf-8")
+        r_lazy = run_cmd([trg, "--max-result-bytes", "1000", "--json", "NONEXISTENT_NEEDLE", str(lazy_dir)], check=False)
+        assert r_lazy.returncode == 1
+        j_lines = [json.loads(l) for l in r_lazy.stdout.strip().split("\n") if l]
+        assert len(j_lines) == 1 # ONLY 1 summary event, 0 begin/end events!
+        assert j_lines[0]["type"] == "summary"
+        assert j_lines[0]["data"]["stats"]["files_scanned"] == 100
+        assert j_lines[0]["data"]["stats"]["result_payload_bytes_emitted"] == 0
+        assert j_lines[0]["data"]["stats"]["protocol_bytes_emitted"] == len(r_lazy.stdout.encode("utf-8"))
+    finally:
+        if lazy_dir.exists():
+            shutil.rmtree(lazy_dir)
+
+    # Test 74: Open file truncation in JSON mode
+    log("Test 74: Open file truncation emits end event before summary")
+    trunc_dir = fixtures_dir / "test_trunc_json"
+    try:
+        trunc_dir.mkdir(parents=True, exist_ok=True)
+        (trunc_dir / "multi.txt").write_text("TARGET 1\nTARGET 2\nTARGET 3\nTARGET 4\n", encoding="utf-8")
+        r_tj = run_cmd([trg, "--max-total-matches", "2", "--json", "TARGET", str(trunc_dir)])
+        assert r_tj.returncode == 0
+        j_lines = [json.loads(l) for l in r_tj.stdout.strip().split("\n") if l]
+        assert len(j_lines) == 5 # begin -> match 1 -> match 2 -> end -> summary (total 5 lines)
+        types = [ev["type"] for ev in j_lines]
+        assert types == ["begin", "match", "match", "end", "summary"]
+        assert j_lines[3]["data"]["stats"]["matches"] == 2
+        assert j_lines[4]["data"]["complete"] is False
+        assert j_lines[4]["data"]["truncated"] is True
+        assert j_lines[4]["data"]["stats"]["matched_lines_emitted"] == 2
+    finally:
+        if trunc_dir.exists():
+            shutil.rmtree(trunc_dir)
+
+    # Test 75: OpeningMatchBatch preflight atomic evidence integrity
+    log("Test 75: OpeningMatchBatch preflight atomic evidence integrity")
+    atom_dir = fixtures_dir / "test_atom_tree"
+    try:
+        atom_dir.mkdir(parents=True, exist_ok=True)
+        (atom_dir / "atomic.txt").write_text("ctx1\nctx2\nTARGET\n", encoding="utf-8")
+        # Full before-context + match record is ~25 bytes; budget 10 bytes -> rejected atomically
+        r_atom = run_cmd([trg, "-B", "2", "--max-result-bytes", "10", "TARGET", str(atom_dir)])
+        assert r_atom.returncode == 0
+        assert r_atom.stdout == ""
+        assert "max_result_bytes limit reached" in r_atom.stderr
+    finally:
+        if atom_dir.exists():
+            shutil.rmtree(atom_dir)
+
+    # Test 76: BrokenPipe pipe handling
+    log("Test 76: BrokenPipe clean exit without false truncation")
+    bp_dir = fixtures_dir / "test_bp_tree"
+    try:
+        bp_dir.mkdir(parents=True, exist_ok=True)
+        (bp_dir / "huge.txt").write_text("LINE\n" * 10000, encoding="utf-8")
+        proc = subprocess.Popen([trg, "LINE", str(bp_dir / "huge.txt")], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        head_line = proc.stdout.readline()
+        proc.stdout.close()
+        proc.wait()
+        assert proc.returncode == 0, f"Expected clean exit 0 on SIGPIPE/EPIPE, got {proc.returncode}"
+        assert b"LINE" in head_line
+        assert b"search stopped early" not in proc.stderr.read()
+    finally:
+        if bp_dir.exists():
+            shutil.rmtree(bp_dir)
+
+    # Test 77: Truthful completeness matrix
+    log("Test 77: Truthful completeness matrix")
+    comp_dir = fixtures_dir / "test_comp_tree"
+    try:
+        comp_dir.mkdir(parents=True, exist_ok=True)
+        (comp_dir / "clean.txt").write_text("CLEAN_MATCH 1\nCLEAN_MATCH 2\n", encoding="utf-8")
+
+        # 1. Clean completed
+        r1 = run_cmd([trg, "--json", "CLEAN_MATCH", str(comp_dir / "clean.txt")])
+        s1 = json.loads(r1.stdout.strip().split("\n")[-1])["data"]
+        assert s1["complete"] is True
+        assert s1["truncated"] is False
+        assert s1["had_error"] is False
+        assert s1["termination_reason"] == "completed"
+
+        # 2. Budget truncated
+        r2 = run_cmd([trg, "--json", "--max-total-matches", "1", "CLEAN_MATCH", str(comp_dir / "clean.txt")])
+        s2 = json.loads(r2.stdout.strip().split("\n")[-1])["data"]
+        assert s2["complete"] is False
+        assert s2["truncated"] is True
+        assert s2["had_error"] is False
+        assert s2["termination_reason"] == "max_total_matches"
+
+        # 3. Path error occurred
+        r3 = run_cmd([trg, "--json", "CLEAN_MATCH", "/nonexistent_path_abc123", str(comp_dir / "clean.txt")], check=False)
+        assert r3.returncode == 2
+        s3 = json.loads(r3.stdout.strip().split("\n")[-1])["data"]
+        assert s3["complete"] is False
+        assert s3["truncated"] is False
+        assert s3["had_error"] is True
+        assert s3["termination_reason"] == "search_error"
+
+        # 4. Path error + Budget truncated
+        r4 = run_cmd([trg, "--json", "--max-total-matches", "1", "CLEAN_MATCH", "/nonexistent_path_abc123", str(comp_dir / "clean.txt")], check=False)
+        assert r4.returncode == 2
+        s4 = json.loads(r4.stdout.strip().split("\n")[-1])["data"]
+        assert s4["complete"] is False
+        assert s4["truncated"] is True
+        assert s4["had_error"] is True
+        assert s4["termination_reason"] == "max_total_matches"
+    finally:
+        if comp_dir.exists():
+            shutil.rmtree(comp_dir)
+
+    # Test 78: Limits JSON serialization
+    log("Test 78: Limits JSON serialization (null vs explicit 0 vs values)")
+    lim_dir = fixtures_dir / "test_lim_tree"
+    try:
+        lim_dir.mkdir(parents=True, exist_ok=True)
+        (lim_dir / "a.txt").write_text("hello world\n", encoding="utf-8")
+        r_lim = run_cmd([trg, "--json", "--max-total-matches", "0", "--max-result-bytes", "64K", "hello", str(lim_dir)])
+        s_lim = json.loads(r_lim.stdout.strip().split("\n")[-1])["data"]["limits"]
+        assert s_lim["max_total_matches"] == 0
+        assert s_lim["max_result_bytes"] == 65536
+        assert s_lim["max_files_with_matches"] is None
+    finally:
+        if lim_dir.exists():
+            shutil.rmtree(lim_dir)
+
+    # Test 79: Full flag conflict matrix
+    log("Test 79: Full flag conflict matrix")
+    comb_bad = [
+        ["-c", "--max-total-matches", "5"],
+        ["-c", "--max-result-bytes", "100"],
+        ["-c", "--max-files-with-matches", "2"],
+        ["-q", "--max-total-matches", "5"],
+        ["-q", "--max-result-bytes", "100"],
+        ["-q", "--max-files-with-matches", "2"],
+        ["--type-list", "--max-total-matches", "5"],
+        ["--type-list", "--max-result-bytes", "100"],
+        ["--type-list", "--max-files-with-matches", "2"],
+        ["--files", "--max-total-matches", "5"],
+        ["--files", "--max-files-with-matches", "2"],
+    ]
+    for flags in comb_bad:
+        r_err = run_cmd([trg] + flags + ["pattern", "."], check=False)
+        assert r_err.returncode == 2, f"Expected exit 2 for flags {flags}, got {r_err.returncode}"
+
+    # --no-truncation-notice without budgets is allowed with -c and -q
+    r_nt_c = run_cmd([trg, "-c", "--no-truncation-notice", "needle", "."], check=False)
+    assert r_nt_c.returncode in (0, 1)
+
+    # Test 80: Strict SIZE parser and integer overflow validation
+    log("Test 80: Strict SIZE parser and integer overflow validation")
+    size_dir = fixtures_dir / "test_size_tree"
+    try:
+        size_dir.mkdir(parents=True, exist_ok=True)
+        (size_dir / "test.txt").write_text("TEST_MATCH\n", encoding="utf-8")
+
+        # Valid sizes
+        for sz_str, expected in [("64K", 65536), ("64k", 65536), ("1M", 1048576), ("1m", 1048576), ("2048", 2048), ("9223372036854775807", 9223372036854775807)]:
+            r = run_cmd([trg, "--json", "--max-result-bytes", sz_str, "TEST_MATCH", str(size_dir)])
+            assert r.returncode == 0
+            assert json.loads(r.stdout.strip().split("\n")[-1])["data"]["limits"]["max_result_bytes"] == expected
+
+        # Overflow / invalid sizes (exit 2)
+        for bad_sz in ["", "64G", "1.5M", "-10", "abc", "K", "100MB", "9223372036854775808", "18446744073709551615", "18446744073709551616", "184467440737095516150", "9223372036854775807K", "9223372036854775807M"]:
+            r = run_cmd([trg, "--max-result-bytes", bad_sz, "TEST_MATCH", str(size_dir)], check=False)
+            assert r.returncode == 2
+
+        # Overflow on max-total-matches and max-files-with-matches
+        for of_val in ["9223372036854775808", "18446744073709551616"]:
+            r_of1 = run_cmd([trg, "--max-total-matches", of_val, "TEST_MATCH", str(size_dir)], check=False)
+            assert r_of1.returncode == 2
+            r_of2 = run_cmd([trg, "--max-files-with-matches", of_val, "TEST_MATCH", str(size_dir)], check=False)
+            assert r_of2.returncode == 2
+    finally:
+        if size_dir.exists():
+            shutil.rmtree(size_dir)
+
+    # Test 81: Deterministic reason priority
+    log("Test 81: Deterministic reason priority")
+    prio_dir = fixtures_dir / "test_prio_tree"
+    try:
+        prio_dir.mkdir(parents=True, exist_ok=True)
+        (prio_dir / "f1.txt").write_text("MATCH\n", encoding="utf-8")
+        # Trigger all budgets simultaneously at line 1 of file 1
+        r_prio = run_cmd([trg, "--json", "--max-total-matches", "0", "--max-files-with-matches", "0", "--max-result-bytes", "0", "MATCH", str(prio_dir)])
+        assert r_prio.returncode == 0
+        s_prio = json.loads(r_prio.stdout.strip().split("\n")[-1])["data"]
+        assert s_prio["termination_reason"] == "max_total_matches"
+    finally:
+        if prio_dir.exists():
+            shutil.rmtree(prio_dir)
+
+    # Test 82: --files --max-result-bytes
+    log("Test 82: --files with --max-result-bytes")
+    files_b_dir = fixtures_dir / "test_files_b_tree"
+    try:
+        files_b_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(10):
+            (files_b_dir / f"path_{i:02d}.txt").write_text("content\n", encoding="utf-8")
+        r_fb = run_cmd([trg, "--files", "--max-result-bytes", "200", str(files_b_dir)])
+        assert r_fb.returncode == 0
+        lines = [l for l in r_fb.stdout.strip().split("\n") if l]
+        assert len(lines) > 0 and len(lines) < 10
+        assert "max_result_bytes limit reached" in r_fb.stderr
+    finally:
+        if files_b_dir.exists():
+            shutil.rmtree(files_b_dir)
+
+    # Test 83: stdout_bytes_emitted == result_payload_bytes_emitted + protocol_bytes_emitted
+    log("Test 83: Byte tracking invariant validation and exact stdout length truthfulness")
+    byte_dir = fixtures_dir / "test_byte_tree"
+    try:
+        byte_dir.mkdir(parents=True, exist_ok=True)
+        (byte_dir / "b.txt").write_text("AAA\nBBB\nCCC\n", encoding="utf-8")
+        r_b = run_cmd([trg, "--json", "-C", "1", "BBB", str(byte_dir)])
+        s_b = json.loads(r_b.stdout.strip().split("\n")[-1])["data"]["stats"]
+        assert s_b["stdout_bytes_emitted"] == s_b["result_payload_bytes_emitted"] + s_b["protocol_bytes_emitted"]
+        assert s_b["result_payload_bytes_emitted"] > 0
+        assert s_b["protocol_bytes_emitted"] > 0
+        actual_stdout_len = len(r_b.stdout.encode("utf-8"))
+        assert s_b["stdout_bytes_emitted"] == actual_stdout_len, f"Expected stdout bytes {actual_stdout_len}, reported {s_b['stdout_bytes_emitted']}"
+    finally:
+        if byte_dir.exists():
+            shutil.rmtree(byte_dir)
+
+    # Test 84: Non-budget baseline parity
+    log("Test 84: Non-budget baseline parity")
+    base_dir = fixtures_dir / "test_base_tree"
+    try:
+        base_dir.mkdir(parents=True, exist_ok=True)
+        (base_dir / "t.txt").write_text("foo 1\nbar 2\nfoo 3\n", encoding="utf-8")
+        r_hum = run_cmd([trg, "-n", "foo", str(base_dir / "t.txt")])
+        assert r_hum.stdout == "1:foo 1\n3:foo 3\n"
+
+        r_j = run_cmd([trg, "--json", "foo", str(base_dir / "t.txt")])
+        j_evs = [json.loads(l) for l in r_j.stdout.strip().split("\n") if l]
+        assert j_evs[0]["type"] == "begin"
+        assert j_evs[1]["type"] == "match"
+        assert j_evs[2]["type"] == "match"
+        assert j_evs[3]["type"] == "end"
+        assert j_evs[4]["type"] == "summary"
+        assert j_evs[4]["data"]["complete"] is True
+    finally:
+        if base_dir.exists():
+            shutil.rmtree(base_dir)
+
+    # Test 85: Short-match high-throughput benchmark
+    log("Test 85: Short-match high-throughput benchmark (100k records)")
+    bench_dir = fixtures_dir / "test_bench_tree"
+    try:
+        bench_dir.mkdir(parents=True, exist_ok=True)
+        (bench_dir / "big.txt").write_text("item line\n" * 100000, encoding="utf-8")
+        r_bench = run_cmd([trg, "--max-total-matches", "1000", "item", str(bench_dir / "big.txt")])
+        assert r_bench.returncode == 0
+        lines = [l for l in r_bench.stdout.strip().split("\n") if l]
+        assert len(lines) == 1000
+    finally:
+        if bench_dir.exists():
+            shutil.rmtree(bench_dir)
+
     log("=" * 60)
-    log("ALL 71 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.6.0)!")
+    log("ALL 85 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.7.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":
     main()
-

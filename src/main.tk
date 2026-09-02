@@ -1,26 +1,21 @@
 // Application entrypoint and exit code orchestrator for trg.
 import core/types::{usize}
 import std/vec::{Vec}
-import src/types::{CliOptions, GlobalStats}
-import src/posix::{posix_init_signals}
+import src/types::{CliOptions, GlobalStats, BudgetState}
+import src/posix::{posix_init_signals, posix_write_stdout, print_err}
 import src/cli::{parse_cli_args}
 import src/matcher::{SearchPlan}
 import src/walker::{collect_search_targets, WalkResult}
 import src/scanner::{scan_file_stream}
-import src/printer::{print_files_list, print_summary_json}
-import src/file_types::{print_type_list}
-
-extern fn write(fd: i32, *buf: void, count: usize) -> isize
-
-fn print_err(msg: str) {
-    unsafe {
-        auto p1 = "trg: "
-        write(2:i32, p1.raw_ptr() as *void, p1.len)
-        write(2:i32, msg.raw_ptr() as *void, msg.len)
-        auto nl = "\n"
-        write(2:i32, nl.raw_ptr() as *void, 1:usize)
-    }
+import src/printer::{
+    OutputBudgetWriter,
+    FileFrameState,
+    OutputBatch,
+    EmitOutcome,
+    format_summary_json,
+    print_truncation_notice_stderr
 }
+import src/file_types::{print_type_list}
 
 fn main() -> i32 {
     // Phase -1: Initialize POSIX signals (ignore SIGPIPE to prevent crash on broken pipe)
@@ -56,23 +51,40 @@ fn main() -> i32 {
     auto files = walk_res.files.clone()
     auto num_files = files.len()
 
+    auto budget_state# = BudgetState::new(opts.budget_limits)
+    budget_state.files_selected = num_files
+    auto writer = OutputBudgetWriter::new(opts.json_mode, opts.budget_limits.is_budget_active())
+
     if opts.files_mode {
         if opts.quiet {
             if num_files > 0 { return 0 }
             if global_had_error { return 2 }
             return 1
         }
-        auto res = print_files_list(files)
-        if res == 1 {
-            if global_had_error { return 2 }
-            return 0 // Stdout closed gracefully (broken pipe)
+        auto f_idx# = 0:usize
+        auto dummy_frame# = FileFrameState(target_path = string::from(""), begin_emitted = false)
+        loop f_idx < num_files {
+            if budget_state.is_truncated { break }
+            auto &path_str = files.borrow(f_idx)
+            auto wire_str# = path_str.clone()
+            wire_str#.push_str("\n")
+            auto batch = OutputBatch(payload_str = cede wire_str, path = path_str.clone(), line_number = 0, is_payload = true)
+            auto outcome = writer.emit_payload(budget_state#, dummy_frame#, batch)
+            match outcome {
+                EmitOutcome::Written => {}
+                EmitOutcome::Truncated => { break }
+                EmitOutcome::BrokenPipe => {
+                    if global_had_error { return 2 }
+                    return 0
+                }
+                EmitOutcome::FatalError => { return 2 }
+            }
+            f_idx = f_idx + 1
         }
-        if res == 2 || global_had_error {
-            return 2
-        }
-        if num_files > 0 {
-            return 0
-        }
+        print_truncation_notice_stderr(budget_state)
+        if global_had_error { return 2 }
+        if budget_state.is_truncated || f_idx > 0 { return 0 }
+        if num_files > 0 { return 0 }
         return 1
     }
 
@@ -86,7 +98,8 @@ fn main() -> i32 {
                 total_matches = 0:usize,
                 elapsed_nanos = 0:u64
             )
-            auto s_res = print_summary_json(stats)
+            auto sum_str = format_summary_json(stats, budget_state, global_had_error)
+            auto s_res = posix_write_stdout(sum_str.as_str())
             if s_res == 1 {
                 if global_had_error { return 2 }
                 return 0
@@ -106,8 +119,11 @@ fn main() -> i32 {
 
     auto i# = 0:usize
     loop i < num_files {
+        if budget_state.is_truncated {
+            break
+        }
         auto &target_file = files.borrow(i)
-        auto scan_res = scan_file_stream(target_file.clone(), opts, plan, multiple_files)
+        auto scan_res = scan_file_stream(target_file.clone(), opts, plan, multiple_files, writer, budget_state#)
 
         if scan_res.had_error {
             global_had_error = true
@@ -130,7 +146,8 @@ fn main() -> i32 {
                             total_matches = total_matches,
                             elapsed_nanos = 0:u64
                         )
-                        auto s_res = print_summary_json(stats)
+                        auto sum_str = format_summary_json(stats, budget_state, global_had_error)
+                        auto s_res = posix_write_stdout(sum_str.as_str())
                         if s_res == 2 { return 2 }
                     }
                     return 0
@@ -140,6 +157,8 @@ fn main() -> i32 {
 
         i = i + 1
     }
+
+    print_truncation_notice_stderr(budget_state)
 
     if broken_pipe_occurred {
         if global_had_error {
@@ -155,7 +174,8 @@ fn main() -> i32 {
             total_matches = total_matches,
             elapsed_nanos = 0:u64
         )
-        auto s_res = print_summary_json(stats)
+        auto sum_str = format_summary_json(stats, budget_state, global_had_error)
+        auto s_res = posix_write_stdout(sum_str.as_str())
         if s_res == 1 {
             if global_had_error { return 2 }
             return 0 // Broken pipe on summary -> exit 0
@@ -170,7 +190,7 @@ fn main() -> i32 {
         return 2
     }
 
-    if total_matches > 0 || files_with_match > 0 {
+    if total_matches > 0 || files_with_match > 0 || budget_state.files_with_match_emitted > 0 || budget_state.is_truncated {
         return 0
     }
 
