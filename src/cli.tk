@@ -1,5 +1,6 @@
 // Strict command-line argument parser for trg.
 import core/result::{Result}
+import core/str::{str}
 import std/vec::{Vec}
 import std/env as env
 import std/io::{println}
@@ -14,22 +15,46 @@ pub fn print_help() {
     println("  trg --files [OPTIONS] [PATH...]")
     println("")
     println("Options:")
-    println("  -F, --fixed-strings    Treat the pattern as a fixed literal string (default in Phase 0)")
-    println("  -n, --line-number      Show line numbers (1-based)")
-    println("  -l, --files-with-matches Only print the paths of matching files")
-    println("  -c, --count            Only print the count of matching lines per file")
-    println("  -v, --invert-match     Invert the match (select non-matching lines)")
-    println("  -i, --ignore-case      Case-insensitive search (ASCII)")
-    println("  -g, --glob <GLOB>      Include or exclude files matching GLOB (last match wins)")
-    println("      --files            Print the files that would be searched")
-    println("      --json             Output newline-delimited JSONL search events")
-    println("      --hidden           Search hidden files and directories")
-    println("  -V, --version          Print version information")
-    println("  -h, --help             Print this help message")
+    println("  -F, --fixed-strings        Treat the pattern as a fixed literal string (default in Phase 0)")
+    println("  -n, --line-number          Show line numbers (1-based)")
+    println("  -l, --files-with-matches   Only print the paths of matching files")
+    println("  -c, --count                Only print the count of matching lines per file")
+    println("  -v, --invert-match         Invert the match (select non-matching lines)")
+    println("  -i, --ignore-case          Case-insensitive search (ASCII)")
+    println("  -A, --after-context <NUM>  Show NUM lines after each match (max 1000)")
+    println("  -B, --before-context <NUM> Show NUM lines before each match (max 1000)")
+    println("  -C, --context <NUM>        Show NUM lines before and after each match (max 1000)")
+    println("  -g, --glob <GLOB>          Include or exclude files matching GLOB (last match wins)")
+    println("      --files                Print the files that would be searched")
+    println("      --json                 Output newline-delimited JSONL search events (trg-json-v2)")
+    println("      --hidden               Search hidden files and directories")
+    println("  -V, --version              Print version information")
+    println("  -h, --help                 Print this help message")
 }
 
 pub fn print_version() {
     println("trg 0.1.0 (Toka)")
+}
+
+fn parse_context_num(s: str) -> Result<usize, string> {
+    if s.len == 0 {
+        return Result<usize, string>::Err(string::from("Context line count cannot be empty"))
+    }
+    auto val# = 0:usize
+    auto i# = 0:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i)
+        if ch < ('0' as char) || ch > ('9' as char) {
+            return Result<usize, string>::Err(string::from("Context line count must be a non-negative integer"))
+        }
+        auto digit = (ch as usize) - ('0' as usize)
+        val = val * 10:usize + digit
+        if val > 1000:usize {
+            return Result<usize, string>::Err(string::from("Context lines limit exceeded (maximum is 1000)"))
+        }
+        i = i + 1
+    }
+    return Result<usize, string>::Ok(val)
 }
 
 pub fn parse_cli_args() -> Result<CliOptions, string> {
@@ -45,6 +70,9 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto files_mode# = false
     auto json_mode# = false
     auto hidden# = false
+    auto before_context# = 0:usize
+    auto after_context# = 0:usize
+    auto context_set_explicitly# = false
     auto globs# = Vec<GlobRule>::new()
 
     auto pattern# = string::from("")
@@ -120,6 +148,117 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
+        // Long form context with equals: --after-context=N, --before-context=N, --context=N
+        if view.starts_with("--after-context=") {
+            auto val_str = view.substr(16:usize, view.len - 16:usize)
+            auto parse_res = parse_context_num(val_str)
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            after_context = parse_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--before-context=") {
+            auto val_str = view.substr(17:usize, view.len - 17:usize)
+            auto parse_res = parse_context_num(val_str)
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            before_context = parse_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--context=") {
+            auto val_str = view.substr(10:usize, view.len - 10:usize)
+            auto parse_res = parse_context_num(val_str)
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            auto n = parse_res.unwrap()
+            before_context = n
+            after_context = n
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        // Context flags with space: -A <N>, -B <N>, -C <N>, --after-context <N>, etc.
+        if view == "-A" || view == "--after-context" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -A / --after-context requires a non-negative integer argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_context_num(val_arg.as_str())
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            after_context = parse_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-B" || view == "--before-context" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -B / --before-context requires a non-negative integer argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_context_num(val_arg.as_str())
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            before_context = parse_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-C" || view == "--context" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -C / --context requires a non-negative integer argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_context_num(val_arg.as_str())
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            auto n = parse_res.unwrap()
+            before_context = n
+            after_context = n
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        // Attached short forms: -A2, -B3, -C4
+        if view.starts_with("-A") && view.len > 2 {
+            auto val_str = view.substr(2:usize, view.len - 2:usize)
+            auto parse_res = parse_context_num(val_str)
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            after_context = parse_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-B") && view.len > 2 {
+            auto val_str = view.substr(2:usize, view.len - 2:usize)
+            auto parse_res = parse_context_num(val_str)
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            before_context = parse_res.unwrap()
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-C") && view.len > 2 {
+            auto val_str = view.substr(2:usize, view.len - 2:usize)
+            auto parse_res = parse_context_num(val_str)
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            auto n = parse_res.unwrap()
+            before_context = n
+            after_context = n
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
         if view == "-g" || view == "--glob" {
             if i + 1 >= num_args {
                 return Result<CliOptions, string>::Err(string::from("Flag -g / --glob requires an argument"))
@@ -132,7 +271,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
-        // Handle short flag clusters e.g. -nli, -Fnl, -iF
+        // Handle short flag clusters e.g. -nli, -Fnl, -iF (reject clusters containing digits or unknown characters)
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
             auto c_idx# = 1:usize
@@ -184,6 +323,17 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         return Result<CliOptions, string>::Err(string::from("Flag --json cannot be combined with -l (--files-with-matches), -c (--count), or --files"))
     }
 
+    // Flag conflict validation: --files cannot be combined with -A, -B, -C
+    if files_mode && context_set_explicitly {
+        return Result<CliOptions, string>::Err(string::from("Flag --files cannot be combined with context options (-A, -B, -C)"))
+    }
+
+    // Effective context zeroing on -l and -c: ignore context lines, do not allocate ring or enforce context limits
+    if files_with_matches || count {
+        before_context = 0
+        after_context = 0
+    }
+
     // If no paths specified, default to current directory "."
     if paths.len() == 0 {
         paths#.push(string::from("."))
@@ -201,6 +351,8 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         files_mode = files_mode,
         json_mode = json_mode,
         hidden = hidden,
+        before_context = before_context,
+        after_context = after_context,
         globs = cede globs
     ))
 }

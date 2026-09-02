@@ -67,7 +67,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.1.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.2.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -108,11 +108,11 @@ def main():
     # Test 1: Help & Version
     log("Test 1: Help & Version flags")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.1.0" in r.stdout
+    assert "trg 0.1.0" in r.stdout or "trg 0.2.0" in r.stdout
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert "trg 0.1.0 (Toka)" in r.stdout
+    assert "trg 0.1.0 (Toka)" in r.stdout or "trg 0.2.0 (Toka)" in r.stdout
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -176,12 +176,13 @@ def main():
     assert any("scanner.tk" in l for l in src_files)
 
     # Test 10: JSONL wire format and byte offset accuracy on CRLF
-    log("Test 10: JSONL schema and exact CRLF byte offsets")
+    log("Test 10: JSONL schema and exact CRLF byte offsets (trg-json-v2)")
     r = run_cmd([trg, "--json", "charlie", str(fixtures_dir / "crlf.txt")])
     assert r.returncode == 0
     events = [json.loads(line) for line in r.stdout.strip().split("\n") if line.strip()]
     assert len(events) == 4 # begin, match, end, summary
     assert events[0]["type"] == "begin"
+    assert events[0]["schema"] == "trg-json-v2"
     assert events[1]["type"] == "match"
     assert events[1]["data"]["line_number"] == 3
     assert events[1]["data"]["absolute_offset"] == 14, f"Expected offset 14, got {events[1]['data']['absolute_offset']}"
@@ -197,6 +198,7 @@ def main():
     empty_events = [json.loads(line) for line in r_empty.stdout.strip().split("\n") if line.strip()]
     assert len(empty_events) == 3, f"Expected 3 events for empty file, got {len(empty_events)}"
     assert empty_events[0]["type"] == "begin"
+    assert empty_events[0]["schema"] == "trg-json-v2"
     assert empty_events[1]["type"] == "end"
     assert empty_events[2]["type"] == "summary"
     assert empty_events[2]["data"]["stats"]["matches"] == 0
@@ -208,17 +210,19 @@ def main():
     bin_events = [json.loads(line) for line in r_bin_json.stdout.strip().split("\n") if line.strip()]
     assert len(bin_events) == 3, f"Expected 3 events for binary file, got {len(bin_events)}"
     assert bin_events[0]["type"] == "begin"
+    assert bin_events[0]["schema"] == "trg-json-v2"
     assert bin_events[1]["type"] == "end"
     assert bin_events[2]["type"] == "summary"
     assert bin_events[2]["data"]["stats"]["matches"] == 0
 
-    # Test 13: Error path JSON framing (overlong line emits begin -> end -> summary with exit code 2)
+    # Test 13: Error path JSON framing on overlong line
     log("Test 13: Error path JSON framing on overlong line")
     r_err_json = run_cmd([trg, "--json", "TARGET", str(fixtures_dir / "invalid" / "overlong_line.txt")], check=False)
     assert r_err_json.returncode == 2, f"Expected exit code 2 on error JSON, got {r_err_json.returncode}"
     err_events = [json.loads(line) for line in r_err_json.stdout.strip().split("\n") if line.strip()]
     assert len(err_events) == 3, f"Expected 3 framing events for error file, got {len(err_events)}"
     assert err_events[0]["type"] == "begin"
+    assert err_events[0]["schema"] == "trg-json-v2"
     assert err_events[1]["type"] == "end"
     assert err_events[2]["type"] == "summary"
 
@@ -332,8 +336,175 @@ def main():
     assert p1.returncode == 0, f"Broken pipe failed: process exited with {p1.returncode} instead of 0"
     assert len(head_out.strip()) > 0
 
+    # ----------------------------------------------------
+    # Phase 0.2 Context Lines & trg-json-v2 Qualification
+    # ----------------------------------------------------
+
+    # Create multi-line test fixture for context testing
+    ctx_fixture = repo_root / "tests" / "fixtures" / "context_fixture.txt"
+    with open(ctx_fixture, "w") as f:
+        for i in range(1, 21):
+            if i == 3:
+                f.write(f"LINE_{i}_MATCH_A\n")
+            elif i == 5:
+                f.write(f"LINE_{i}_MATCH_B\n")
+            elif i == 15:
+                f.write(f"LINE_{i}_MATCH_C\n")
+            else:
+                f.write(f"LINE_{i}_NORMAL\n")
+
+    # Test 26: Basic -A 2 (after-context with hyphen delimiter)
+    log("Test 26: Basic -A 2 after-context")
+    r_a = run_cmd([trg, "-n", "-A", "2", "LINE_15_MATCH", str(ctx_fixture)])
+    assert r_a.returncode == 0
+    lines_a = [l.strip() for l in r_a.stdout.strip().split("\n") if l.strip()]
+    assert len(lines_a) == 3
+    assert lines_a[0] == "15:LINE_15_MATCH_C"
+    assert lines_a[1] == "16-LINE_16_NORMAL"
+    assert lines_a[2] == "17-LINE_17_NORMAL"
+
+    # Test 27: Basic -B 2 (before-context with hyphen delimiter)
+    log("Test 27: Basic -B 2 before-context")
+    r_b = run_cmd([trg, "-n", "-B", "2", "LINE_15_MATCH", str(ctx_fixture)])
+    assert r_b.returncode == 0
+    lines_b = [l.strip() for l in r_b.stdout.strip().split("\n") if l.strip()]
+    assert len(lines_b) == 3
+    assert lines_b[0] == "13-LINE_13_NORMAL"
+    assert lines_b[1] == "14-LINE_14_NORMAL"
+    assert lines_b[2] == "15:LINE_15_MATCH_C"
+
+    # Test 28: Basic -C 1 (context with hyphen delimiter)
+    log("Test 28: Basic -C 1 context")
+    r_c = run_cmd([trg, "-n", "-C", "1", "LINE_15_MATCH", str(ctx_fixture)])
+    assert r_c.returncode == 0
+    lines_c = [l.strip() for l in r_c.stdout.strip().split("\n") if l.strip()]
+    assert len(lines_c) == 3
+    assert lines_c[0] == "14-LINE_14_NORMAL"
+    assert lines_c[1] == "15:LINE_15_MATCH_C"
+    assert lines_c[2] == "16-LINE_16_NORMAL"
+
+    # Test 29: Overlapping window merging and group separator '--'
+    log("Test 29: Context window merging and group separator '--'")
+    r_merge = run_cmd([trg, "-n", "-C", "2", "MATCH", str(ctx_fixture)])
+    assert r_merge.returncode == 0
+    m_lines = [l.strip() for l in r_merge.stdout.strip().split("\n") if l.strip()]
+    # Expected lines: 1..7 (continuous merged block), then '--', then 13..17
+    assert m_lines[0] == "1-LINE_1_NORMAL"
+    assert m_lines[1] == "2-LINE_2_NORMAL"
+    assert m_lines[2] == "3:LINE_3_MATCH_A"
+    assert m_lines[3] == "4-LINE_4_NORMAL"
+    assert m_lines[4] == "5:LINE_5_MATCH_B"
+    assert m_lines[5] == "6-LINE_6_NORMAL"
+    assert m_lines[6] == "7-LINE_7_NORMAL"
+    assert m_lines[7] == "--"
+    assert m_lines[8] == "13-LINE_13_NORMAL"
+    assert m_lines[9] == "14-LINE_14_NORMAL"
+    assert m_lines[10] == "15:LINE_15_MATCH_C"
+    assert m_lines[11] == "16-LINE_16_NORMAL"
+    assert m_lines[12] == "17-LINE_17_NORMAL"
+
+    # Test 30: JSONL context streaming (trg-json-v2)
+    log("Test 30: JSONL context streaming with schema trg-json-v2")
+    r_json_ctx = run_cmd([trg, "--json", "-C", "1", "LINE_15_MATCH", str(ctx_fixture)])
+    assert r_json_ctx.returncode == 0
+    ctx_events = [json.loads(l) for l in r_json_ctx.stdout.strip().split("\n") if l.strip()]
+    assert len(ctx_events) == 6 # begin, context(14), match(15), context(16), end, summary
+    assert ctx_events[0]["type"] == "begin"
+    assert ctx_events[0]["schema"] == "trg-json-v2"
+    assert ctx_events[1]["type"] == "context"
+    assert ctx_events[1]["data"]["line_number"] == 14
+    assert ctx_events[2]["type"] == "match"
+    assert ctx_events[2]["data"]["line_number"] == 15
+    assert ctx_events[3]["type"] == "context"
+    assert ctx_events[3]["data"]["line_number"] == 16
+    assert ctx_events[4]["type"] == "end"
+    assert ctx_events[4]["data"]["stats"]["matches"] == 1
+
+    # Test 31: CLI context parameter precedence & attached formats
+    log("Test 31: CLI parameter precedence (-C 3 -B 1 vs -B 1 -C 3, -A2, --after-context=2)")
+    # -C 3 -B 1 -> before=1, after=3
+    r_p1 = run_cmd([trg, "-n", "-C", "3", "-B", "1", "LINE_15_MATCH", str(ctx_fixture)])
+    p1_lines = [l.strip() for l in r_p1.stdout.strip().split("\n") if l.strip()]
+    assert p1_lines[0] == "14-LINE_14_NORMAL"
+    assert p1_lines[1] == "15:LINE_15_MATCH_C"
+    assert p1_lines[-1] == "18-LINE_18_NORMAL"
+
+    # -B 1 -C 3 -> before=3, after=3
+    r_p2 = run_cmd([trg, "-n", "-B", "1", "-C", "3", "LINE_15_MATCH", str(ctx_fixture)])
+    p2_lines = [l.strip() for l in r_p2.stdout.strip().split("\n") if l.strip()]
+    assert p2_lines[0] == "12-LINE_12_NORMAL"
+    assert p2_lines[3] == "15:LINE_15_MATCH_C"
+
+    # Attached: -A2, --after-context=2
+    r_att = run_cmd([trg, "-n", "-A2", "LINE_15_MATCH", str(ctx_fixture)])
+    assert len([l for l in r_att.stdout.strip().split("\n") if l.strip()]) == 3
+
+    r_long_eq = run_cmd([trg, "-n", "--after-context=2", "LINE_15_MATCH", str(ctx_fixture)])
+    assert len([l for l in r_long_eq.stdout.strip().split("\n") if l.strip()]) == 3
+
+    # Test 32: Invalid CLI context options rejection
+    log("Test 32: Invalid CLI context options rejection")
+    assert run_cmd([trg, "--files", "-A", "1", str(repo_root / "src")], check=False).returncode == 2
+    assert run_cmd([trg, "--context=", "foo", str(ctx_fixture)], check=False).returncode == 2
+    assert run_cmd([trg, "-A", "1001", "foo", str(ctx_fixture)], check=False).returncode == 2
+    assert run_cmd([trg, "-A", "-1", "foo", str(ctx_fixture)], check=False).returncode == 2
+    assert run_cmd([trg, "-A999999999999999999999", "foo", str(ctx_fixture)], check=False).returncode == 2
+    assert run_cmd([trg, "-nA2", "foo", str(ctx_fixture)], check=False).returncode == 2
+
+    # Test 33: Flag decoupling on -l and -c (effective context zeroing)
+    log("Test 33: Flag decoupling on -l and -c with -B 100")
+    r_l_ctx = run_cmd([trg, "-l", "-B", "100", "LINE_15_MATCH", str(ctx_fixture)])
+    assert r_l_ctx.returncode == 0
+    assert "context_fixture.txt" in r_l_ctx.stdout
+
+    r_c_ctx = run_cmd([trg, "-c", "-B", "100", "LINE_15_MATCH", str(ctx_fixture)])
+    assert r_c_ctx.returncode == 0
+    assert r_c_ctx.stdout.strip() == "1"
+
+    # Test 34: 64MB BeforeRing cumulative memory limit rejection
+    log("Test 34: 64MB BeforeRing cumulative memory limit rejection")
+    big_ctx_file = repo_root / "tests" / "fixtures" / "invalid" / "big_context_overflow.txt"
+    big_ctx_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(big_ctx_file, "wb") as f:
+        line_900k = b"X" * (900 * 1024) + b"\n"
+        for _ in range(80):
+            f.write(line_900k)
+        f.write(b"FINAL_MATCH_LINE\n")
+    try:
+        r_overflow = run_cmd([trg, "-B", "100", "FINAL_MATCH", str(big_ctx_file)], check=False)
+        assert r_overflow.returncode == 2, f"Expected 2 for 64MB memory limit overflow, got {r_overflow.returncode}"
+        assert "Maximum before-context memory limit exceeded" in r_overflow.stderr
+
+        # JSON mode error framing on 64MB memory overflow
+        r_overflow_json = run_cmd([trg, "--json", "-B", "100", "FINAL_MATCH", str(big_ctx_file)], check=False)
+        assert r_overflow_json.returncode == 2
+        ov_events = [json.loads(l) for l in r_overflow_json.stdout.strip().split("\n") if l.strip()]
+        assert len(ov_events) == 3 # begin, end, summary
+        assert ov_events[0]["type"] == "begin"
+        assert ov_events[1]["type"] == "end"
+        assert ov_events[2]["type"] == "summary"
+
+        # -l and -c with -B 100 on same 72MB file succeed because effective context is 0
+        r_l_big = run_cmd([trg, "-l", "-B", "100", "FINAL_MATCH", str(big_ctx_file)])
+        assert r_l_big.returncode == 0
+        assert "big_context_overflow.txt" in r_l_big.stdout
+    finally:
+        if big_ctx_file.exists():
+            big_ctx_file.unlink()
+
+    # Test 35: Multi-file context state isolation (no cross-file state leakage or separator)
+    log("Test 35: Multi-file context state isolation")
+    r_multi_ctx = run_cmd([trg, "-n", "-C", "1", "bravo", str(fixtures_dir / "crlf.txt"), str(fixtures_dir / "crlf.txt")])
+    assert r_multi_ctx.returncode == 0
+    multi_lines = [l.strip() for l in r_multi_ctx.stdout.strip().split("\n") if l.strip()]
+    assert not any(l == "--" for l in multi_lines), f"Unexpected cross-file group separator found in: {multi_lines}"
+
+    # Clean up fixture
+    if ctx_fixture.exists():
+        ctx_fixture.unlink()
+
     log("=" * 60)
-    log("ALL 25 RIGOROUS QUALIFICATION TESTS PASSED SUCCESSFULLY!")
+    log("ALL 35 RIGOROUS QUALIFICATION TESTS PASSED SUCCESSFULLY!")
     log("=" * 60)
 
 if __name__ == "__main__":

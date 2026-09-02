@@ -1,4 +1,4 @@
-// Output formatting module supporting Human, -l, -c, --files, and strict trg-json-v1 JSONL streaming.
+// Output formatting module supporting Human, -l, -c, --files, context lines, and trg-json-v2 JSONL streaming.
 import core/types::{usize, char}
 import core/str::{str}
 import std/vec::{Vec}
@@ -88,8 +88,12 @@ pub fn print_files_list(files: Vec<string>) -> i32 {
     return 0
 }
 
+pub fn emit_group_separator() -> i32 {
+    return write_line("--")
+}
+
 pub fn emit_json_begin(path: str) -> i32 {
-    auto begin_json# = string::from("{\"type\":\"begin\",\"data\":{\"path\":{\"text\":\"")
+    auto begin_json# = string::from("{\"type\":\"begin\",\"schema\":\"trg-json-v2\",\"data\":{\"path\":{\"text\":\"")
     auto esc_path = json_escape(path)
     begin_json#.push_str(esc_path.as_str())
     begin_json#.push_str("\"}}}")
@@ -135,6 +139,23 @@ pub fn emit_json_match(ev: MatchEvent) -> i32 {
     return write_line(match_json.as_str())
 }
 
+pub fn emit_json_context(ev: MatchEvent) -> i32 {
+    auto esc_path = json_escape(ev.path.as_str())
+    auto ctx_json# = string::from("{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"")
+    ctx_json#.push_str(esc_path.as_str())
+    ctx_json#.push_str("\"},\"lines\":{\"text\":\"")
+    auto esc_line = json_escape(ev.line_text.as_str())
+    ctx_json#.push_str(esc_line.as_str())
+    ctx_json#.push_str("\\n\"},\"line_number\":")
+    auto lnum_str = u64_to_string(ev.line_number as u64)
+    ctx_json#.push_str(lnum_str.as_str())
+    ctx_json#.push_str(",\"absolute_offset\":")
+    auto abs_str = u64_to_string(ev.absolute_offset as u64)
+    ctx_json#.push_str(abs_str.as_str())
+    ctx_json#.push_str(",\"submatches\":[]}}")
+    return write_line(ctx_json.as_str())
+}
+
 pub fn emit_json_end(path: str, matches_count: usize) -> i32 {
     auto esc_path = json_escape(path)
     auto end_json# = string::from("{\"type\":\"end\",\"data\":{\"path\":{\"text\":\"")
@@ -157,6 +178,23 @@ pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) 
         auto lnum_str = u64_to_string(ev.line_number as u64)
         out#.push_str(lnum_str.as_str())
         out#.push_str(":")
+    }
+
+    out#.push_str(ev.line_text.as_str())
+    return write_line(out.as_str())
+}
+
+pub fn emit_human_context(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> i32 {
+    auto out# = string::new()
+    if multiple_files && ev.path.len() > 0 {
+        out#.push_str(ev.path.as_str())
+        out#.push_str("-")
+    }
+
+    if opts.line_number {
+        auto lnum_str = u64_to_string(ev.line_number as u64)
+        out#.push_str(lnum_str.as_str())
+        out#.push_str("-")
     }
 
     out#.push_str(ev.line_text.as_str())

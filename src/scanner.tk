@@ -1,14 +1,55 @@
-// True incremental 64KB chunk-buffered streaming scanner with 1MB line limit, ferror check, and complete JSON framing.
+// True incremental 64KB chunk-buffered streaming scanner with context lines, 1MB line limit, 64MB context bound, and trg-json-v2 framing.
 import core/types::{usize, char, Addr}
 import core/str::{str}
 import core/option::{Option}
 import std/vec::{Vec}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
-import src/types::{CliOptions, MatchEvent, SubMatch, ScanResult}
+import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult}
 import src/posix::{posix_ferror}
-import src/printer::{emit_json_begin, emit_json_match, emit_json_end, emit_human_match, write_line, u64_to_string}
+import src/printer::{
+    emit_json_begin,
+    emit_json_match,
+    emit_json_context,
+    emit_json_end,
+    emit_human_match,
+    emit_human_context,
+    emit_group_separator,
+    write_line,
+    u64_to_string
+}
 
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
+
+pub shape BeforeRing (
+    lines: Vec<LogicalLine>,
+    capacity: usize,
+    bytes: usize
+)
+
+pub shape ContextState (
+    ring: BeforeRing,
+    pending_after: usize,
+    last_emitted_line_num: usize,
+    had_emitted_group: bool
+)
+
+fn make_context_state(before_cap: usize) -> ContextState {
+    return ContextState(
+        ring = BeforeRing(
+            lines = Vec<LogicalLine>::new(),
+            capacity = before_cap,
+            bytes = 0:usize
+        ),
+        pending_after = 0:usize,
+        last_emitted_line_num = 0:usize,
+        had_emitted_group = false
+    )
+}
+
+fn ring_clear(ring#: BeforeRing) {
+    ring.lines = Vec<LogicalLine>::new()
+    ring.bytes = 0:usize
+}
 
 fn log_scanner_err(path: str, msg: str) {
     unsafe {
@@ -85,6 +126,144 @@ fn find_all_submatches(line: str, needle: str, ignore_case: bool) -> Vec<SubMatc
     return cede list
 }
 
+fn process_logical_line(
+    cede line: LogicalLine,
+    is_match: bool,
+    opts: CliOptions,
+    state#: ContextState,
+    target_path: str,
+    needle: str,
+    multiple_files: bool
+) -> LineProcessOutcome {
+    if is_match {
+        // Group separator logic (human mode only, active when context is requested)
+        auto has_context = opts.before_context > 0 || opts.after_context > 0
+        if has_context && state.last_emitted_line_num > 0 && state.had_emitted_group {
+            auto first_to_emit# = line.line_number
+            if state.ring.lines.len() > 0 {
+                auto &first_ring = state.ring.lines.borrow(0:usize)
+                if first_ring.line_number > state.last_emitted_line_num {
+                    first_to_emit = first_ring.line_number
+                }
+            }
+            if first_to_emit > state.last_emitted_line_num + 1 {
+                if !opts.json_mode {
+                    auto sep_res = emit_group_separator()
+                    if sep_res == 1 { return LineProcessOutcome::BrokenPipe }
+                    if sep_res == 2 { return LineProcessOutcome::FatalError }
+                }
+            }
+        }
+
+        // Flush before_ring
+        auto num_ring = state.ring.lines.len()
+        auto r_idx# = 0:usize
+        loop r_idx < num_ring {
+            auto &r_line = state.ring.lines.borrow(r_idx)
+            if r_line.line_number > state.last_emitted_line_num {
+                auto ev = MatchEvent(
+                    path = string::from(target_path),
+                    line_text = r_line.text.clone(),
+                    line_number = r_line.line_number,
+                    absolute_offset = r_line.absolute_offset,
+                    submatches = Vec<SubMatch>::new()
+                )
+                if opts.json_mode {
+                    auto c_res = emit_json_context(ev)
+                    if c_res == 1 { return LineProcessOutcome::BrokenPipe }
+                    if c_res == 2 { return LineProcessOutcome::FatalError }
+                } else {
+                    auto h_res = emit_human_context(ev, opts, multiple_files)
+                    if h_res == 1 { return LineProcessOutcome::BrokenPipe }
+                    if h_res == 2 { return LineProcessOutcome::FatalError }
+                }
+                state.last_emitted_line_num = r_line.line_number
+            }
+            r_idx = r_idx + 1
+        }
+        ring_clear(state.ring#)
+
+        // Emit match event
+        if opts.json_mode {
+            auto submatches# = Vec<SubMatch>::new()
+            if needle.len > 0 {
+                submatches = find_all_submatches(line.text.as_str(), needle, opts.ignore_case)
+            }
+            auto ev = MatchEvent(
+                path = string::from(target_path),
+                line_text = line.text.clone(),
+                line_number = line.line_number,
+                absolute_offset = line.absolute_offset,
+                submatches = cede submatches
+            )
+            auto m_res = emit_json_match(ev)
+            if m_res == 1 { return LineProcessOutcome::BrokenPipe }
+            if m_res == 2 { return LineProcessOutcome::FatalError }
+        } else {
+            auto ev = MatchEvent(
+                path = string::from(target_path),
+                line_text = line.text.clone(),
+                line_number = line.line_number,
+                absolute_offset = line.absolute_offset,
+                submatches = Vec<SubMatch>::new()
+            )
+            auto m_res = emit_human_match(ev, opts, multiple_files)
+            if m_res == 1 { return LineProcessOutcome::BrokenPipe }
+            if m_res == 2 { return LineProcessOutcome::FatalError }
+        }
+
+        state.last_emitted_line_num = line.line_number
+        state.pending_after = opts.after_context
+        state.had_emitted_group = true
+        return LineProcessOutcome::Continue
+    }
+
+    // Non-matching line
+    if state.pending_after > 0 {
+        if line.line_number > state.last_emitted_line_num {
+            auto ev = MatchEvent(
+                path = string::from(target_path),
+                line_text = line.text.clone(),
+                line_number = line.line_number,
+                absolute_offset = line.absolute_offset,
+                submatches = Vec<SubMatch>::new()
+            )
+            if opts.json_mode {
+                auto c_res = emit_json_context(ev)
+                if c_res == 1 { return LineProcessOutcome::BrokenPipe }
+                if c_res == 2 { return LineProcessOutcome::FatalError }
+            } else {
+                auto h_res = emit_human_context(ev, opts, multiple_files)
+                if h_res == 1 { return LineProcessOutcome::BrokenPipe }
+                if h_res == 2 { return LineProcessOutcome::FatalError }
+            }
+            state.last_emitted_line_num = line.line_number
+        }
+        state.pending_after = state.pending_after - 1
+        return LineProcessOutcome::Continue
+    }
+
+    // Push non-matching line to before_ring
+    if opts.before_context > 0 {
+        if state.ring.lines.len() >= state.ring.capacity {
+            auto oldest_opt = state.ring.lines#.remove(0:usize)
+            if oldest_opt.is_some() {
+                auto oldest = oldest_opt.unwrap()
+                state.ring.bytes = state.ring.bytes - oldest.text.len()
+            }
+        }
+        auto next_bytes = state.ring.bytes + line.text.len()
+        if next_bytes > 67108864:usize {
+            log_scanner_err(target_path, "Maximum before-context memory limit exceeded (64MB limit)")
+            return LineProcessOutcome::FatalError
+        }
+        state.ring.bytes = next_bytes
+        state.ring.lines#.push(cede line)
+    }
+
+    return LineProcessOutcome::Continue
+}
+
 pub fn scan_file_stream(
     target_path: string,
     opts: CliOptions,
@@ -132,7 +311,7 @@ pub fn scan_file_stream(
         }
         auto *buf = raw_buf.unwrap()
 
-        // In JSON mode, emit begin event immediately upon file opening
+        // In JSON mode, emit begin event immediately upon file opening (trg-json-v2)
         if opts.json_mode {
             auto b_res = emit_json_begin(target_path.as_str())
             if b_res != 0 {
@@ -161,6 +340,8 @@ pub fn scan_file_stream(
         auto is_binary# = false
         auto had_error# = false
         auto is_broken_pipe# = false
+
+        auto context_state# = make_context_state(opts.before_context)
 
         loop true {
             auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
@@ -253,34 +434,33 @@ pub fn scan_file_stream(
                         else if w_res == 2 { had_error = true }
                         break
                     }
+                }
 
-                    if !opts.count {
-                        if opts.json_mode {
-                            auto submatches# = Vec<SubMatch>::new()
-                            if is_needle_found && needle.len > 0 {
-                                submatches = find_all_submatches(line_text, needle, opts.ignore_case)
-                            }
-                            auto ev = MatchEvent(
-                                path = target_path.clone(),
-                                line_text = string::from(line_text),
-                                line_number = line_num,
-                                absolute_offset = abs_offset,
-                                submatches = cede submatches
-                            )
-                            auto m_res = emit_json_match(ev)
-                            if m_res == 1 { is_broken_pipe = true; break }
-                            else if m_res == 2 { had_error = true; break }
-                        } else {
-                            auto ev = MatchEvent(
-                                path = target_path.clone(),
-                                line_text = string::from(line_text),
-                                line_number = line_num,
-                                absolute_offset = abs_offset,
-                                submatches = Vec<SubMatch>::new()
-                            )
-                            auto h_res = emit_human_match(ev, opts, multiple_files)
-                            if h_res == 1 { is_broken_pipe = true; break }
-                            else if h_res == 2 { had_error = true; break }
+                if !opts.files_with_matches && !opts.count {
+                    auto l_record = LogicalLine(
+                        text = string::from(line_text),
+                        line_number = line_num,
+                        absolute_offset = abs_offset,
+                        delim_len = delim_len
+                    )
+                    auto outcome = process_logical_line(
+                        cede l_record,
+                        line_matches,
+                        opts,
+                        context_state#,
+                        target_path.as_str(),
+                        needle,
+                        multiple_files
+                    )
+                    match outcome {
+                        LineProcessOutcome::Continue => {}
+                        LineProcessOutcome::BrokenPipe => {
+                            is_broken_pipe = true
+                            break
+                        }
+                        LineProcessOutcome::FatalError => {
+                            had_error = true
+                            break
                         }
                     }
                 }
@@ -335,33 +515,32 @@ pub fn scan_file_stream(
                         auto w_res = write_line(target_path.as_str())
                         if w_res == 1 { is_broken_pipe = true }
                         else if w_res == 2 { had_error = true }
-                    } else if !opts.count {
-                        if opts.json_mode {
-                            auto submatches# = Vec<SubMatch>::new()
-                            if is_needle_found && needle.len > 0 {
-                                submatches = find_all_submatches(line_text, needle, opts.ignore_case)
-                            }
-                            auto ev = MatchEvent(
-                                path = target_path.clone(),
-                                line_text = string::from(line_text),
-                                line_number = line_num,
-                                absolute_offset = abs_offset,
-                                submatches = cede submatches
-                            )
-                            auto m_res = emit_json_match(ev)
-                            if m_res == 1 { is_broken_pipe = true }
-                            else if m_res == 2 { had_error = true }
-                        } else {
-                            auto ev = MatchEvent(
-                                path = target_path.clone(),
-                                line_text = string::from(line_text),
-                                line_number = line_num,
-                                absolute_offset = abs_offset,
-                                submatches = Vec<SubMatch>::new()
-                            )
-                            auto h_res = emit_human_match(ev, opts, multiple_files)
-                            if h_res == 1 { is_broken_pipe = true }
-                            else if h_res == 2 { had_error = true }
+                    }
+                }
+
+                if !opts.files_with_matches && !opts.count {
+                    auto l_record = LogicalLine(
+                        text = string::from(line_text),
+                        line_number = line_num,
+                        absolute_offset = abs_offset,
+                        delim_len = delim_len
+                    )
+                    auto outcome = process_logical_line(
+                        cede l_record,
+                        line_matches,
+                        opts,
+                        context_state#,
+                        target_path.as_str(),
+                        needle,
+                        multiple_files
+                    )
+                    match outcome {
+                        LineProcessOutcome::Continue => {}
+                        LineProcessOutcome::BrokenPipe => {
+                            is_broken_pipe = true
+                        }
+                        LineProcessOutcome::FatalError => {
+                            had_error = true
                         }
                     }
                 }
@@ -384,7 +563,7 @@ pub fn scan_file_stream(
             else if c_res == 2 { had_error = true }
         }
 
-        // Always emit matching end event in JSON mode if begin was emitted, even on errors
+        // Always emit matching end event in JSON mode if begin was emitted
         if !is_binary && opts.json_mode && !is_broken_pipe {
             auto e_res = emit_json_end(target_path.as_str(), matches_count)
             if e_res == 1 { is_broken_pipe = true }

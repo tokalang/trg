@@ -20,6 +20,8 @@ pub shape CliOptions (
     files_mode: bool,
     json_mode: bool,
     hidden: bool,
+    before_context: usize,
+    after_context: usize,
     globs: Vec<GlobRule>
 )
 
@@ -35,6 +37,19 @@ pub shape MatchEvent (
     line_number: usize,
     absolute_offset: usize,
     submatches: Vec<SubMatch>
+)
+
+pub shape LogicalLine (
+    text: string,
+    line_number: usize,
+    absolute_offset: usize,
+    delim_len: usize
+)
+
+pub shape LineProcessOutcome (
+    Continue = 0 |
+    BrokenPipe = 1 |
+    FatalError = 2
 )
 
 pub shape ScanResult (
