@@ -179,11 +179,33 @@ def main():
     assert r.returncode == 0
     assert "crlf.txt" in r.stdout
 
-    # Test 7: Count matches per file (-c)
-    log("Test 7: Count matches per file (-c)")
-    r = run_cmd([trg, "-c", "bravo", str(fixtures_dir / "crlf.txt")])
-    assert r.returncode == 0
-    assert r.stdout.strip() == "1"
+    # Test 7: Count matches per file (-c) and --include-zero
+    log("Test 7: Count matches per file (-c) and --include-zero")
+    r_hit = run_cmd([trg, "-c", "bravo", str(fixtures_dir / "crlf.txt")])
+    assert r_hit.returncode == 0
+    assert r_hit.stdout.strip() == "1"
+
+    # Single file miss with -c -> no stdout, exit 1
+    r_miss = run_cmd([trg, "-c", "NON_EXISTENT_KEY", str(fixtures_dir / "crlf.txt")], check=False)
+    assert r_miss.returncode == 1
+    assert r_miss.stdout == ""
+
+    # Single file miss with -c --include-zero -> outputs 0, exit 1
+    r_miss_iz = run_cmd([trg, "-c", "--include-zero", "NON_EXISTENT_KEY", str(fixtures_dir / "crlf.txt")], check=False)
+    assert r_miss_iz.returncode == 1
+    assert r_miss_iz.stdout.strip() == "0"
+
+    # Multi-file partial hit with -c -> only prints matching files
+    r_multi_c = run_cmd([trg, "-c", "bravo", str(fixtures_dir / "crlf.txt"), str(fixtures_dir / "empty.txt")])
+    assert r_multi_c.returncode == 0
+    assert "crlf.txt:1" in r_multi_c.stdout
+    assert "empty.txt" not in r_multi_c.stdout
+
+    # Multi-file partial hit with -c --include-zero -> prints matching and zero files
+    r_multi_iz = run_cmd([trg, "-c", "--include-zero", "bravo", str(fixtures_dir / "crlf.txt"), str(fixtures_dir / "empty.txt")])
+    assert r_multi_iz.returncode == 0
+    assert "crlf.txt:1" in r_multi_iz.stdout
+    assert "empty.txt:0" in r_multi_iz.stdout
 
     # Test 8: Explicit path specification and stdin reading
     log("Test 8: Explicit path specification and stdin reading")
@@ -1056,6 +1078,16 @@ def main():
         # -m 0: returns 1 (no matches allowed)
         r_m0 = run_cmd([trg, "-m", "0", "match", str(mc_fixture)], check=False)
         assert r_m0.returncode == 1
+
+        # -m 0 -c: returns 1 (no output)
+        r_m0_c = run_cmd([trg, "-m", "0", "-c", "match", str(mc_fixture)], check=False)
+        assert r_m0_c.returncode == 1
+        assert r_m0_c.stdout == ""
+
+        # -m 0 -c --include-zero: returns 1 (outputs 0)
+        r_m0_c_iz = run_cmd([trg, "-m", "0", "-c", "--include-zero", "match", str(mc_fixture)], check=False)
+        assert r_m0_c_iz.returncode == 1
+        assert r_m0_c_iz.stdout.strip() == "0"
 
         # -m 2: caps at 2 matches
         r_m2 = run_cmd([trg, "-m", "2", "-n", "match", str(mc_fixture)])

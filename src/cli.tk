@@ -36,6 +36,7 @@ pub fn print_help() {
     println("  -q, --quiet                Do not print matches; exit 0 on first match, 1 otherwise")
     println("  -l, --files-with-matches   Only print the paths of matching files")
     println("  -c, --count                Only print the count of matching lines per file")
+    println("      --include-zero         Include files with zero matches in --count output")
     println("  -v, --invert-match         Invert the match (select non-matching lines)")
     println("  -i, --ignore-case          Case-insensitive search (ASCII)")
     println("  -S, --smart-case           Smart case search (case-insensitive unless pattern has uppercase)")
@@ -235,6 +236,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto line_number# = true
     auto files_with_matches# = false
     auto count# = false
+    auto include_zero# = false
     auto quiet# = false
     auto only_matching# = false
     auto invert_match# = false
@@ -463,6 +465,12 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 
         if view == "-c" || view == "--count" {
             count = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--include-zero" {
+            include_zero = true
             i = i + 1
             continue
         }
@@ -973,6 +981,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             line_number = false,
             files_with_matches = false,
             count = false,
+            include_zero = false,
             quiet = false,
             only_matching = false,
             invert_match = false,
@@ -1066,6 +1075,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         line_number = line_number,
         files_with_matches = files_with_matches,
         count = count,
+        include_zero = include_zero,
         quiet = quiet,
         only_matching = only_matching,
         invert_match = invert_match,

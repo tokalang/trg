@@ -20,6 +20,9 @@
   - Silence match printing and short-circuit immediately on first match with exit code 0.
 - **Deterministic File Sorting (`--sort`, `--sortr`)**:
   - Sort search paths deterministically by path in ascending (`--sort path`) or descending (`--sortr path`) order via $O(N \log N)$ merge sort.
+- **Match Counting (`-c`, `--count`, `--include-zero`)**:
+  - `-c, --count`: Print only the count of matching lines per file. Files with zero matches are omitted by default.
+  - `--include-zero`: Include zero-match files (`file:0`) in `-c` output.
 - **Line Numbers & Suppression (`-n`, `-N`)**:
   - `-n, --line-number`: Show 1-based line numbers.
   - `-N, --no-line-number`: Suppress line numbers.
@@ -209,6 +212,10 @@ trg -q "TODO" src/ && echo "Found TODOs"
 
 # Deterministic lexicographical path sort (--sort path, --sortr path)
 trg --sort path -l "pub fn" src/
+
+# Count matching lines per file (-c, --include-zero)
+trg -c "pub fn" src/
+trg -c --include-zero "pub fn" src/
 
 # Suppress line numbers (-N)
 trg -N "pub fn" src/

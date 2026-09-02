@@ -32,6 +32,7 @@ pub shape CliOptions (
     line_number: bool,
     files_with_matches: bool,
     count: bool,
+    include_zero: bool,
     quiet: bool,
     only_matching: bool,
     invert_match: bool,
