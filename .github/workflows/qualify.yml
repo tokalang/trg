@@ -1,0 +1,70 @@
+name: Package qualification
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  TOKA_VERSION: v1.0.0-rc.11
+
+jobs:
+  qualify:
+    name: trg qualification (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-22.04
+            asset: toka-v1.0.0-rc.11-linux-x64.tar.gz
+            sha256: 24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917
+          - name: macos-arm64
+            runner: macos-15
+            asset: toka-v1.0.0-rc.11-macos-arm64.tar.gz
+            sha256: 20e32db7246f75fb59bc452c411e59ab5df8b4ecbd3dbc4beb9b2d6e4532d07b
+    steps:
+      - name: Check out package
+        uses: actions/checkout@v4
+
+      - name: Install Linux runtime dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo -E apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y libssl3 zlib1g libzstd1 libstdc++6 libgcc-s1 ripgrep
+
+      - name: Install macOS runtime dependencies
+        if: runner.os == 'macOS'
+        run: brew install lld@20 zstd openssl@3 ripgrep
+
+      - name: Install locked Toka SDK (RC11)
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/${{ matrix.asset }}"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/${{ matrix.asset }}"
+          echo "${{ matrix.sha256 }}  $archive" | shasum -a 256 --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sdk="$RUNNER_TEMP/${{ matrix.asset }}"
+          sdk="${sdk%.tar.gz}"
+          "$sdk/bin/toka" --version | grep -F '1.0.0-rc.11'
+          "$sdk/bin/tokac" --version | grep -F '1.0.0-rc.11'
+          echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
+          echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+          echo "PATH=$sdk/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Validate manifest and doctor
+        run: |
+          toka doctor
+          toka check --json package.tk
+
+      - name: Run qualification suite
+        run: python3 tests/qualify.py

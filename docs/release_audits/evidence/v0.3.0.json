@@ -3,23 +3,25 @@
   "package": "trg",
   "version": "0.3.0",
   "candidate_commit": "51491f03bf0dceaabdab9e5155d21f33bf49e986",
-  "timestamp": "2026-09-02T03:32:00Z",
+  "timestamp": "2026-09-02T03:46:00Z",
   "platform": {
     "host_os": "Darwin",
     "kernel": "25.5.0",
     "arch": "arm64",
-    "qualification_scope": "macOS arm64 qualified (host environment)"
+    "qualification_scope": "macOS arm64 host qualified; Linux multi-platform qualification pending CI execution"
   },
   "toolchain": {
-    "toka_version": "1.0.0-rc.8",
-    "compiler_version": "1.0.0-rc.8",
+    "toka_version": "1.0.0-rc.11",
+    "compiler_version": "1.0.0-rc.11 (Built: Sep 1 2026 09:45:37)",
     "target_spec": "1.0.0-rc.11",
+    "sdk_asset_sha256": "20e32db7246f75fb59bc452c411e59ab5df8b4ecbd3dbc4beb9b2d6e4532d07b",
     "clang_version": "Apple clang version 21.0.0 (clang-2100.1.1.101)"
   },
   "supply_chain": {
     "dependency": "official/regex",
     "tag": "v0.3.0",
     "tag_commit": "02114477c4cd1bdb1c9554f200fcc31bf79ab52f",
+    "ci_workflow_upgrade_commit": "29b645b",
     "tarball_url": "https://github.com/tokalang/regex/releases/download/v0.3.0/regex-0.3.0.tar.gz",
     "archive_sha256": "cf365755da461ff9bb48df211aca8ddbcf2c630cc1caedd8395b5200a8d8beb9",
     "tree_sha256": "c0a8b50305ae4e6e7ee82c1505ca314dd0bc98968d088d5e631dc39104db68a1",
@@ -41,12 +43,14 @@
     },
     "clean_consumer_replay": {
       "status": "PASS",
+      "toolchain": "Toka 1.0.0-rc.11 official SDK",
       "online_fetch_and_build": "PASS",
       "offline_isolated_replay": "PASS",
       "lock_drift": "NONE"
     },
     "package_qualification": {
       "status": "PASS",
+      "toolchain": "Toka 1.0.0-rc.11 official SDK",
       "toka_doctor": "PASS",
       "toka_check": "PASS",
       "toka_build_online": "PASS",
@@ -54,16 +58,18 @@
       "direct_tokac_build": "PASS",
       "qualify_suite_tests_passed": 49,
       "qualify_suite_total": 49,
-      "primary_test_subject": "target/debug/trg"
+      "primary_test_subject": "target/debug/trg",
+      "compiler_mapping_verified": "official/regex=.toka/packages/regex-0.3.0/lib/official/regex.tk"
     },
     "regex_prefilter_differential": {
       "status": "PASS",
+      "matrix_dimensions": "16 patterns x 18 flag sets x 3 target corpora",
       "total_configurations_tested": 864,
       "stdout_parity": "100%",
       "stderr_parity": "100%",
       "returncode_parity": "100%",
       "json_framing_parity": "100%",
-      "invariant_can_match_empty_verified": true
+      "invariant_verification_source": "official/regex package unit test suite (AST analysis invariants) + trg differential harness (execution parity)"
     },
     "resource_safety_limits": {
       "status": "PASS",
@@ -76,7 +82,13 @@
       "symlink_cycle_prevention": true,
       "ripgrep_error_precedence_exit_2": true,
       "early_regex_compile_error_before_walk": true,
-      "unbroken_json_framing_on_errors": true,
+      "unbroken_json_framing_on_tested_errors": [
+        "empty_files",
+        "binary_probe",
+        "overlong_line_exceeding_1mb",
+        "unreadable_missing_paths",
+        "unrecognized_cli_flags"
+      ],
       "broken_pipe_sigpipe_graceful_exit_0": true
     },
     "performance_benchmarks": {
@@ -97,13 +109,20 @@
         "rg_literal_baseline": 3.679,
         "rg_regex_baseline": 3.905
       },
-      "prefilter_speedup": "2.11x",
-      "literal_fastpath_regression": "0.0%"
+      "prefilter_speedup": "2.11x (3.682ms vs 7.783ms)",
+      "baseline_note": "Candidate median runtime is comparable to rg -j1 on the tested corpus (3.680ms vs 3.679ms)"
     }
   },
   "defects": {
     "p0_count": 0,
-    "p1_count": 0,
+    "p1_count": 1,
+    "p1_items": [
+      {
+        "id": "TRG-P1-01",
+        "description": "Multi-platform Linux (x86_64, aarch64) qualification pending CI execution. Current local qualification covers macOS arm64 only.",
+        "impact": "Release artifact cannot be signed as fully multi-platform release-qualified until Linux CI completes."
+      }
+    ],
     "p2_count": 1,
     "p2_items": [
       {
@@ -113,5 +132,6 @@
       }
     ]
   },
-  "audit_decision": "GO_FOR_RELEASE_CANDIDATE"
+  "audit_decision": "NO_GO_FOR_TAG_PENDING_LINUX_CI",
+  "local_host_status": "MACOS_ARM64_RC11_QUALIFIED"
 }
