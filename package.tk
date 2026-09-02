@@ -1,0 +1,20 @@
+pub const PACKAGE = (
+    name = "trg",
+    version = "0.1.0",
+    kind = "application",
+    license = "Apache-2.0",
+    compiler = "1.0.0-rc.8",
+    entry_modules = ["src/main.tk"],
+    targets = ["macos", "linux"],
+    dependencies = (),
+    native = (required = false, libraries = [""])
+)
+
+pub const AI_CONTRACT = (
+    schema = "toka-application-v1",
+    summary = "Fast, agent-friendly, symlink-safe code search tool in Toka.",
+    capabilities = ["literal fast-path search (-F)", "symlink and cycle safety via portable readlink", "incremental 64KB chunk-buffered streaming reads", "bounded line memory with explicit 1MB line length limit", "newline-delimited JSONL streaming schema (trg-json-v1)", "bounded gitignore profile with directory subtree pruning and intra-directory negation", "order-preserving last-match-wins glob filtering (-g)", "ripgrep-compliant error precedence (exit code 2 on any search error)", "graceful broken-pipe and SIGPIPE handling"],
+    non_goals = ["unbounded single-line memory", "re-including descendant files within pruned directories", "multithreading in Phase 0", "full PCRE2 regular expressions in Phase 0"],
+    safety = "POSIX readlink symlink loop prevention; fail-closed error propagation with exit code 2; SIGPIPE ignored to prevent unexpected pipeline crashes; 1MB max line limit to prevent unbounded memory allocation",
+    qualification = "python3 tests/qualify.py"
+)

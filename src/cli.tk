@@ -1,0 +1,206 @@
+// Strict command-line argument parser for trg.
+import core/result::{Result}
+import std/vec::{Vec}
+import std/env as env
+import std/io::{println}
+import src/types::{CliOptions, GlobRule}
+import src/glob::{parse_glob_rule}
+
+pub fn print_help() {
+    println("trg 0.1.0 - Fast, agent-friendly code search tool")
+    println("Usage:")
+    println("  trg [OPTIONS] -F <PATTERN> [PATH...]")
+    println("  trg [OPTIONS] <PATTERN> [PATH...]")
+    println("  trg --files [OPTIONS] [PATH...]")
+    println("")
+    println("Options:")
+    println("  -F, --fixed-strings    Treat the pattern as a fixed literal string (default in Phase 0)")
+    println("  -n, --line-number      Show line numbers (1-based)")
+    println("  -l, --files-with-matches Only print the paths of matching files")
+    println("  -c, --count            Only print the count of matching lines per file")
+    println("  -v, --invert-match     Invert the match (select non-matching lines)")
+    println("  -i, --ignore-case      Case-insensitive search (ASCII)")
+    println("  -g, --glob <GLOB>      Include or exclude files matching GLOB (last match wins)")
+    println("      --files            Print the files that would be searched")
+    println("      --json             Output newline-delimited JSONL search events")
+    println("      --hidden           Search hidden files and directories")
+    println("  -V, --version          Print version information")
+    println("  -h, --help             Print this help message")
+}
+
+pub fn print_version() {
+    println("trg 0.1.0 (Toka)")
+}
+
+pub fn parse_cli_args() -> Result<CliOptions, string> {
+    auto args = env::args()
+    auto num_args = args.len()
+
+    auto fixed_strings# = false
+    auto line_number# = true
+    auto files_with_matches# = false
+    auto count# = false
+    auto invert_match# = false
+    auto ignore_case# = false
+    auto files_mode# = false
+    auto json_mode# = false
+    auto hidden# = false
+    auto globs# = Vec<GlobRule>::new()
+
+    auto pattern# = string::from("")
+    auto paths# = Vec<string>::new()
+    auto pattern_set# = false
+
+    auto i# = 1:usize
+    loop i < num_args {
+        auto &arg_str = args.borrow(i)
+        auto view = arg_str.as_str()
+
+        if view == "-h" || view == "--help" {
+            print_help()
+            return Result<CliOptions, string>::Err(string::from("HELP_EXIT"))
+        }
+
+        if view == "-V" || view == "--version" {
+            print_version()
+            return Result<CliOptions, string>::Err(string::from("VERSION_EXIT"))
+        }
+
+        if view == "-F" || view == "--fixed-strings" {
+            fixed_strings = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-n" || view == "--line-number" {
+            line_number = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-l" || view == "--files-with-matches" {
+            files_with_matches = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-c" || view == "--count" {
+            count = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-v" || view == "--invert-match" {
+            invert_match = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-i" || view == "--ignore-case" {
+            ignore_case = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--files" {
+            files_mode = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--json" {
+            json_mode = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--hidden" {
+            hidden = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-g" || view == "--glob" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag -g / --glob requires an argument"))
+            }
+            i = i + 1
+            auto &glob_arg = args.borrow(i)
+            auto rule = parse_glob_rule(glob_arg.clone())
+            globs#.push(cede rule)
+            i = i + 1
+            continue
+        }
+
+        // Handle short flag clusters e.g. -nli, -Fnl, -iF
+        if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
+            auto is_flag_cluster# = true
+            auto c_idx# = 1:usize
+            loop c_idx < view.len {
+                auto ch = view.byte_at(c_idx)
+                if ch == ('F' as char) { fixed_strings = true }
+                else if ch == ('n' as char) { line_number = true }
+                else if ch == ('l' as char) { files_with_matches = true }
+                else if ch == ('c' as char) { count = true }
+                else if ch == ('v' as char) { invert_match = true }
+                else if ch == ('i' as char) { ignore_case = true }
+                else {
+                    is_flag_cluster = false
+                    break
+                }
+                c_idx = c_idx + 1
+            }
+
+            if is_flag_cluster {
+                i = i + 1
+                continue
+            }
+        }
+
+        // Check if unknown option
+        if view.starts_with("-") && view != "-" {
+            auto err_msg# = string::from("Unknown option: ")
+            err_msg#.push_str(view)
+            return Result<CliOptions, string>::Err(cede err_msg)
+        }
+
+        // Positional argument
+        if !files_mode && !pattern_set {
+            pattern = arg_str.clone()
+            pattern_set = true
+        } else {
+            paths#.push(arg_str.clone())
+        }
+
+        i = i + 1
+    }
+
+    if !files_mode && !pattern_set {
+        return Result<CliOptions, string>::Err(string::from("Missing search pattern. Use 'trg -h' for usage."))
+    }
+
+    // Flag conflict validation: --json cannot be combined with -l, -c, or --files
+    if json_mode && (files_with_matches || count || files_mode) {
+        return Result<CliOptions, string>::Err(string::from("Flag --json cannot be combined with -l (--files-with-matches), -c (--count), or --files"))
+    }
+
+    // If no paths specified, default to current directory "."
+    if paths.len() == 0 {
+        paths#.push(string::from("."))
+    }
+
+    return Result<CliOptions, string>::Ok(CliOptions(
+        pattern = cede pattern,
+        paths = cede paths,
+        fixed_strings = fixed_strings,
+        line_number = line_number,
+        files_with_matches = files_with_matches,
+        count = count,
+        invert_match = invert_match,
+        ignore_case = ignore_case,
+        files_mode = files_mode,
+        json_mode = json_mode,
+        hidden = hidden,
+        globs = cede globs
+    ))
+}

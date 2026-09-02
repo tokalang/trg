@@ -1,0 +1,178 @@
+// Output formatting module supporting Human, -l, -c, --files, and strict trg-json-v1 JSONL streaming.
+import core/types::{usize, char}
+import core/str::{str}
+import std/vec::{Vec}
+import src/types::{CliOptions, MatchEvent, SubMatch, GlobalStats}
+import src/posix::{posix_write_stdout}
+
+fn hex_digit(v: u8) -> char {
+    if v < 10:u8 {
+        return (48:u8 + v) as char
+    }
+    return (97:u8 + (v - 10:u8)) as char
+}
+
+pub fn u64_to_string(val: u64) -> string {
+    if val == 0:u64 {
+        return string::from("0")
+    }
+    auto digits# = [0:char; 32]
+    auto n# = val
+    auto count# = 0:usize
+    loop n > 0:u64 {
+        auto d = (n % 10:u64) as u8
+        digits[count] = (48:u8 + d) as char
+        n = n / 10:u64
+        count = count + 1
+    }
+    auto out# = string::new()
+    auto i# = count
+    loop i > 0 {
+        i = i - 1
+        out#.push_char(digits[i])
+    }
+    return cede out
+}
+
+pub fn json_escape(s: str) -> string {
+    auto out# = string::new()
+    auto i# = 0:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i)
+        auto b = ch as u8
+        if b == (92:u8) { // '\\'
+            out#.push_str("\\\\")
+        } else if b == (34:u8) { // '"'
+            out#.push_str("\\\"")
+        } else if b == (10:u8) { // '\n'
+            out#.push_str("\\n")
+        } else if b == (13:u8) { // '\r'
+            out#.push_str("\\r")
+        } else if b == (9:u8) { // '\t'
+            out#.push_str("\\t")
+        } else if b == (8:u8) { // '\b'
+            out#.push_str("\\b")
+        } else if b == (12:u8) { // '\f'
+            out#.push_str("\\f")
+        } else if b < 32:u8 {
+            out#.push_str("\\u00")
+            auto hi = b / 16:u8
+            auto lo = b % 16:u8
+            out#.push_char(hex_digit(hi))
+            out#.push_char(hex_digit(lo))
+        } else {
+            out#.push_char(ch)
+        }
+        i = i + 1
+    }
+    return cede out
+}
+
+pub fn write_line(line: str) -> i32 {
+    auto s# = string::from(line)
+    s#.push_str("\n")
+    return posix_write_stdout(s.as_str())
+}
+
+pub fn print_files_list(files: Vec<string>) -> i32 {
+    auto num_files = files.len()
+    auto i# = 0:usize
+    loop i < num_files {
+        auto &path_str = files.borrow(i)
+        auto res = write_line(path_str.as_str())
+        if res != 0 {
+            return res
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+pub fn emit_json_begin(path: str) -> i32 {
+    auto begin_json# = string::from("{\"type\":\"begin\",\"data\":{\"path\":{\"text\":\"")
+    auto esc_path = json_escape(path)
+    begin_json#.push_str(esc_path.as_str())
+    begin_json#.push_str("\"}}}")
+    return write_line(begin_json.as_str())
+}
+
+pub fn emit_json_match(ev: MatchEvent) -> i32 {
+    auto esc_path = json_escape(ev.path.as_str())
+    auto match_json# = string::from("{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"")
+    match_json#.push_str(esc_path.as_str())
+    match_json#.push_str("\"},\"lines\":{\"text\":\"")
+    auto esc_line = json_escape(ev.line_text.as_str())
+    match_json#.push_str(esc_line.as_str())
+    match_json#.push_str("\\n\"},\"line_number\":")
+    auto lnum_str = u64_to_string(ev.line_number as u64)
+    match_json#.push_str(lnum_str.as_str())
+    match_json#.push_str(",\"absolute_offset\":")
+    auto abs_str = u64_to_string(ev.absolute_offset as u64)
+    match_json#.push_str(abs_str.as_str())
+    match_json#.push_str(",\"submatches\":[")
+
+    auto num_sub = ev.submatches.len()
+    auto s_idx# = 0:usize
+    loop s_idx < num_sub {
+        auto &sm = ev.submatches.borrow(s_idx)
+        if s_idx > 0 {
+            match_json#.push_str(",")
+        }
+        match_json#.push_str("{\"match\":{\"text\":\"")
+        auto esc_sm = json_escape(sm.match_text.as_str())
+        match_json#.push_str(esc_sm.as_str())
+        match_json#.push_str("\"},\"start\":")
+        auto start_str = u64_to_string(sm.start as u64)
+        match_json#.push_str(start_str.as_str())
+        match_json#.push_str(",\"end\":")
+        auto end_str = u64_to_string(sm.end as u64)
+        match_json#.push_str(end_str.as_str())
+        match_json#.push_str("}")
+        s_idx = s_idx + 1
+    }
+
+    match_json#.push_str("]}}")
+    return write_line(match_json.as_str())
+}
+
+pub fn emit_json_end(path: str, matches_count: usize) -> i32 {
+    auto esc_path = json_escape(path)
+    auto end_json# = string::from("{\"type\":\"end\",\"data\":{\"path\":{\"text\":\"")
+    end_json#.push_str(esc_path.as_str())
+    end_json#.push_str("\"},\"binary_offset\":null,\"stats\":{\"elapsed\":{\"secs\":0,\"nanos\":0},\"searches\":1,\"matches\":")
+    auto cnt_str = u64_to_string(matches_count as u64)
+    end_json#.push_str(cnt_str.as_str())
+    end_json#.push_str("}}}")
+    return write_line(end_json.as_str())
+}
+
+pub fn emit_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool) -> i32 {
+    auto out# = string::new()
+    if multiple_files && ev.path.len() > 0 {
+        out#.push_str(ev.path.as_str())
+        out#.push_str(":")
+    }
+
+    if opts.line_number {
+        auto lnum_str = u64_to_string(ev.line_number as u64)
+        out#.push_str(lnum_str.as_str())
+        out#.push_str(":")
+    }
+
+    out#.push_str(ev.line_text.as_str())
+    return write_line(out.as_str())
+}
+
+pub fn print_summary_json(stats: GlobalStats) -> i32 {
+    auto sum_json# = string::from("{\"type\":\"summary\",\"data\":{\"elapsed_total\":{\"secs\":0,\"nanos\":0},\"stats\":{\"searches\":")
+    auto total_files_str = u64_to_string(stats.total_files as u64)
+    sum_json#.push_str(total_files_str.as_str())
+    sum_json#.push_str(",\"searches_with_match\":")
+    auto match_files_str = u64_to_string(stats.files_with_match as u64)
+    sum_json#.push_str(match_files_str.as_str())
+    sum_json#.push_str(",\"matches\":")
+    auto total_matches_str = u64_to_string(stats.total_matches as u64)
+    sum_json#.push_str(total_matches_str.as_str())
+    sum_json#.push_str("}}}")
+    return write_line(sum_json.as_str())
+}

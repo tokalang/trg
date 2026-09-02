@@ -1,0 +1,175 @@
+// Symlink-safe recursive directory walker with error tracking and last-match-wins glob evaluation.
+import core/types::{usize, Addr}
+import core/result::{Result}
+import std/vec::{Vec}
+import src/types::{CliOptions, GlobRule}
+import src/posix::{posix_stat, posix_opendir, posix_readdir, posix_closedir, posix_get_errno}
+import src/ignore::{IgnoreStack}
+import src/glob::{is_glob_allowed}
+
+extern fn write(fd: i32, *buf: void, count: usize) -> isize
+
+fn log_walker_err(path: str, msg: str) {
+    unsafe {
+        auto p1 = "trg: "
+        write(2:i32, p1.raw_ptr() as *void, p1.len)
+        write(2:i32, path.raw_ptr() as *void, path.len)
+        auto p2 = ": "
+        write(2:i32, p2.raw_ptr() as *void, p2.len)
+        write(2:i32, msg.raw_ptr() as *void, msg.len)
+        auto nl = "\n"
+        write(2:i32, nl.raw_ptr() as *void, 1:usize)
+    }
+}
+
+pub shape WalkResult (
+    files: Vec<string>,
+    had_error: bool
+)
+
+fn build_child_path(parent: str, child: str) -> string {
+    if parent == "." || parent == "" {
+        return string::from(child)
+    }
+    if parent.ends_with("/") {
+        auto p# = string::from(parent)
+        p#.push_str(child)
+        return cede p
+    }
+    auto p# = string::from(parent)
+    p#.push_str("/")
+    p#.push_str(child)
+    return cede p
+}
+
+fn walk_dir_recursive(
+    dir_path: string,
+    opts: CliOptions,
+    ignore_stack#: IgnoreStack,
+    collected#: Vec<string>,
+    had_error#: bool
+) {
+    ignore_stack#.push_dir(dir_path.clone())
+
+    auto dir_res = posix_opendir(dir_path.clone())
+    if dir_res.is_err() {
+        log_walker_err(dir_path.as_str(), "Permission denied or unable to open directory")
+        had_error = true
+        ignore_stack#.pop_dir()
+        return
+    }
+
+    auto dir = dir_res.unwrap()
+
+    loop true {
+        auto entry_res = posix_readdir(dir)
+        if entry_res.is_err() {
+            log_walker_err(dir_path.as_str(), "Error reading directory entries")
+            had_error = true
+            break
+        }
+        auto entry_opt = entry_res.unwrap()
+        if entry_opt.is_none() { break }
+        auto entry = entry_opt.unwrap()
+        auto entry_str = entry.as_str()
+
+        // Skip hidden files/directories unless --hidden
+        if entry_str.starts_with(".") && !opts.hidden {
+            continue
+        }
+
+        auto full_path = build_child_path(dir_path.as_str(), entry_str)
+        auto stat_res = posix_stat(full_path.clone())
+        if stat_res.is_err() {
+            log_walker_err(full_path.as_str(), "Failed to stat entry")
+            had_error = true
+            continue
+        }
+
+        auto stat = stat_res.unwrap()
+        // Symlink safety: do not follow symlinks
+        if stat.is_symlink {
+            continue
+        }
+
+        if stat.is_dir {
+            // Check directory ignore rule for pruning
+            if ignore_stack.is_ignored(full_path.as_str(), true) {
+                continue
+            }
+
+            // Check CLI directory glob rule for pruning
+            if !is_glob_allowed(full_path.as_str(), true, opts.globs) {
+                continue
+            }
+
+            // Recurse into directory
+            walk_dir_recursive(full_path, opts, ignore_stack#, collected#, had_error#)
+        } else if stat.is_file {
+            // Check file ignore rule
+            if ignore_stack.is_ignored(full_path.as_str(), false) {
+                continue
+            }
+
+            // Check CLI glob filter (last-match-wins)
+            if !is_glob_allowed(full_path.as_str(), false, opts.globs) {
+                continue
+            }
+
+            collected#.push(full_path)
+        }
+    }
+
+    posix_closedir(dir)
+    ignore_stack#.pop_dir()
+}
+
+pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
+    auto files# = Vec<string>::new()
+    auto num_paths = opts.paths.len()
+    auto had_error# = false
+
+    auto i# = 0:usize
+    loop i < num_paths {
+        auto &path_arg = opts.paths.borrow(i)
+        auto path_view = path_arg.as_str()
+
+        if path_view == "-" {
+            // Stdin target
+            files#.push(string::from("-"))
+            i = i + 1
+            continue
+        }
+
+        auto stat_res = posix_stat(path_arg.clone())
+        if stat_res.is_err() {
+            log_walker_err(path_view, "No such file or directory")
+            had_error = true
+            i = i + 1
+            continue
+        }
+
+        auto stat = stat_res.unwrap()
+        if stat.is_file {
+            // Direct file argument
+            if is_glob_allowed(path_view, false, opts.globs) {
+                files#.push(path_arg.clone())
+            }
+        } else if stat.is_dir {
+            auto ignore_stack# = IgnoreStack::new()
+            walk_dir_recursive(path_arg.clone(), opts, ignore_stack#, files#, had_error#)
+        } else {
+            // If it's a symlink at the root argument level, do not follow by default
+            if !stat.is_symlink {
+                files#.push(path_arg.clone())
+            }
+        }
+
+        i = i + 1
+    }
+
+    return WalkResult(
+        files = cede files,
+        had_error = had_error
+    )
+}

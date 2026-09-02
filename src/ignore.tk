@@ -1,0 +1,131 @@
+// Bounded .gitignore stack evaluator for trg.
+import core/types::{usize}
+import std/vec::{Vec}
+import std/io::{File}
+import src/types::{GlobRule}
+import src/glob::{parse_glob_rule, match_glob_pat}
+
+pub shape IgnoreLayer (
+    dir_prefix: string,
+    rules: Vec<GlobRule>
+)
+
+pub shape IgnoreStack (
+    layers#: Vec<IgnoreLayer>
+)
+
+impl IgnoreStack {
+    pub fn new() -> IgnoreStack {
+        return IgnoreStack(layers = Vec<IgnoreLayer>::new())
+    }
+
+    pub fn push_dir(self#, dir_path: string) {
+        auto gitignore_path# = string::from("")
+        if dir_path.as_str() == "." || dir_path.as_str() == "" {
+            gitignore_path = string::from(".gitignore")
+        } else {
+            gitignore_path = string::from(dir_path.as_str())
+            gitignore_path#.push_str("/.gitignore")
+        }
+
+        auto file_res = File::try_open(gitignore_path, "r")
+        if file_res.is_err() {
+            // Push empty layer for scope balance
+            auto layer = IgnoreLayer(
+                dir_prefix = dir_path.clone(),
+                rules = Vec<GlobRule>::new()
+            )
+            self.layers#.push(cede layer)
+            return
+        }
+
+        auto file# = file_res.unwrap()
+        auto content_res = file.read_to_string()
+        file#.close()
+
+        if content_res.is_err() {
+            auto layer = IgnoreLayer(
+                dir_prefix = dir_path.clone(),
+                rules = Vec<GlobRule>::new()
+            )
+            self.layers#.push(cede layer)
+            return
+        }
+
+        auto content = content_res.unwrap()
+        auto rules# = Vec<GlobRule>::new()
+        auto lines_iter# = content.as_str().lines()
+
+        loop true {
+            auto line_opt = lines_iter#.next()
+            if line_opt.is_none() { break }
+            auto raw_line = line_opt.unwrap()
+            auto trimmed = raw_line.trim()
+            if trimmed.len == 0 { continue }
+            if trimmed.starts_with("#") { continue }
+
+            auto rule = parse_glob_rule(string::from(trimmed))
+            rules#.push(cede rule)
+        }
+
+        auto layer = IgnoreLayer(
+            dir_prefix = dir_path.clone(),
+            rules = cede rules
+        )
+        self.layers#.push(cede layer)
+    }
+
+    pub fn pop_dir(self#) {
+        if self.layers.len() > 0 {
+            self.layers#.pop()
+        }
+    }
+
+    pub fn is_ignored(self, rel_path: str, is_dir: bool) -> bool {
+        // Built-in hardcoded ignores
+        if rel_path == ".git" || rel_path.starts_with(".git/") || rel_path.ends_with("/.git") {
+            return true
+        }
+
+        auto num_layers = self.layers.len()
+        if num_layers == 0 {
+            return false
+        }
+
+        // Evaluate from deepest directory layer to root layer
+        auto l_idx# = num_layers
+        loop l_idx > 0 {
+            l_idx = l_idx - 1
+            auto &layer = self.layers.borrow(l_idx)
+            auto num_rules = layer.rules.len()
+
+            // Evaluate rules from bottom to top
+            auto r_idx# = num_rules
+            loop r_idx > 0 {
+                r_idx = r_idx - 1
+                auto &rule = layer.rules.borrow(r_idx)
+                
+                // If layer has dir_prefix, strip prefix from rel_path for local evaluation
+                auto test_path# = rel_path
+                auto prefix = layer.dir_prefix.as_str()
+                if prefix != "." && prefix != "" {
+                    if rel_path.starts_with(prefix) {
+                        auto rest_len = rel_path.len - prefix.len
+                        if rest_len > 1 && rel_path.byte_at(prefix.len) == ('/' as char) {
+                            test_path = rel_path.substr(prefix.len + 1, rest_len - 1)
+                        }
+                    }
+                }
+
+                if match_glob_pat(test_path, is_dir, rule.pattern.as_str(), rule.dir_only) {
+                    if rule.is_negation {
+                        return false // Un-ignore
+                    }
+                    return true // Ignored
+                }
+            }
+        }
+
+        return false
+    }
+}

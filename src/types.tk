@@ -1,0 +1,54 @@
+// Shared shapes and types for trg.
+import core/types::{usize}
+import std/vec::{Vec}
+
+pub shape GlobRule (
+    pattern: string,
+    is_negation: bool,
+    dir_only: bool
+)
+
+pub shape CliOptions (
+    pattern: string,
+    paths: Vec<string>,
+    fixed_strings: bool,
+    line_number: bool,
+    files_with_matches: bool,
+    count: bool,
+    invert_match: bool,
+    ignore_case: bool,
+    files_mode: bool,
+    json_mode: bool,
+    hidden: bool,
+    globs: Vec<GlobRule>
+)
+
+pub shape SubMatch (
+    match_text: string,
+    start: usize,
+    end: usize
+)
+
+pub shape MatchEvent (
+    path: string,
+    line_text: string,
+    line_number: usize,
+    absolute_offset: usize,
+    submatches: Vec<SubMatch>
+)
+
+pub shape ScanResult (
+    path: string,
+    matches_count: usize,
+    has_match: bool,
+    is_binary: bool,
+    had_error: bool,
+    is_broken_pipe: bool
+)
+
+pub shape GlobalStats (
+    total_files: usize,
+    files_with_match: usize,
+    total_matches: usize,
+    elapsed_nanos: u64
+)

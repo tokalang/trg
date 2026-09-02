@@ -1,0 +1,143 @@
+// Application entrypoint and exit code orchestrator for trg.
+import core/types::{usize}
+import std/vec::{Vec}
+import src/types::{CliOptions, GlobalStats}
+import src/posix::{posix_init_signals}
+import src/cli::{parse_cli_args}
+import src/walker::{collect_search_targets, WalkResult}
+import src/scanner::{scan_file_stream}
+import src/printer::{print_files_list, print_summary_json}
+
+extern fn write(fd: i32, *buf: void, count: usize) -> isize
+
+fn print_err(msg: str) {
+    unsafe {
+        auto p1 = "trg: "
+        write(2:i32, p1.raw_ptr() as *void, p1.len)
+        write(2:i32, msg.raw_ptr() as *void, msg.len)
+        auto nl = "\n"
+        write(2:i32, nl.raw_ptr() as *void, 1:usize)
+    }
+}
+
+fn main() -> i32 {
+    // Phase -1: Initialize POSIX signals (ignore SIGPIPE to prevent crash on broken pipe)
+    posix_init_signals()
+
+    auto cli_res = parse_cli_args()
+    if cli_res.is_err() {
+        auto err = cli_res.unwrap_err()
+        if err.as_str() == "HELP_EXIT" || err.as_str() == "VERSION_EXIT" {
+            return 0
+        }
+        print_err(err.as_str())
+        return 2
+    }
+
+    auto opts = cli_res.unwrap()
+
+    auto walk_res = collect_search_targets(opts)
+    auto global_had_error# = walk_res.had_error
+    auto files = walk_res.files.clone()
+    auto num_files = files.len()
+
+    if opts.files_mode {
+        auto res = print_files_list(files)
+        if res == 1 {
+            if global_had_error { return 2 }
+            return 0 // Stdout closed gracefully (broken pipe)
+        }
+        if res == 2 || global_had_error {
+            return 2
+        }
+        if num_files > 0 {
+            return 0
+        }
+        return 1
+    }
+
+    if num_files == 0 {
+        if opts.json_mode {
+            auto stats = GlobalStats(
+                total_files = 0:usize,
+                files_with_match = 0:usize,
+                total_matches = 0:usize,
+                elapsed_nanos = 0:u64
+            )
+            auto s_res = print_summary_json(stats)
+            if s_res == 1 {
+                if global_had_error { return 2 }
+                return 0
+            }
+            if s_res == 2 { return 2 }
+        }
+        if global_had_error {
+            return 2
+        }
+        return 1
+    }
+
+    auto multiple_files = num_files > 1 || opts.paths.len() > 1
+    auto total_matches# = 0:usize
+    auto files_with_match# = 0:usize
+    auto broken_pipe_occurred# = false
+
+    auto i# = 0:usize
+    loop i < num_files {
+        auto &target_file = files.borrow(i)
+        auto scan_res = scan_file_stream(target_file.clone(), opts, multiple_files)
+
+        if scan_res.had_error {
+            global_had_error = true
+        }
+
+        if scan_res.is_broken_pipe {
+            broken_pipe_occurred = true
+            break
+        }
+
+        if !scan_res.is_binary && !scan_res.had_error {
+            if scan_res.has_match {
+                files_with_match = files_with_match + 1
+                total_matches = total_matches + scan_res.matches_count
+            }
+        }
+
+        i = i + 1
+    }
+
+    if broken_pipe_occurred {
+        if global_had_error {
+            return 2
+        }
+        return 0
+    }
+
+    if opts.json_mode {
+        auto stats = GlobalStats(
+            total_files = num_files,
+            files_with_match = files_with_match,
+            total_matches = total_matches,
+            elapsed_nanos = 0:u64
+        )
+        auto s_res = print_summary_json(stats)
+        if s_res == 1 {
+            if global_had_error { return 2 }
+            return 0 // Broken pipe on summary -> exit 0
+        }
+        if s_res == 2 {
+            return 2 // Write error on summary -> exit 2
+        }
+    }
+
+    // Ripgrep standard error precedence: if any error occurred during walk or scan, exit with code 2
+    if global_had_error {
+        return 2
+    }
+
+    if total_matches > 0 || files_with_match > 0 {
+        return 0
+    }
+
+    return 1
+}

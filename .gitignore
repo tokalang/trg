@@ -1,0 +1,9 @@
+target/
+.toka/
+.toka_build_exe*
+*.o
+*.dylib
+*.so
+*.a
+.DS_Store
+__pycache__/

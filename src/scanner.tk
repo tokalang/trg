@@ -1,0 +1,406 @@
+// True incremental 64KB chunk-buffered streaming scanner with 1MB line limit, ferror check, and complete JSON framing.
+import core/types::{usize, char, Addr}
+import core/str::{str}
+import core/option::{Option}
+import std/vec::{Vec}
+import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
+import src/types::{CliOptions, MatchEvent, SubMatch, ScanResult}
+import src/posix::{posix_ferror}
+import src/printer::{emit_json_begin, emit_json_match, emit_json_end, emit_human_match, write_line, u64_to_string}
+
+extern fn write(fd: i32, *buf: void, count: usize) -> isize
+
+fn log_scanner_err(path: str, msg: str) {
+    unsafe {
+        auto p1 = "trg: "
+        write(2:i32, p1.raw_ptr() as *void, p1.len)
+        write(2:i32, path.raw_ptr() as *void, path.len)
+        auto p2 = ": "
+        write(2:i32, p2.raw_ptr() as *void, p2.len)
+        write(2:i32, msg.raw_ptr() as *void, msg.len)
+        auto nl = "\n"
+        write(2:i32, nl.raw_ptr() as *void, 1:usize)
+    }
+}
+
+fn is_binary_chunk(content: str) -> bool {
+    auto check_len# = content.len
+    if check_len > 1024 { check_len = 1024 }
+    auto i# = 0:usize
+    loop i < check_len {
+        if content.byte_at(i) == (0:char) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn index_of_str_ascii_case(haystack: str, needle: str) -> Option<usize> {
+    if needle.len == 0 { return Option<usize>::Some(0:usize) }
+    if needle.len > haystack.len { return Option<usize>::None }
+
+    auto max_i = haystack.len - needle.len
+    auto i# = 0:usize
+    loop i <= max_i {
+        auto sub = haystack.substr(i, needle.len)
+        if sub.eq_ignore_ascii_case(needle) {
+            return Option<usize>::Some(i)
+        }
+        i = i + 1
+    }
+    return Option<usize>::None
+}
+
+fn find_all_submatches(line: str, needle: str, ignore_case: bool) -> Vec<SubMatch> {
+    auto list# = Vec<SubMatch>::new()
+    if needle.len == 0 { return cede list }
+
+    auto offset# = 0:usize
+    loop offset < line.len {
+        auto rem = line.substr(offset, line.len - offset)
+        auto found_opt# = Option<usize>::None
+        if ignore_case {
+            found_opt = index_of_str_ascii_case(rem, needle)
+        } else {
+            found_opt = rem.index_of_str(needle)
+        }
+
+        if found_opt.is_none() { break }
+        auto match_idx = found_opt.unwrap()
+        auto start = offset + match_idx
+        auto end = start + needle.len
+
+        auto match_text = string::from(line.substr(start, needle.len))
+        auto sm = SubMatch(
+            match_text = cede match_text,
+            start = start,
+            end = end
+        )
+        list#.push(cede sm)
+
+        offset = end
+        if needle.len == 0 { break }
+    }
+    return cede list
+}
+
+pub fn scan_file_stream(
+    target_path: string,
+    opts: CliOptions,
+    multiple_files: bool
+) -> ScanResult {
+    auto is_stdin = target_path.as_str() == "-"
+    auto open_path# = target_path.clone()
+    if is_stdin {
+        open_path = string::from("/dev/stdin")
+    }
+
+    auto mode_buf# = [0:char; 8]
+    mode_buf[0] = 'r' as char
+    mode_buf[1] = 'b' as char
+    mode_buf[2] = 0 as char
+
+    unsafe {
+        auto *mode_ptr = &mode_buf[0] as *char
+        auto *path_c = open_path.c_str()
+        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
+        if *fp == null {
+            log_scanner_err(target_path.as_str(), "Permission denied or failed to open file")
+            return ScanResult(
+                path = target_path.clone(),
+                matches_count = 0,
+                has_match = false,
+                is_binary = false,
+                had_error = true,
+                is_broken_pipe = false
+            )
+        }
+
+        auto *file = fp.unwrap()
+        auto nul *raw_buf = libc_malloc(65536:usize)
+        if *raw_buf == null {
+            libc_fclose(*file)
+            return ScanResult(
+                path = target_path.clone(),
+                matches_count = 0,
+                has_match = false,
+                is_binary = false,
+                had_error = true,
+                is_broken_pipe = false
+            )
+        }
+        auto *buf = raw_buf.unwrap()
+
+        // In JSON mode, emit begin event immediately upon file opening
+        if opts.json_mode {
+            auto b_res = emit_json_begin(target_path.as_str())
+            if b_res != 0 {
+                libc_free(*buf)
+                libc_fclose(*file)
+                auto is_bp = b_res == 1
+                auto had_err = b_res == 2
+                return ScanResult(
+                    path = target_path.clone(),
+                    matches_count = 0,
+                    has_match = false,
+                    is_binary = false,
+                    had_error = had_err,
+                    is_broken_pipe = is_bp
+                )
+            }
+        }
+
+        auto needle = opts.pattern.as_str()
+        auto carry# = string::new()
+        auto line_num# = 1:usize
+        auto abs_offset# = 0:usize
+        auto matches_count# = 0:usize
+        auto has_match# = false
+        auto is_first_chunk# = true
+        auto is_binary# = false
+        auto had_error# = false
+        auto is_broken_pipe# = false
+
+        loop true {
+            auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            if n == 0 {
+                if posix_ferror((*file) as Addr) {
+                    log_scanner_err(target_path.as_str(), "Read error occurred during file streaming")
+                    had_error = true
+                }
+                break
+            }
+
+            auto *c_ptr = ((*buf) as Addr) as *char
+            auto chunk_str = string::from_with_len(*c_ptr, n)
+            auto chunk_view = chunk_str.as_str()
+
+            if is_first_chunk {
+                is_first_chunk = false
+                if is_binary_chunk(chunk_view) {
+                    is_binary = true
+                    if opts.json_mode {
+                        auto end_res = emit_json_end(target_path.as_str(), 0)
+                        if end_res == 1 { is_broken_pipe = true }
+                        else if end_res == 2 { had_error = true }
+                    }
+                    break
+                }
+            }
+
+            auto block# = string::new()
+            if carry.len() > 0 {
+                block#.push_str(carry.as_str())
+            }
+            block#.push_str(chunk_view)
+
+            auto block_view = block.as_str()
+            auto cursor# = 0:usize
+
+            loop cursor < block_view.len {
+                auto rem = block_view.substr(cursor, block_view.len - cursor)
+                auto nl_opt = rem.index_of('\n' as char)
+                if nl_opt.is_none() {
+                    // Check if remaining unterminated logical line exceeds 1MB limit
+                    if rem.len > 1048576:usize {
+                        log_scanner_err(target_path.as_str(), "Maximum logical line length exceeded (1MB limit)")
+                        had_error = true
+                        break
+                    }
+                    carry = string::from(rem)
+                    break
+                }
+                auto nl_pos = nl_opt.unwrap()
+                auto line_raw = rem.substr(0, nl_pos)
+                auto line_text# = line_raw
+                auto delim_len# = 1:usize
+                if line_raw.len > 0 && line_raw.byte_at(line_raw.len - 1) == ('\r' as char) {
+                    line_text = line_raw.substr(0, line_raw.len - 1)
+                    delim_len = 2:usize
+                }
+
+                // Check if terminated logical line exceeds 1MB limit
+                if line_text.len > 1048576:usize {
+                    log_scanner_err(target_path.as_str(), "Maximum logical line length exceeded (1MB limit)")
+                    had_error = true
+                    break
+                }
+
+                auto is_needle_found# = false
+                if needle.len == 0 {
+                    is_needle_found = true
+                } else if opts.ignore_case {
+                    is_needle_found = index_of_str_ascii_case(line_text, needle).is_some()
+                } else {
+                    is_needle_found = line_text.index_of_str(needle).is_some()
+                }
+
+                auto line_matches# = false
+                if !opts.invert_match {
+                    line_matches = is_needle_found
+                } else {
+                    line_matches = !is_needle_found
+                }
+
+                if line_matches {
+                    has_match = true
+                    matches_count = matches_count + 1
+
+                    if opts.files_with_matches {
+                        auto w_res = write_line(target_path.as_str())
+                        if w_res == 1 { is_broken_pipe = true }
+                        else if w_res == 2 { had_error = true }
+                        break
+                    }
+
+                    if !opts.count {
+                        if opts.json_mode {
+                            auto submatches# = Vec<SubMatch>::new()
+                            if is_needle_found && needle.len > 0 {
+                                submatches = find_all_submatches(line_text, needle, opts.ignore_case)
+                            }
+                            auto ev = MatchEvent(
+                                path = target_path.clone(),
+                                line_text = string::from(line_text),
+                                line_number = line_num,
+                                absolute_offset = abs_offset,
+                                submatches = cede submatches
+                            )
+                            auto m_res = emit_json_match(ev)
+                            if m_res == 1 { is_broken_pipe = true; break }
+                            else if m_res == 2 { had_error = true; break }
+                        } else {
+                            auto ev = MatchEvent(
+                                path = target_path.clone(),
+                                line_text = string::from(line_text),
+                                line_number = line_num,
+                                absolute_offset = abs_offset,
+                                submatches = Vec<SubMatch>::new()
+                            )
+                            auto h_res = emit_human_match(ev, opts, multiple_files)
+                            if h_res == 1 { is_broken_pipe = true; break }
+                            else if h_res == 2 { had_error = true; break }
+                        }
+                    }
+                }
+
+                abs_offset = abs_offset + line_text.len + delim_len
+                line_num = line_num + 1
+                cursor = cursor + nl_pos + 1
+                carry = string::new()
+            }
+
+            if is_broken_pipe || had_error || (opts.files_with_matches && has_match) {
+                break
+            }
+        }
+
+        // Process leftover final line at EOF
+        if !is_binary && !had_error && !is_broken_pipe && carry.len() > 0 && !(opts.files_with_matches && has_match) {
+            auto line_raw = carry.as_str()
+            auto line_text# = line_raw
+            auto delim_len# = 0:usize
+            if line_raw.len > 0 && line_raw.byte_at(line_raw.len - 1) == ('\r' as char) {
+                line_text = line_raw.substr(0, line_raw.len - 1)
+                delim_len = 1:usize
+            }
+
+            // Check if final logical line exceeds 1MB limit
+            if line_text.len > 1048576:usize {
+                log_scanner_err(target_path.as_str(), "Maximum logical line length exceeded (1MB limit)")
+                had_error = true
+            } else {
+                auto is_needle_found# = false
+                if needle.len == 0 {
+                    is_needle_found = true
+                } else if opts.ignore_case {
+                    is_needle_found = index_of_str_ascii_case(line_text, needle).is_some()
+                } else {
+                    is_needle_found = line_text.index_of_str(needle).is_some()
+                }
+
+                auto line_matches# = false
+                if !opts.invert_match {
+                    line_matches = is_needle_found
+                } else {
+                    line_matches = !is_needle_found
+                }
+
+                if line_matches {
+                    has_match = true
+                    matches_count = matches_count + 1
+
+                    if opts.files_with_matches {
+                        auto w_res = write_line(target_path.as_str())
+                        if w_res == 1 { is_broken_pipe = true }
+                        else if w_res == 2 { had_error = true }
+                    } else if !opts.count {
+                        if opts.json_mode {
+                            auto submatches# = Vec<SubMatch>::new()
+                            if is_needle_found && needle.len > 0 {
+                                submatches = find_all_submatches(line_text, needle, opts.ignore_case)
+                            }
+                            auto ev = MatchEvent(
+                                path = target_path.clone(),
+                                line_text = string::from(line_text),
+                                line_number = line_num,
+                                absolute_offset = abs_offset,
+                                submatches = cede submatches
+                            )
+                            auto m_res = emit_json_match(ev)
+                            if m_res == 1 { is_broken_pipe = true }
+                            else if m_res == 2 { had_error = true }
+                        } else {
+                            auto ev = MatchEvent(
+                                path = target_path.clone(),
+                                line_text = string::from(line_text),
+                                line_number = line_num,
+                                absolute_offset = abs_offset,
+                                submatches = Vec<SubMatch>::new()
+                            )
+                            auto h_res = emit_human_match(ev, opts, multiple_files)
+                            if h_res == 1 { is_broken_pipe = true }
+                            else if h_res == 2 { had_error = true }
+                        }
+                    }
+                }
+
+                abs_offset = abs_offset + line_text.len + delim_len
+                line_num = line_num + 1
+            }
+        }
+
+        if !is_binary && !had_error && !is_broken_pipe && opts.count {
+            auto out# = string::new()
+            if multiple_files && target_path.as_str() != "-" {
+                out#.push_str(target_path.as_str())
+                out#.push_str(":")
+            }
+            auto cnt_str = u64_to_string(matches_count as u64)
+            out#.push_str(cnt_str.as_str())
+            auto c_res = write_line(out.as_str())
+            if c_res == 1 { is_broken_pipe = true }
+            else if c_res == 2 { had_error = true }
+        }
+
+        // Always emit matching end event in JSON mode if begin was emitted, even on errors
+        if !is_binary && opts.json_mode && !is_broken_pipe {
+            auto e_res = emit_json_end(target_path.as_str(), matches_count)
+            if e_res == 1 { is_broken_pipe = true }
+            else if e_res == 2 { had_error = true }
+        }
+
+        libc_free(*buf)
+        libc_fclose(*file)
+
+        return ScanResult(
+            path = target_path.clone(),
+            matches_count = matches_count,
+            has_match = has_match,
+            is_binary = is_binary,
+            had_error = had_error,
+            is_broken_pipe = is_broken_pipe
+        )
+    }
+}

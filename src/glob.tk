@@ -1,0 +1,155 @@
+// Glob pattern matching and last-match-wins rule evaluator.
+import core/str::{str}
+import std/vec::{Vec}
+import src/types::{GlobRule}
+
+pub fn parse_glob_rule(raw: string) -> GlobRule {
+    auto view = raw.as_str()
+    auto is_neg# = false
+    auto start_idx# = 0:usize
+
+    if view.starts_with("!") {
+        is_neg = true
+        start_idx = 1
+    }
+
+    auto pat_view = view.substr(start_idx, view.len - start_idx)
+    auto is_dir# = false
+    auto end_len# = pat_view.len
+
+    if pat_view.ends_with("/") && pat_view.len > 0 {
+        is_dir = true
+        end_len = pat_view.len - 1
+    }
+
+    auto clean_pat = string::from(pat_view.substr(0, end_len))
+    return GlobRule(
+        pattern = cede clean_pat,
+        is_negation = is_neg,
+        dir_only = is_dir
+    )
+}
+
+fn get_basename(path: str) -> str <- path {
+    auto last_slash = path.last_index_of('/' as char)
+    if last_slash.is_some() {
+        auto idx = last_slash.unwrap()
+        if idx + 1 < path.len {
+            return path.substr(idx + 1, path.len - (idx + 1))
+        }
+    }
+    return path
+}
+
+pub fn match_wildcard(text: str, pattern: str) -> bool {
+    if pattern.equals("*") {
+        return true
+    }
+    if pattern.len == 0 {
+        return text.len == 0
+    }
+
+    auto star_opt = pattern.index_of('*' as char)
+    if star_opt.is_none() {
+        return text.equals(pattern)
+    }
+
+    auto idx = star_opt.unwrap()
+    auto last_star = pattern.last_index_of('*' as char).unwrap()
+    if idx == last_star {
+        if idx == 0 {
+            // Suffix match: *.ext
+            auto suffix = pattern.substr(1, pattern.len - 1)
+            return text.ends_with(suffix)
+        }
+        if idx == pattern.len - 1 {
+            // Prefix match: prefix*
+            auto prefix = pattern.substr(0, pattern.len - 1)
+            return text.starts_with(prefix)
+        }
+        // Star in middle: prefix*suffix
+        auto prefix = pattern.substr(0, idx)
+        auto suffix = pattern.substr(idx + 1, pattern.len - (idx + 1))
+        if text.len < prefix.len + suffix.len {
+            return false
+        }
+        return text.starts_with(prefix) && text.ends_with(suffix)
+    }
+
+    // Two stars: *middle*
+    if idx == 0 && last_star == pattern.len - 1 {
+        auto middle = pattern.substr(1, pattern.len - 2)
+        return text.index_of_str(middle).is_some()
+    }
+
+    // Fallback for multi-star
+    auto prefix = pattern.substr(0, idx)
+    if !text.starts_with(prefix) { return false }
+    auto suffix = pattern.substr(last_star + 1, pattern.len - (last_star + 1))
+    return text.ends_with(suffix)
+}
+
+pub fn match_glob_pat(rel_path: str, is_dir: bool, pat: str, dir_only: bool) -> bool {
+    if dir_only && !is_dir {
+        return false
+    }
+
+    if pat.len == 0 {
+        return false
+    }
+
+    // Anchored or path-level glob (contains '/')
+    if pat.index_of('/' as char).is_some() {
+        auto check_pat# = pat
+        if pat.starts_with("/") {
+            check_pat = pat.substr(1, pat.len - 1)
+        }
+        return match_wildcard(rel_path, check_pat)
+    }
+
+    // Basename match (e.g. *.tk or build)
+    auto basename = get_basename(rel_path)
+    return match_wildcard(basename, pat)
+}
+
+pub fn is_glob_allowed(rel_path: str, is_dir: bool, globs: Vec<GlobRule>) -> bool {
+    auto num_globs = globs.len()
+    if num_globs == 0 { return true }
+
+    auto has_include_rules# = false
+    auto last_match_decision# = -1:i32 // -1: no match, 0: excluded (negation), 1: included
+
+    auto i# = 0:usize
+    loop i < num_globs {
+        auto &rule = globs.borrow(i)
+        if !rule.is_negation {
+            has_include_rules = true
+        }
+        if match_glob_pat(rel_path, is_dir, rule.pattern.as_str(), rule.dir_only) {
+            if rule.is_negation {
+                last_match_decision = 0
+            } else {
+                last_match_decision = 1
+            }
+        }
+        i = i + 1
+    }
+
+    if last_match_decision == 1 {
+        return true
+    }
+    if last_match_decision == 0 {
+        return false
+    }
+
+    // For a directory, allow descending if no rule explicitly pruned it
+    if is_dir {
+        return true
+    }
+
+    // For files, if inclusion filters exist, non-matching files are excluded
+    if has_include_rules {
+        return false
+    }
+    return true
+}
