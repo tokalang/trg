@@ -1,0 +1,125 @@
+name: Release standalone binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name to build binaries for'
+        required: true
+        default: 'v0.3.1'
+
+permissions:
+  contents: write
+
+env:
+  TOKA_VERSION: v1.0.0-rc.11
+
+jobs:
+  build-binaries:
+    name: Build binary (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-22.04
+            asset: toka-v1.0.0-rc.11-linux-x64.tar.gz
+            sha256: 24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917
+          - name: macos-arm64
+            runner: macos-15
+            asset: toka-v1.0.0-rc.11-macos-arm64.tar.gz
+            sha256: 20e32db7246f75fb59bc452c411e59ab5df8b4ecbd3dbc4beb9b2d6e4532d07b
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo -E apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y libssl3 zlib1g libzstd1 libstdc++6 libgcc-s1
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install lld@20 zstd openssl@3
+
+      - name: Install Toka SDK (RC11)
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/${{ matrix.asset }}"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/${{ matrix.asset }}"
+          echo "${{ matrix.sha256 }}  $archive" | shasum -a 256 --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sdk="$RUNNER_TEMP/${{ matrix.asset }}"
+          sdk="${sdk%.tar.gz}"
+          echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
+          echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_COMPILER=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+          echo "PATH=$sdk/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Build standalone release binary
+        run: |
+          toka fetch
+          toka build
+          ./target/debug/trg -V
+
+      - name: Package standalone archive
+        id: pack
+        run: |
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          arch_name="trg-${tag_name}-${{ matrix.name }}"
+          mkdir -p "$RUNNER_TEMP/$arch_name"
+          cp target/debug/trg "$RUNNER_TEMP/$arch_name/"
+          cp LICENSE "$RUNNER_TEMP/$arch_name/"
+          cp README.md "$RUNNER_TEMP/$arch_name/"
+          tar -czf "$arch_name.tar.gz" -C "$RUNNER_TEMP" "$arch_name"
+          shasum -a 256 "$arch_name.tar.gz"
+          echo "tarball=$arch_name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ steps.pack.outputs.tarball }}
+
+  publish-release:
+    name: Attach standalone binaries to GitHub Release
+    needs: build-binaries
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compute checksums
+        run: |
+          cd dist
+          shasum -a 256 trg-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload binary assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          echo "Uploading binary assets to release $tag_name..."
+          gh release upload "$tag_name" dist/* --clobber
