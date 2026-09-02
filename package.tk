@@ -7,7 +7,7 @@ pub const PACKAGE = (
     entry_modules = ["src/main.tk"],
     targets = ["macos", "linux"],
     dependencies = (
-        regex = "../regex",
+        regex = "regex:0.3.0",
     ),
     native = (required = false, libraries = [""])
 )
