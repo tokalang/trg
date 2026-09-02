@@ -861,8 +861,8 @@ def main():
     assert "unrecognized file type 'non_existent_type_xyz'" in r_unknown.stderr
     assert "Use 'trg --type-list'" in r_unknown.stderr
 
-    # Test 57: SearchPlan::is_match vs find_matches differential parity gate
-    log("Test 57: SearchPlan::is_match vs find_matches differential parity gate across all pattern modes")
+    # Test 57: SearchPlan::is_match vs find_matches ordered line identity differential parity gate
+    log("Test 57: SearchPlan::is_match vs find_matches ordered line identity differential parity gate")
     diff_fixture2 = fixtures_dir / "test_is_match_diff.txt"
     diff_fixture2.write_text(
         "pub fn search_plan_is_match() {}\n"
@@ -872,7 +872,9 @@ def main():
         "   exact   whitespace   line   \n"
         "regex123match456\n"
         "\n"
-        "single_line\n",
+        "single_line\n"
+        "another_single_line_with_search_plan\n"
+        "FINAL_LINE_NO_MATCH\n",
         encoding="utf-8"
     )
 
@@ -889,44 +891,65 @@ def main():
         (["-E", "-x"], "single_line"),
         (["-E", "-v"], "special_characters"),
         (["-E", "--no-prefilter"], "is_match_boolean"),
+        (["-E", "-i", "-w"], "WORD|MATCH"),
+        (["-v", "-x"], "single_line"),
     ]
 
     try:
-        for flags, pat in diff_cases:
-            # Mode A: Count mode (uses is_match)
-            cmd_count = [trg] + flags + ["-c", pat, str(diff_fixture2)]
-            r_count = run_cmd(cmd_count, check=False)
+        targets = [str(diff_fixture2), str(repo_root / "src" / "file_types.tk")]
+        for tgt in targets:
+            for flags, pat in diff_cases:
+                # 1. Human line-numbered search (exercises is_match code path)
+                cmd_human = [trg, "-n"] + flags + [pat, tgt]
+                r_human = run_cmd(cmd_human, check=False)
 
-            # Mode B: Files with matches (uses is_match)
-            cmd_files = [trg] + flags + ["-l", pat, str(diff_fixture2)]
-            r_files = run_cmd(cmd_files, check=False)
+                human_matched_lines = []
+                if r_human.returncode == 0:
+                    for line in r_human.stdout.strip().split("\n"):
+                        if not line:
+                            continue
+                        # Output format: <line_num>:<content> or <path>:<line_num>:<content>
+                        parts = line.split(":", 2 if ":" in line and tgt != str(diff_fixture2) else 1)
+                        if len(parts) >= 2:
+                            line_num_str = parts[0] if parts[0].isdigit() else parts[1]
+                            human_matched_lines.append(int(line_num_str))
 
-            # Mode C: JSON mode (uses find_matches)
-            cmd_json = [trg] + flags + ["--json", pat, str(diff_fixture2)]
-            r_json = run_cmd(cmd_json, check=False)
+                # 2. JSON streaming search (exercises find_matches code path)
+                cmd_json = [trg, "--json"] + flags + [pat, tgt]
+                r_json = run_cmd(cmd_json, check=False)
 
-            # Extract number of match events from JSON output
-            json_matches = 0
-            for line in r_json.stdout.strip().split("\n"):
-                if not line:
-                    continue
-                data = json.loads(line)
-                if data.get("type") == "match":
-                    json_matches += 1
+                json_matched_lines = []
+                if r_json.returncode == 0 or r_human.returncode == 0:
+                    for line in r_json.stdout.strip().split("\n"):
+                        if not line:
+                            continue
+                        data = json.loads(line)
+                        if data.get("type") == "match":
+                            json_matched_lines.append(data["data"]["line_number"])
 
-            # Assert count mode equals JSON match events count exactly
-            if r_count.returncode == 0:
-                count_val = int(r_count.stdout.strip())
-                assert count_val == json_matches, (
-                    f"Differential parity mismatch between is_match (-c: {count_val}) "
-                    f"and find_matches (--json: {json_matches}) for flags={flags}, pat='{pat}'"
+                # 3. Exact ordered line number parity assertion
+                assert human_matched_lines == json_matched_lines, (
+                    f"Differential line identity mismatch for flags={flags}, pat='{pat}', tgt='{tgt}':\n"
+                    f"  is_match lines (-n):    {human_matched_lines}\n"
+                    f"  find_matches lines (JSON): {json_matched_lines}"
                 )
-                assert r_files.returncode == 0, f"Expected -l to return 0 when count > 0 for {flags}, '{pat}'"
-            else:
-                assert json_matches == 0, (
-                    f"Differential parity mismatch: -c returned {r_count.returncode} but JSON found {json_matches} matches"
+
+                # 4. Assert count mode (-c) matches exact line list length
+                cmd_count = [trg, "-c"] + flags + [pat, tgt]
+                r_count = run_cmd(cmd_count, check=False)
+                if len(human_matched_lines) > 0:
+                    assert r_count.returncode == 0
+                    assert int(r_count.stdout.strip()) == len(human_matched_lines)
+                else:
+                    assert r_count.returncode == 1
+
+                # 5. Assert files-with-matches (-l) consistency
+                cmd_files = [trg, "-l"] + flags + [pat, tgt]
+                r_files = run_cmd(cmd_files, check=False)
+                expected_l_code = 0 if len(human_matched_lines) > 0 else 1
+                assert r_files.returncode == expected_l_code, (
+                    f"Expected -l exit {expected_l_code}, got {r_files.returncode} for flags={flags}, pat='{pat}'"
                 )
-                assert r_files.returncode == 1, f"Expected -l to return 1 when count == 0 for {flags}, '{pat}'"
     finally:
         if diff_fixture2.exists():
             diff_fixture2.unlink()
