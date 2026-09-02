@@ -26,7 +26,7 @@
   - `-C <NUM>` / `--context <NUM>`: Print NUM lines before and after each match.
   - Overlapping and contiguous context windows merge seamlessly with zero duplicate lines.
   - Non-contiguous match groups are separated by `--` in human mode.
-- **Boolean `is_match` Fast-Path**: Direct non-allocating short-circuit matching for `-l`, `-c`, and human terminal output with mathematical equivalence to `find_matches`.
+- **Boolean `is_match` Fast-Path**: Scalar modes (`-l`, `-c`, and terminal text output) avoid constructing the `MatchRange` dynamic vector and `SubMatch` strings with mathematical equivalence to `find_matches`.
 - **File Type Filtering (`-t`, `-T`, `--type-list`)**:
   - `-t <TYPE>` / `--type <TYPE>`: Only search files matching TYPE (supports canonical names and aliases, e.g. `toka`, `python`/`py`, `rust`/`rs`, `c`, `cpp`, `js`, `ts`, `go`, `json`, `yaml`, `toml`, `markdown`, `sh`, `html`, `css`). Multiple `-t` arguments combine as a union.
   - `-T <TYPE>` / `--type-not <TYPE>`: Exclude files matching TYPE.

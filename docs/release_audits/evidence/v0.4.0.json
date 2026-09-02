@@ -2,12 +2,12 @@
   "schema": "toka.trg-release-evidence-v1",
   "package": "trg",
   "version": "0.4.0",
-  "commit": "b996732",
-  "archive_sha256": "c139bc0e846246a3d4e11ce648dd3c0b449eefaa9bd95c3c7913512e096e392a",
+  "code_candidate_commit": "b996732",
+  "audit_evidence_commit": "cfcd5b6",
+  "archive_sha256": "ccf965cf863a1b575b8ccf09079c54895cf4da3348f0e0404cf9ee167769753f",
   "qualification": {
     "total_tests": 57,
     "passed_tests": 57,
-    "github_actions_run": 33597365688,
     "platforms": [
       {
         "name": "macos-arm64",
