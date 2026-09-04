@@ -30,7 +30,7 @@
   - Strict MCP SDK specification compliance: puts structured summary in `result._meta.summary` and appends human-readable status footer `[trg: complete=..., truncated=..., reason=..., matches=..., scanned=...]` to `content[0].text`.
 - **Token-Efficient Compact JSON Mode (`--json=compact` / `--json-compact`)**:
   - Eliminates per-file `begin` and `end` framing events.
-  - Emits flat `match` and `context` lines and a single-line `summary` record.
+  - Emits flat `match` and `context` lines and a single-line `summary` record (`matches_emitted`, `files_emitted`, `files_observed`, `files_scanned`).
   - Delivers 60%–75% LLM context token savings for high-volume agent queries.
 - **Agent Protection & Output Budgets (`--max-total-matches`, `--max-result-bytes`, `--max-files-with-matches`, `--no-truncation-notice`)**:
   - `--max-total-matches <NUM>`: Stop searching globally after NUM matching lines across all files. Explicit `0` is supported (zero results emitted, exit code 0).
@@ -179,12 +179,12 @@ You can also download standalone archives directly from [GitHub Releases](https:
 
 - **macOS (Apple Silicon / arm64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.9.0/trg-v0.9.0-macos-arm64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.9.1/trg-v0.9.1-macos-arm64.tar.gz
   ```
 
 - **Linux (x86_64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.9.0/trg-v0.9.0-linux-x64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.9.1/trg-v0.9.1-linux-x64.tar.gz
   ```
 
 Download `SHA256SUMS` from the same release and verify the archive before

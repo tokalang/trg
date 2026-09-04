@@ -405,7 +405,7 @@ pub fn run_mcp_server() -> i32 {
         if method.as_str() == "initialize" {
             auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
             resp#.push_str(id_str.as_str())
-            resp#.push_str(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.9.0\"}}}")
+            resp#.push_str(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.9.1\"}}}")
             send_mcp_response(resp.as_str())
         } else if method.as_str() == "notifications/initialized" {
             // Notification: no response

@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.9.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.9.1 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -97,7 +97,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.0" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.1" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.9.0 identity on both binaries
+    # Validate exact 0.9.1 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.9.0 (Toka)", f"Expected 'trg 0.9.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.9.1 (Toka)", f"Expected 'trg 0.9.1 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.9.0 (Toka)", f"Expected 'trg 0.9.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.9.1 (Toka)", f"Expected 'trg 0.9.1 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.9.0
-    log("Test 1: Help & Version flags (exact 0.9.0 release identity)")
+    # Test 1: Help & Version exact 0.9.1
+    log("Test 1: Help & Version flags (exact 0.9.1 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.9.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.9.1 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.9.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.9.1 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -692,7 +692,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.9.0" in r_re_ctx.stdout
+    assert "trg 0.9.1" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1928,7 +1928,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.9.0"
+        assert resp1["result"]["serverInfo"]["version"] == "0.9.1"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -2081,8 +2081,22 @@ def main():
             assert sum_ev["complete"] is True
             assert sum_ev["truncated"] is False
             assert sum_ev["reason"] == "completed"
-            assert sum_ev["matches"] == 1
-            assert sum_ev["files"] == 1
+            assert sum_ev["matches_emitted"] == 1
+            assert sum_ev["files_emitted"] == 1
+            assert sum_ev["files_observed"] == 1
+            assert sum_ev["files_scanned"] == 1
+
+        # Multi-file budget test asserting files_emitted vs files_observed distinction
+        (compact_dir / "code2.tk").write_text("fn other() {\n    let x = 99;\n}\n", encoding="utf-8")
+        r_budget = run_cmd([trg, "--json=compact", "--max-files-with-matches", "1", "let x", str(compact_dir)])
+        assert r_budget.returncode == 0
+        b_lines = [json.loads(l) for l in r_budget.stdout.strip().split("\n") if l.strip()]
+        b_sum = next(ev for ev in b_lines if ev.get("type") == "summary")
+        assert b_sum["truncated"] is True
+        assert b_sum["reason"] == "max_files_with_matches"
+        assert b_sum["files_emitted"] == 1
+        assert b_sum["files_observed"] == 2
+        assert b_sum["files_scanned"] == 2
 
         r_inv = run_cmd([trg, "--json=xml", "let", str(compact_dir / "code.tk")], check=False)
         assert r_inv.returncode == 2, f"Expected exit code 2 for --json=xml, got {r_inv.returncode}"
@@ -2169,7 +2183,7 @@ def main():
             shutil.rmtree(mcp_trunc_dir)
 
     log("=" * 60)
-    log("ALL 95 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.0)!")
+    log("ALL 95 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.1)!")
     log("=" * 60)
 
 if __name__ == "__main__":

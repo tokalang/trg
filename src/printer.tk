@@ -546,10 +546,14 @@ pub fn format_summary_json_compact(
     if had_error { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str(",\"reason\":\"")
     s#.push_str(term_reason.as_str())
-    s#.push_str("\",\"matches\":")
-    s#.push_str(u64_to_string(stats.total_matches as u64).as_str())
-    s#.push_str(",\"files\":")
-    s#.push_str(u64_to_string(stats.files_with_match as u64).as_str())
+    s#.push_str("\",\"matches_emitted\":")
+    s#.push_str(u64_to_string(budget_state.matched_lines_emitted as u64).as_str())
+    s#.push_str(",\"files_emitted\":")
+    s#.push_str(u64_to_string(budget_state.files_with_match_emitted as u64).as_str())
+    s#.push_str(",\"files_observed\":")
+    s#.push_str(u64_to_string(budget_state.files_with_match_observed as u64).as_str())
+    s#.push_str(",\"files_scanned\":")
+    s#.push_str(u64_to_string(budget_state.files_scanned as u64).as_str())
     s#.push_str(",\"block_truncated\":")
     if budget_state.block_contexts_truncated > 0 { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str("}\n")
