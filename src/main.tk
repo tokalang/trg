@@ -41,7 +41,7 @@ fn main() -> i32 {
     auto writer = OutputBudgetWriter::new(format)
     auto search_res = execute_search(opts, writer)
     if search_res.is_err() {
-        print_err(search_res.unwrap_err().as_str())
+        print_err(search_res.unwrap_err().message.as_str())
         return 2
     }
     auto report = search_res.unwrap()

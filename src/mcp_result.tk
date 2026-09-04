@@ -1,0 +1,369 @@
+// Serialization of canonical structuredContent, _meta.summary, and MCP tool call responses.
+import core/str::{str}
+import std/vec::{Vec}
+import src/types::{CliOptions, EffectiveQuery, SearchReport, SearchDiagnostic, BudgetLimits}
+import src/printer::{OutputBudgetWriter, u64_to_string, i64_to_string, json_escape}
+
+pub fn format_effective_query(opts: CliOptions) -> string {
+    auto eq = EffectiveQuery::from_cli_options(opts)
+    auto s# = string::from("{\"patterns\":[")
+    auto pi# = 0:usize
+    loop pi < eq.patterns.len() {
+        if pi > 0 { s#.push_str(",") }
+        s#.push_str("\"")
+        s#.push_str(json_escape(eq.patterns.borrow(pi).as_str()).as_str())
+        s#.push_str("\"")
+        pi = pi + 1
+    }
+    s#.push_str("],\"mode\":\"")
+    s#.push_str(eq.mode.as_str())
+    s#.push_str("\",\"match_boundary\":\"")
+    s#.push_str(eq.match_boundary.as_str())
+    s#.push_str("\",\"case_mode\":\"")
+    s#.push_str(eq.case_mode.as_str())
+    s#.push_str("\",\"paths\":[")
+    auto pai# = 0:usize
+    loop pai < eq.paths.len() {
+        if pai > 0 { s#.push_str(",") }
+        s#.push_str("\"")
+        s#.push_str(json_escape(eq.paths.borrow(pai).as_str()).as_str())
+        s#.push_str("\"")
+        pai = pai + 1
+    }
+    s#.push_str("],\"globs\":[")
+    auto gi# = 0:usize
+    loop gi < eq.globs.len() {
+        if gi > 0 { s#.push_str(",") }
+        s#.push_str("\"")
+        s#.push_str(json_escape(eq.globs.borrow(gi).as_str()).as_str())
+        s#.push_str("\"")
+        gi = gi + 1
+    }
+    s#.push_str("],\"types\":[")
+    auto ti# = 0:usize
+    loop ti < eq.types.len() {
+        if ti > 0 { s#.push_str(",") }
+        s#.push_str("\"")
+        s#.push_str(json_escape(eq.types.borrow(ti).as_str()).as_str())
+        s#.push_str("\"")
+        ti = ti + 1
+    }
+    s#.push_str("],\"exclude_types\":[")
+    auto eti# = 0:usize
+    loop eti < eq.exclude_types.len() {
+        if eti > 0 { s#.push_str(",") }
+        s#.push_str("\"")
+        s#.push_str(json_escape(eq.exclude_types.borrow(eti).as_str()).as_str())
+        s#.push_str("\"")
+        eti = eti + 1
+    }
+    s#.push_str("],\"ignore_enabled\":")
+    if eq.ignore_enabled { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"hidden_enabled\":")
+    if eq.hidden_enabled { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"no_prefilter\":")
+    if eq.no_prefilter { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"invert_match\":")
+    if eq.invert_match { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"max_columns\":")
+    match eq.max_columns {
+        auto Option<usize>::Some(mc) => {
+            s#.push_str(u64_to_string(mc as u64).as_str())
+        }
+        _ => {
+            s#.push_str("null")
+        }
+    }
+    s#.push_str(",\"symlink_policy\":\"")
+    s#.push_str(eq.symlink_policy.as_str())
+    s#.push_str("\",\"binary_policy\":\"")
+    s#.push_str(eq.binary_policy.as_str())
+    s#.push_str("\",\"sort\":\"")
+    s#.push_str(eq.sort.as_str())
+    s#.push_str("\",\"context\":")
+    match eq.context {
+        auto Option<usize>::Some(c) => {
+            s#.push_str(u64_to_string(c as u64).as_str())
+        }
+        _ => {
+            s#.push_str("null")
+        }
+    }
+    s#.push_str(",\"before_context\":")
+    s#.push_str(u64_to_string(eq.before_context as u64).as_str())
+    s#.push_str(",\"after_context\":")
+    s#.push_str(u64_to_string(eq.after_context as u64).as_str())
+    s#.push_str(",\"block\":")
+    if eq.block { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"max_block_lines\":")
+    match eq.max_block_lines {
+        auto Option<usize>::Some(mbl) => {
+            s#.push_str(u64_to_string(mbl as u64).as_str())
+        }
+        _ => {
+            s#.push_str("null")
+        }
+    }
+    s#.push_str(",\"scope\":")
+    if eq.scope { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"def_first\":")
+    if eq.def_first { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str("}")
+    return cede s
+}
+
+pub fn format_limits(limits: BudgetLimits, max_count_enabled: bool, max_count: usize) -> string {
+    auto s# = string::from("{\"max_total_matches\":")
+    if limits.max_total_matches_enabled {
+        s#.push_str(u64_to_string(limits.max_total_matches as u64).as_str())
+    } else {
+        s#.push_str("null")
+    }
+    s#.push_str(",\"max_result_bytes\":")
+    if limits.max_result_bytes_enabled {
+        s#.push_str(u64_to_string(limits.max_result_bytes as u64).as_str())
+    } else {
+        s#.push_str("null")
+    }
+    s#.push_str(",\"max_per_file\":")
+    if max_count_enabled {
+        s#.push_str(u64_to_string(max_count as u64).as_str())
+    } else {
+        s#.push_str("null")
+    }
+    s#.push_str(",\"max_files_with_matches\":")
+    if limits.max_files_with_matches_enabled {
+        s#.push_str(u64_to_string(limits.max_files_with_matches as u64).as_str())
+    } else {
+        s#.push_str("null")
+    }
+    s#.push_str("}")
+    return cede s
+}
+
+pub fn format_stats(report: SearchReport, writer: OutputBudgetWriter) -> string {
+    auto s# = string::from("{\"matches_emitted\":")
+    s#.push_str(u64_to_string(report.budget_state.matched_lines_emitted as u64).as_str())
+    s#.push_str(",\"matches_observed\":")
+    s#.push_str(u64_to_string(report.budget_state.matched_lines_observed as u64).as_str())
+    s#.push_str(",\"files_scanned\":")
+    s#.push_str(u64_to_string(report.budget_state.files_scanned as u64).as_str())
+    s#.push_str(",\"files_with_match_observed\":")
+    s#.push_str(u64_to_string(report.budget_state.files_with_match_observed as u64).as_str())
+    s#.push_str(",\"files_with_match_emitted\":")
+    s#.push_str(u64_to_string(report.budget_state.files_with_match_emitted as u64).as_str())
+    s#.push_str(",\"file_scan_passes\":")
+    s#.push_str(u64_to_string(report.budget_state.file_scan_passes as u64).as_str())
+    s#.push_str(",\"text_record_bytes_emitted\":")
+    s#.push_str(u64_to_string(writer.text_record_bytes as u64).as_str())
+    s#.push_str(",\"structured_record_bytes_emitted\":")
+    s#.push_str(u64_to_string(writer.structured_record_bytes as u64).as_str())
+    s#.push_str(",\"budgeted_record_bytes_emitted\":")
+    s#.push_str(u64_to_string(writer.canonical_record_bytes as u64).as_str())
+    s#.push_str("}")
+    return cede s
+}
+
+pub fn format_records(writer: OutputBudgetWriter) -> string {
+    auto s# = string::from("[")
+    auto ri# = 0:usize
+    loop ri < writer.structured_records.len() {
+        if ri > 0 { s#.push_str(",") }
+        s#.push_str(writer.structured_records.borrow(ri).as_str())
+        ri = ri + 1
+    }
+    s#.push_str("]")
+    return cede s
+}
+
+pub fn format_errors(diagnostics: Vec<SearchDiagnostic>) -> string {
+    auto s# = string::from("[")
+    auto di# = 0:usize
+    loop di < diagnostics.len() {
+        if di > 0 { s#.push_str(",") }
+        auto &d = diagnostics.borrow(di)
+        s#.push_str("{\"kind\":\"")
+        s#.push_str(d.kind.as_str())
+        s#.push_str("\",\"path\":")
+        match d.path {
+            auto Option<string>::Some(&p) => {
+                s#.push_str("\"")
+                s#.push_str(json_escape(p.as_str()).as_str())
+                s#.push_str("\"")
+            }
+            _ => {
+                s#.push_str("null")
+            }
+        }
+        s#.push_str(",\"message\":\"")
+        s#.push_str(json_escape(d.message.as_str()).as_str())
+        s#.push_str("\",\"errno\":")
+        match d.errno {
+            auto Option<i32>::Some(n) => {
+                s#.push_str(i64_to_string(n as i64).as_str())
+            }
+            _ => {
+                s#.push_str("null")
+            }
+        }
+        s#.push_str("}")
+        di = di + 1
+    }
+    s#.push_str("]")
+    return cede s
+}
+
+pub fn format_structured_content(
+    report: SearchReport,
+    opts: CliOptions,
+    writer: OutputBudgetWriter
+) -> string {
+    auto has_error = !report.diagnostics.is_empty() || report.had_error
+    auto is_trunc = report.budget_state.is_truncated
+    auto is_comp = !is_trunc && !has_error
+
+    auto term_reason# = string::from("completed")
+    if has_error {
+        term_reason = string::from("search_error")
+    } else if is_trunc {
+        term_reason = report.budget_state.truncation_reason.clone()
+    }
+
+    auto s# = string::from("{\"schema\":\"trg-mcp-result-v1\",\"complete\":")
+    if is_comp { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"truncated\":")
+    if is_trunc { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"termination_reason\":\"")
+    s#.push_str(term_reason.as_str())
+    s#.push_str("\",\"effective_query\":")
+    s#.push_str(format_effective_query(opts).as_str())
+    s#.push_str(",\"limits\":")
+    s#.push_str(format_limits(opts.budget_limits, opts.max_count_enabled, opts.max_count).as_str())
+    s#.push_str(",\"stats\":")
+    s#.push_str(format_stats(report, writer).as_str())
+    s#.push_str(",\"records\":")
+    s#.push_str(format_records(writer).as_str())
+    s#.push_str(",\"errors\":")
+    s#.push_str(format_errors(report.diagnostics).as_str())
+    s#.push_str("}")
+    return cede s
+}
+
+pub fn format_meta_summary(
+    report: SearchReport
+) -> string {
+    auto has_error = !report.diagnostics.is_empty() || report.had_error
+    auto is_trunc = report.budget_state.is_truncated
+    auto is_comp = !is_trunc && !has_error
+
+    auto term_reason# = string::from("completed")
+    if has_error {
+        term_reason = string::from("search_error")
+    } else if is_trunc {
+        term_reason = report.budget_state.truncation_reason.clone()
+    }
+
+    auto s# = string::from("{\"summary\":{\"complete\":")
+    if is_comp { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"truncated\":")
+    if is_trunc { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"termination_reason\":\"")
+    s#.push_str(term_reason.as_str())
+    s#.push_str("\",\"matches_emitted\":")
+    s#.push_str(u64_to_string(report.budget_state.matched_lines_emitted as u64).as_str())
+    s#.push_str(",\"files_scanned\":")
+    s#.push_str(u64_to_string(report.budget_state.files_scanned as u64).as_str())
+    s#.push_str(",\"file_scan_passes\":")
+    s#.push_str(u64_to_string(report.budget_state.file_scan_passes as u64).as_str())
+    s#.push_str("}}")
+    return cede s
+}
+
+pub fn format_tool_call_response(
+    id_val: string,
+    report: SearchReport,
+    opts: CliOptions,
+    writer: OutputBudgetWriter,
+    proto_version: str
+) -> string {
+    auto has_error = !report.diagnostics.is_empty() || report.had_error
+    auto is_trunc = report.budget_state.is_truncated
+    auto is_comp = !is_trunc && !has_error
+
+    auto term_reason# = string::from("completed")
+    if has_error {
+        term_reason = string::from("search_error")
+    } else if is_trunc {
+        term_reason = report.budget_state.truncation_reason.clone()
+    }
+
+    auto text_out# = writer.take_output()
+    if report.diagnostics.len() > 0 {
+        if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
+            text_out#.push_str("\n")
+        }
+        auto d_idx# = 0:usize
+        loop d_idx < report.diagnostics.len() {
+            auto &d = report.diagnostics.borrow(d_idx)
+            text_out#.push_str(d.kind.as_str())
+            text_out#.push_str(" error")
+            match d.path {
+                auto Option<string>::Some(&p) => {
+                    text_out#.push_str(" (")
+                    text_out#.push_str(p.as_str())
+                    text_out#.push_str(")")
+                }
+                _ => {}
+            }
+            text_out#.push_str(": ")
+            text_out#.push_str(d.message.as_str())
+            text_out#.push_str("\n")
+            d_idx = d_idx + 1
+        }
+    }
+
+    if !opts.json_mode {
+        if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
+            text_out#.push_str("\n")
+        }
+        text_out#.push_str("[trg: complete=")
+        if is_comp { text_out#.push_str("true") } else { text_out#.push_str("false") }
+        text_out#.push_str(", truncated=")
+        if is_trunc { text_out#.push_str("true") } else { text_out#.push_str("false") }
+        text_out#.push_str(", reason=")
+        text_out#.push_str(term_reason.as_str())
+        text_out#.push_str(", matches=")
+        text_out#.push_str(u64_to_string(report.budget_state.matched_lines_emitted as u64).as_str())
+        text_out#.push_str(", scanned=")
+        text_out#.push_str(u64_to_string(report.budget_state.files_scanned as u64).as_str())
+        text_out#.push_str(", passes=")
+        text_out#.push_str(u64_to_string(report.budget_state.file_scan_passes as u64).as_str())
+        text_out#.push_str("]\n")
+    }
+
+    auto esc_text = json_escape(text_out.as_str())
+
+    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+    resp#.push_str(id_val.as_str())
+    resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+    resp#.push_str(esc_text.as_str())
+    resp#.push_str("\"}]")
+
+    if proto_version == "2025-11-25" {
+        resp#.push_str(",\"structuredContent\":")
+        resp#.push_str(format_structured_content(report, opts, writer).as_str())
+    }
+
+    resp#.push_str(",\"_meta\":")
+    resp#.push_str(format_meta_summary(report).as_str())
+
+    resp#.push_str(",\"isError\":")
+    if has_error {
+        resp#.push_str("true")
+    } else {
+        resp#.push_str("false")
+    }
+
+    resp#.push_str("}}\n")
+    return cede resp
+}

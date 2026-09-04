@@ -22,14 +22,16 @@
   - Two-pass streaming search prioritizing symbol declarations/definitions before usages when running under output budgets (`--max-total-matches`, `--max-result-bytes`).
   - **Identifier-Aware Extraction**: Correctly identifies the declared symbol name while skipping modifiers (`pub`, `async`, `export`), declaration keywords (`fn`, `struct`, `class`, `shape`, `type`), generics (`<...>`), and `impl Trait for Target`. Ensures references in parameter or return types are not falsely treated as definitions.
   - Maintains strict $O(1)$ memory streaming per file.
-- **Native Stdio MCP Server (`--mcp`)**:
+- **Native Stdio MCP Server (`--mcp`) & Typed Search API (v0.10.0)**:
   - Run natively as a Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio for LLMs and agent harnesses (Claude Desktop, Cursor, etc.).
   - Zero external runtimes (no Node.js or Python needed).
   - Strictly isolated memory buffers guarantee stdout is never polluted by raw search text.
-  - Exposes typed `trg_search` tool (`pattern`, `path`, `block`, `scope`, `def_first`, `max_matches`, `max_bytes`, `type`, `args`).
-  - **Explicit ID Profile**: Accepts string, null, and safe-integer JSON-RPC `id`s ($[-2^{53}+1, 2^{53}-1]$, preserving negative integers like `-7`). Fractional, boolean, or non-primitive `id`s are rejected as `-32600 Invalid Request` with `id: null`.
-  - **Typed Parameter Validation & Conflict Prevention**: Validates parameter types strictly. Conflicts between typed properties and raw CLI options in `args` (e.g. `block` alongside `--block`/`--no-block`, `max_matches` alongside `-m`/`--max-total-matches`, or `path` alongside positional arguments) are rejected with `-32602 Invalid params`.
-  - Strict MCP SDK specification compliance: puts structured summary in `result._meta.summary` and appends human-readable status footer `[trg: complete=..., truncated=..., reason=..., matches=..., scanned=...]` to `content[0].text`.
+  - **Protocol Version Negotiation**: Fully supports MCP `2024-11-05` (legacy pure content + `_meta`) and `2025-11-25` (canonical `structuredContent` + `outputSchema` + tool annotations).
+  - **Canonical Structured Output (`trg-mcp-result-v1`)**: Exposes complete machine-readable `structuredContent` with exact 1:1 `effective_query` parity (all 18 options reflected), monotonic context clustering (`group_id`), multi-role context (`context_roles`), and structured `errors` with POSIX `errno`.
+  - **Agent-Safe Default Budgets**: Automatically applies default caps (50 matches, 64KiB canonical bytes) to guard LLM contexts against runaway token consumption. Explicit `null` safely overrides budgets for unbounded searches.
+  - **Comprehensive Typed Parameters**: Exposes `mode` (`literal` | `regex`), `match_boundary` (`substring` | `word` | `line`), `case_mode` (`sensitive` | `smart` | `ignore`), `paths[]`, `globs[]`, `types[]`, `sort`, `max_total_matches`, `max_result_bytes`, `max_per_file`, and `max_files_with_matches`.
+  - **Fail-Closed Conflict Matrix**: Stateful `classify_args` parser isolates option families and strictly prevents conflicting overrides between typed properties and pass-through `args` with `-32602 Invalid params`. Forbidden flags (`--files`, `-q`, `-c`, `-l`, `--mcp`, `-h`, `-V`, `--type-list`) are rejected immediately.
+  - **Deterministic Status Footer & Meta**: Appends standard human-readable verification footer `[trg: complete=..., truncated=..., reason=..., matches=..., scanned=..., passes=...]` to `content[0].text` and lightweight `_meta.summary`.
 - **Token-Efficient Compact JSON Mode (`--json=compact` / `--json-compact`)**:
   - Eliminates per-file `begin` and `end` framing events.
   - Emits flat `match` and `context` lines and a single-line `summary` record (`matches_emitted`, `files_emitted`, `files_observed`, `files_scanned`).

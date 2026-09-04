@@ -13,7 +13,7 @@ import src/posix::{posix_ferror}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
 
 pub fn print_help() {
-    println("trg 0.9.2 - Fast, agent-friendly code search tool")
+    println("trg 0.10.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -74,7 +74,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.9.2 (Toka)")
+    println("trg 0.10.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
@@ -294,6 +294,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     auto globs# = Vec<GlobRule>::new()
     auto include_type_exts# = Vec<string>::new()
     auto exclude_type_exts# = Vec<string>::new()
+    auto include_types# = Vec<string>::new()
+    auto exclude_types# = Vec<string>::new()
 
     auto patterns# = Vec<string>::new()
     auto raw_positionals# = Vec<string>::new()
@@ -807,6 +809,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
                 return Result<CliOptions, string>::Err(exts_res.unwrap_err())
             }
             include_type_exts = merge_extensions(cede include_type_exts, exts_res.unwrap())
+            include_types#.push(type_arg.clone())
             i = i + 1
             continue
         }
@@ -818,6 +821,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
                 return Result<CliOptions, string>::Err(exts_res.unwrap_err())
             }
             include_type_exts = merge_extensions(cede include_type_exts, exts_res.unwrap())
+            include_types#.push(string::from(type_name))
             i = i + 1
             continue
         }
@@ -829,6 +833,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
                 return Result<CliOptions, string>::Err(exts_res.unwrap_err())
             }
             include_type_exts = merge_extensions(cede include_type_exts, exts_res.unwrap())
+            include_types#.push(string::from(type_name))
             i = i + 1
             continue
         }
@@ -844,6 +849,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             if exts_res.is_err() {
                 return Result<CliOptions, string>::Err(exts_res.unwrap_err())
             }
+            exclude_types#.push(type_arg.clone())
             exclude_type_exts = merge_extensions(cede exclude_type_exts, exts_res.unwrap())
             i = i + 1
             continue
@@ -855,6 +861,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             if exts_res.is_err() {
                 return Result<CliOptions, string>::Err(exts_res.unwrap_err())
             }
+            exclude_types#.push(string::from(type_name))
             exclude_type_exts = merge_extensions(cede exclude_type_exts, exts_res.unwrap())
             i = i + 1
             continue
@@ -866,6 +873,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             if exts_res.is_err() {
                 return Result<CliOptions, string>::Err(exts_res.unwrap_err())
             }
+            exclude_types#.push(string::from(type_name))
             exclude_type_exts = merge_extensions(cede exclude_type_exts, exts_res.unwrap())
             i = i + 1
             continue
@@ -1217,6 +1225,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             globs = Vec<GlobRule>::new(),
             include_type_exts = Vec<string>::new(),
             exclude_type_exts = Vec<string>::new(),
+            include_types = Vec<string>::new(),
+            exclude_types = Vec<string>::new(),
             context_block = false,
             max_block_lines = 80,
             scope = false,
@@ -1321,6 +1331,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         globs = cede globs,
         include_type_exts = cede include_type_exts,
         exclude_type_exts = cede exclude_type_exts,
+        include_types = cede include_types,
+        exclude_types = cede exclude_types,
         context_block = context_block,
         max_block_lines = max_block_lines,
         scope = scope,

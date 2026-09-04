@@ -1,0 +1,50 @@
+// MCP protocol negotiation and lifecycle state for trg.
+import core/str::{str}
+
+pub shape McpLifecycleState (
+    Uninitialized = 0 |
+    Negotiated = 1 |
+    Ready = 2
+)
+
+pub shape McpServerState (
+    negotiated_version: string,
+    lifecycle_state: McpLifecycleState
+)
+
+impl McpServerState {
+    pub fn new() -> McpServerState {
+        return McpServerState(
+            negotiated_version = string::from("2025-11-25"),
+            lifecycle_state = McpLifecycleState::Uninitialized
+        )
+    }
+
+    pub fn handle_initialize(self#, req_version: str) -> string {
+        if req_version == "2024-11-05" {
+            self.negotiated_version = string::from("2024-11-05")
+        } else {
+            self.negotiated_version = string::from("2025-11-25")
+        }
+        self.lifecycle_state = McpLifecycleState::Negotiated
+        return self.negotiated_version.clone()
+    }
+
+    pub fn mark_ready(self#) {
+        if self.lifecycle_state == McpLifecycleState::Negotiated {
+            self.lifecycle_state = McpLifecycleState::Ready
+        }
+    }
+
+    pub fn is_uninitialized(self) -> bool {
+        return self.lifecycle_state == McpLifecycleState::Uninitialized
+    }
+
+    pub fn is_negotiated(self) -> bool {
+        return self.lifecycle_state == McpLifecycleState::Negotiated
+    }
+
+    pub fn is_ready(self) -> bool {
+        return self.lifecycle_state == McpLifecycleState::Ready
+    }
+}

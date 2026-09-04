@@ -1,4 +1,5 @@
 // Shared shapes and types for trg.
+import core/option::{Option}
 import std/vec::{Vec}
 
 pub shape CaseMode (
@@ -204,6 +205,8 @@ pub shape CliOptions (
     globs: Vec<GlobRule>,
     include_type_exts: Vec<string>,
     exclude_type_exts: Vec<string>,
+    include_types: Vec<string>,
+    exclude_types: Vec<string>,
     context_block: bool,
     max_block_lines: usize,
     scope: bool,
@@ -239,7 +242,10 @@ pub shape MatchEvent (
     absolute_offset: usize,
     submatches: Vec<SubMatch>,
     scope_name: string,
-    block_truncated: bool
+    block_truncated: bool,
+    is_context: bool,
+    group_id: usize,
+    context_roles: Vec<string>
 )
 
 pub shape LogicalLine (
@@ -257,13 +263,32 @@ pub shape LineProcessOutcome (
     FatalError = 2
 )
 
+pub shape SearchDiagnostic (
+    kind: string,
+    path: Option<string>,
+    message: string,
+    errno: Option<i32>
+)
+
+impl SearchDiagnostic {
+    pub fn new(cede kind: string, cede path: Option<string>, cede message: string, errno: Option<i32>) -> SearchDiagnostic {
+        return SearchDiagnostic(
+            kind = cede kind,
+            path = cede path,
+            message = cede message,
+            errno = errno
+        )
+    }
+}
+
 pub shape ScanResult (
     path: string,
     matches_count: usize,
     has_match: bool,
     is_binary: bool,
     had_error: bool,
-    is_broken_pipe: bool
+    is_broken_pipe: bool,
+    diagnostics: Vec<SearchDiagnostic>
 )
 
 pub shape GlobalStats (
@@ -294,8 +319,162 @@ pub shape SearchReport (
     had_error: bool,
     is_broken_pipe: bool,
     budget_state: BudgetState,
-    elapsed_nanos: u64
+    elapsed_nanos: u64,
+    diagnostics: Vec<SearchDiagnostic>
 )
+
+pub shape EffectiveQuery (
+    patterns: Vec<string>,
+    mode: string,
+    match_boundary: string,
+    case_mode: string,
+    paths: Vec<string>,
+    globs: Vec<string>,
+    types: Vec<string>,
+    exclude_types: Vec<string>,
+    ignore_enabled: bool,
+    hidden_enabled: bool,
+    no_prefilter: bool,
+    invert_match: bool,
+    max_columns: Option<usize>,
+    symlink_policy: string,
+    binary_policy: string,
+    sort: string,
+    context: Option<usize>,
+    before_context: usize,
+    after_context: usize,
+    block: bool,
+    max_block_lines: Option<usize>,
+    scope: bool,
+    def_first: bool
+)
+
+impl EffectiveQuery {
+    pub fn from_cli_options(opts: CliOptions) -> EffectiveQuery {
+        auto mode_str# = string::from("regex")
+        if opts.fixed_strings {
+            mode_str = string::from("literal")
+        }
+
+        auto bound_str# = string::from("substring")
+        if opts.line_regexp {
+            bound_str = string::from("line")
+        } else if opts.word_regexp {
+            bound_str = string::from("word")
+        }
+
+        auto case_str# = string::from("sensitive")
+        match opts.case_mode {
+            auto CaseMode::Smart => {
+                case_str = string::from("smart")
+            }
+            auto CaseMode::Insensitive => {
+                case_str = string::from("ignore")
+            }
+            auto CaseMode::Sensitive => {
+                case_str = string::from("sensitive")
+            }
+        }
+
+        auto paths_vec# = Vec<string>::new()
+        auto p_idx# = 0:usize
+        loop p_idx < opts.paths.len() {
+            paths_vec#.push(opts.paths.borrow(p_idx).clone())
+            p_idx = p_idx + 1
+        }
+
+        auto globs_vec# = Vec<string>::new()
+        auto g_idx# = 0:usize
+        loop g_idx < opts.globs.len() {
+            auto &g = opts.globs.borrow(g_idx)
+            auto s# = string::new()
+            if g.is_negation {
+                s#.push_str("!")
+            }
+            s#.push_str(g.pattern.as_str())
+            if g.dir_only {
+                s#.push_str("/")
+            }
+            globs_vec#.push(cede s)
+            g_idx = g_idx + 1
+        }
+
+        auto types_vec# = Vec<string>::new()
+        auto t_idx# = 0:usize
+        loop t_idx < opts.include_types.len() {
+            types_vec#.push(opts.include_types.borrow(t_idx).clone())
+            t_idx = t_idx + 1
+        }
+
+        auto exclude_types_vec# = Vec<string>::new()
+        auto et_idx# = 0:usize
+        loop et_idx < opts.exclude_types.len() {
+            exclude_types_vec#.push(opts.exclude_types.borrow(et_idx).clone())
+            et_idx = et_idx + 1
+        }
+
+        auto sort_str# = string::from("path")
+        match opts.sort_mode {
+            auto SortMode::Path => {
+                sort_str = string::from("path")
+            }
+            auto SortMode::PathReverse => {
+                sort_str = string::from("reverse_path")
+            }
+            auto SortMode::None => {
+                sort_str = string::from("none")
+            }
+        }
+
+        auto ctx_opt# = Option<usize>::None
+        if opts.before_context > 0 && opts.before_context == opts.after_context {
+            ctx_opt = Option<usize>::Some(opts.before_context)
+        }
+
+        auto max_col_opt# = Option<usize>::None
+        if opts.max_columns > 0 {
+            max_col_opt = Option<usize>::Some(opts.max_columns)
+        }
+
+        auto pats_vec# = Vec<string>::new()
+        auto pat_idx# = 0:usize
+        loop pat_idx < opts.patterns.len() {
+            pats_vec#.push(opts.patterns.borrow(pat_idx).clone())
+            pat_idx = pat_idx + 1
+        }
+
+        auto mbl_opt# = Option<usize>::None
+        if opts.context_block {
+            mbl_opt = Option<usize>::Some(opts.max_block_lines)
+        }
+
+        return EffectiveQuery(
+            patterns = cede pats_vec,
+            mode = cede mode_str,
+            match_boundary = cede bound_str,
+            case_mode = cede case_str,
+            paths = cede paths_vec,
+            globs = cede globs_vec,
+            types = cede types_vec,
+            exclude_types = cede exclude_types_vec,
+            ignore_enabled = !opts.no_ignore,
+            hidden_enabled = opts.hidden,
+            no_prefilter = opts.no_prefilter,
+            invert_match = opts.invert_match,
+            max_columns = max_col_opt,
+            symlink_policy = string::from("skip"),
+            binary_policy = string::from("skip"),
+            sort = cede sort_str,
+            context = ctx_opt,
+            before_context = opts.before_context,
+            after_context = opts.after_context,
+            block = opts.context_block,
+            max_block_lines = mbl_opt,
+            scope = opts.scope,
+            def_first = opts.def_first
+        )
+    }
+}
 
 impl OutputFormat {
     pub fn from_cli_options(opts: CliOptions) -> OutputFormat {

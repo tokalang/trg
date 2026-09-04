@@ -20,7 +20,8 @@ pub shape ContextState (
     block_target_depth: usize,
     block_target_indent: usize,
     block_archetype: SyntaxFamily,
-    block_lines_emitted: usize
+    block_lines_emitted: usize,
+    current_group_id: usize
 )
 
 pub fn make_context_state(before_cap: usize, archetype: SyntaxFamily) -> ContextState {
@@ -39,7 +40,8 @@ pub fn make_context_state(before_cap: usize, archetype: SyntaxFamily) -> Context
         block_target_depth = 0:usize,
         block_target_indent = 0:usize,
         block_archetype = archetype,
-        block_lines_emitted = 0:usize
+        block_lines_emitted = 0:usize,
+        current_group_id = 0:usize
     )
 }
 

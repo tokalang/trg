@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import time
 import subprocess
 import pathlib
 import json
@@ -59,10 +60,81 @@ def find_lib(repo_root):
         return str(std_lib)
     raise RuntimeError("Could not find Toka standard library. Set TOKA_LIB=/path/to/toka/lib")
 
-def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
+import resource
+
+def validate_json_schema(val, schema, path="root"):
+    stype = schema.get("type")
+    if stype:
+        allowed_types = [stype] if isinstance(stype, str) else stype
+        type_matched = False
+        for t in allowed_types:
+            if t == "object" and isinstance(val, dict): type_matched = True
+            elif t == "array" and isinstance(val, list): type_matched = True
+            elif t == "string" and isinstance(val, str): type_matched = True
+            elif t == "integer" and isinstance(val, int) and not isinstance(val, bool): type_matched = True
+            elif t == "boolean" and isinstance(val, bool): type_matched = True
+            elif t == "null" and val is None: type_matched = True
+        assert type_matched, f"Schema error at {path}: value {val!r} does not match type {stype}"
+
+    if "const" in schema:
+        const_val = schema["const"]
+        assert val == const_val, f"Schema error at {path}: {val!r} != const {const_val!r}"
+
+    if "enum" in schema:
+        enum_vals = schema["enum"]
+        assert val in enum_vals, f"Schema error at {path}: {val!r} not in enum {enum_vals!r}"
+
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        if "minimum" in schema:
+            min_val = schema["minimum"]
+            assert val >= min_val, f"Schema error at {path}: {val} < minimum {min_val}"
+        if "maximum" in schema:
+            max_val = schema["maximum"]
+            assert val <= max_val, f"Schema error at {path}: {val} > maximum {max_val}"
+
+    if isinstance(val, dict):
+        reqs = schema.get("required", [])
+        for r in reqs:
+            assert r in val, f"Schema error at {path}: missing required key {r!r}"
+        props = schema.get("properties", {})
+        if schema.get("additionalProperties") is False:
+            for k in val:
+                assert k in props, f"Schema error at {path}: unexpected key {k!r}"
+        for k, v in val.items():
+            if k in props:
+                validate_json_schema(v, props[k], f"{path}.{k}")
+
+    if isinstance(val, list):
+        if "items" in schema:
+            item_schema = schema["items"]
+            for idx, item in enumerate(val):
+                validate_json_schema(item, item_schema, f"{path}[{idx}]")
+
+    if "oneOf" in schema:
+        matched = 0
+        errors = []
+        for s in schema["oneOf"]:
+            try:
+                validate_json_schema(val, s, path)
+                matched += 1
+            except AssertionError as e:
+                errors.append(str(e))
+        assert matched == 1, f"Schema error at {path}: expected exactly 1 match in oneOf, got {matched}. Sub-errors: {errors}"
+
+def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None, raw_mcp=False):
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
+
+    was_injected = False
+    if "--mcp" in cmd and not raw_mcp and input_data and "tools/" in input_data and "initialize" not in input_data:
+        init_header = (
+            json.dumps({"jsonrpc": "2.0", "id": "init_session", "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        )
+        input_data = init_header + input_data
+        was_injected = True
+
     res = subprocess.run(
         cmd,
         cwd=cwd,
@@ -72,13 +144,18 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
         text=True,
         env=merged_env
     )
+    if was_injected and res.stdout:
+        lines = res.stdout.splitlines(keepends=True)
+        if lines and "init_session" in lines[0]:
+            res.stdout = "".join(lines[1:])
+
     if check and res.returncode != 0:
         raise RuntimeError(f"Command failed (exit {res.returncode}): {' '.join(cmd)}\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
     return res
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.9.2 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.10.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -97,7 +174,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -124,25 +201,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.9.2 identity on both binaries
+    # Validate exact 0.10.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.9.2 (Toka)", f"Expected 'trg 0.9.2 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.10.0 (Toka)", f"Expected 'trg 0.10.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.9.2 (Toka)", f"Expected 'trg 0.9.2 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.10.0 (Toka)", f"Expected 'trg 0.10.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.9.2
-    log("Test 1: Help & Version flags (exact 0.9.2 release identity)")
+    # Test 1: Help & Version exact 0.10.0
+    log("Test 1: Help & Version flags (exact 0.10.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.9.2 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.10.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.9.2 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.10.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -692,7 +769,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.9.2" in r_re_ctx.stdout
+    assert "trg 0.10.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1927,13 +2004,13 @@ def main():
         (mcp_dir / "target.py").write_text("def hello():\n    return 'world'\n", encoding="utf-8")
 
         # 1. initialize
-        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n"
+        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}}) + "\n"
         r_init = run_cmd([trg, "--mcp"], input_data=init_req)
         assert r_init.returncode == 0
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.9.2"
+        assert resp1["result"]["serverInfo"]["version"] == "0.10.0"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -2503,7 +2580,7 @@ def main():
                     "pattern": "helper_target",
                     "path": str(stats_dir),
                     "def_first": True,
-                    "args": ["--sort", "path", "--json=compact"]
+                    "sort": "path"
                 }
             }
         }) + "\n"
@@ -2526,11 +2603,9 @@ def main():
             (parity_dir / f"item_{idx}.txt").write_text(f"common_entry line {idx} match\nother line\ncommon_entry line {idx} match again\n", encoding="utf-8")
 
         # CLI execution with budget capping and deterministic sort
-        r_cli_p = run_cmd([trg, "--sort", "path", "--json=compact", "--max-total-matches=4", "common_entry", str(parity_dir)])
+        r_cli_p = run_cmd([trg, "--sort", "path", "--max-total-matches=4", "common_entry", str(parity_dir)])
         assert r_cli_p.returncode == 0
-        cli_events = [json.loads(line) for line in r_cli_p.stdout.strip().split("\n") if line.strip()]
-        cli_matches = [e for e in cli_events if e.get("type") == "match"]
-        cli_summary = [e for e in cli_events if e.get("type") == "summary"][0]
+        cli_lines = [line for line in r_cli_p.stdout.strip().split("\n") if line.strip()]
 
         # MCP execution with identical budget and deterministic sort
         mcp_req = json.dumps({
@@ -2542,8 +2617,8 @@ def main():
                 "arguments": {
                     "pattern": "common_entry",
                     "path": str(parity_dir),
-                    "max_matches": 4,
-                    "args": ["--sort", "path", "--json=compact"]
+                    "max_total_matches": 4,
+                    "sort": "path"
                 }
             }
         }) + "\n"
@@ -2551,23 +2626,18 @@ def main():
         assert r_mcp_p.returncode == 0
         mcp_resp = json.loads(r_mcp_p.stdout.strip())
         mcp_content = mcp_resp["result"]["content"][0]["text"]
-        mcp_events = [json.loads(line) for line in mcp_content.strip().split("\n") if line.strip() and not line.startswith("[trg:")]
-        mcp_matches = [e for e in mcp_events if e.get("type") == "match"]
-        mcp_summary = [e for e in mcp_events if e.get("type") == "summary"][0]
+        mcp_lines = [line for line in mcp_content.strip().split("\n") if line.strip() and not line.startswith("[trg:")]
+        sc = mcp_resp["result"]["structuredContent"]
 
         # Strict parity assertions
-        assert len(cli_matches) == 4
-        assert len(mcp_matches) == 4
-        assert cli_summary["truncated"] is True
-        assert mcp_summary["truncated"] is True
-        assert cli_summary["reason"] == "max_total_matches"
-        assert mcp_summary["reason"] == "max_total_matches"
-        assert cli_summary["matches_emitted"] == mcp_summary["matches_emitted"] == 4
+        assert len(cli_lines) == 4
+        assert len(mcp_lines) == 4
+        assert cli_lines == mcp_lines, f"CLI and MCP human projection lines mismatch:\nCLI:\n{cli_lines}\nMCP:\n{mcp_lines}"
+        assert sc["stats"]["matches_emitted"] == 4
+        assert sc["truncated"] is True
+        assert sc["termination_reason"] == "max_total_matches"
         assert mcp_resp["result"]["_meta"]["summary"]["complete"] is False
         assert mcp_resp["result"]["_meta"]["summary"]["termination_reason"] == "max_total_matches"
-
-        # Direct byte-for-byte parity of inner JSONL stream
-        assert r_cli_p.stdout == mcp_content, f"CLI and MCP inner JSONL mismatch:\nCLI:\n{r_cli_p.stdout}\nMCP:\n{mcp_content}"
     finally:
         if parity_dir.exists():
             shutil.rmtree(parity_dir)
@@ -2640,8 +2710,954 @@ def main():
         if compat_dir.exists():
             shutil.rmtree(compat_dir)
 
+    # =========================================================================
+    # v0.10.0 Typed MCP Search API & Agent-Safe Defaults Qualification (102-115)
+    # =========================================================================
+
+    # Test 102: Typed mode, case_mode & match_boundary
+    log("Test 102: Typed mode, case_mode & match_boundary")
+    t102_dir = fixtures_dir / "test_t102"
+    try:
+        t102_dir.mkdir(parents=True, exist_ok=True)
+        (t102_dir / "test.txt").write_text(
+            "hello world\nHELLO world\nhello_world\nhello\nfoo hello bar\nhello.*world\n",
+            encoding="utf-8"
+        )
+        # 1. mode: literal (default) vs regex
+        r_lit = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello.*world", "mode": "literal", "path": str(t102_dir)}}
+        }) + "\n")
+        res_lit = json.loads(r_lit.stdout.strip())["result"]["structuredContent"]
+        assert res_lit["stats"]["matches_emitted"] == 1
+        assert res_lit["records"][0]["text"] == "hello.*world"
+
+        r_reg = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "h[a-z]+o\\s+world", "mode": "regex", "path": str(t102_dir)}}
+        }) + "\n")
+        res_reg = json.loads(r_reg.stdout.strip())["result"]["structuredContent"]
+        assert res_reg["stats"]["matches_emitted"] == 1
+        assert res_reg["records"][0]["text"] == "hello world"
+
+        # 2. case_mode: sensitive vs ignore vs smart
+        r_sens = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "case_mode": "sensitive", "path": str(t102_dir)}}
+        }) + "\n")
+        res_sens = json.loads(r_sens.stdout.strip())["result"]["structuredContent"]
+        assert res_sens["stats"]["matches_emitted"] == 5 # hello world, hello_world, hello, foo hello bar, hello.*world
+        assert all("HELLO" not in rec["text"] for rec in res_sens["records"])
+
+        r_ign = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "case_mode": "ignore", "path": str(t102_dir)}}
+        }) + "\n")
+        res_ign = json.loads(r_ign.stdout.strip())["result"]["structuredContent"]
+        assert res_ign["stats"]["matches_emitted"] == 6 # Includes HELLO world
+
+        # smart case: lowercase pattern matches case-insensitively, uppercase matches sensitively
+        r_sm_lower = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "case_mode": "smart", "path": str(t102_dir)}}
+        }) + "\n")
+        assert json.loads(r_sm_lower.stdout.strip())["result"]["structuredContent"]["stats"]["matches_emitted"] == 6
+
+        r_sm_upper = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "HELLO", "case_mode": "smart", "path": str(t102_dir)}}
+        }) + "\n")
+        assert json.loads(r_sm_upper.stdout.strip())["result"]["structuredContent"]["stats"]["matches_emitted"] == 1
+
+        # 3. match_boundary: word (-w) vs line (-x)
+        r_word = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "match_boundary": "word", "path": str(t102_dir)}}
+        }) + "\n")
+        res_word = json.loads(r_word.stdout.strip())["result"]["structuredContent"]
+        # Matches: "hello world", "hello", "foo hello bar", "hello.*world" (because '.' is not word char)
+        # Does NOT match: "hello_world"
+        word_texts = [rec["text"] for rec in res_word["records"]]
+        assert "hello_world" not in word_texts
+        assert "hello world" in word_texts
+        assert "hello" in word_texts
+
+        r_line = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "match_boundary": "line", "path": str(t102_dir)}}
+        }) + "\n")
+        res_line = json.loads(r_line.stdout.strip())["result"]["structuredContent"]
+        assert res_line["stats"]["matches_emitted"] == 1
+        assert res_line["records"][0]["text"] == "hello"
+
+        # 4. Invalid enums rejection (-32602)
+        for bad_prop, val in [("mode", "bad"), ("case_mode", "bad"), ("match_boundary", "bad")]:
+            r_err = run_cmd([trg, "--mcp"], input_data=json.dumps({
+                "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                "params": {"name": "trg_search", "arguments": {"pattern": "hello", bad_prop: val, "path": str(t102_dir)}}
+            }) + "\n")
+            assert json.loads(r_err.stdout.strip())["error"]["code"] == -32602
+    finally:
+        if t102_dir.exists():
+            shutil.rmtree(t102_dir)
+
+    # Test 103: Multi-Patterns (patterns[]) & Pattern Source Isolation
+    log("Test 103: Multi-Patterns (patterns[]) & Pattern Source Isolation")
+    t103_dir = fixtures_dir / "test_t103"
+    try:
+        t103_dir.mkdir(parents=True, exist_ok=True)
+        (t103_dir / "fruits.txt").write_text("apple pie\nbanana split\ncherry tart\n", encoding="utf-8")
+
+        # 1. patterns[] multi-pattern search
+        r_mp = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"patterns": ["apple", "cherry"], "path": str(t103_dir)}}
+        }) + "\n")
+        res_mp = json.loads(r_mp.stdout.strip())["result"]["structuredContent"]
+        assert res_mp["stats"]["matches_emitted"] == 2
+        texts = [rec["text"] for rec in res_mp["records"]]
+        assert "apple pie" in texts
+        assert "cherry tart" in texts
+        assert "banana split" not in texts
+
+        # 2. Mutual exclusion: pattern + patterns -> -32602
+        r_mut = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "apple", "patterns": ["banana"], "path": str(t103_dir)}}
+        }) + "\n")
+        assert json.loads(r_mut.stdout.strip())["error"]["code"] == -32602
+        assert "Cannot provide both 'pattern' and 'patterns'" in json.loads(r_mut.stdout.strip())["error"]["message"]
+
+        # 3. Empty patterns array -> -32602
+        r_emp = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"patterns": [], "path": str(t103_dir)}}
+        }) + "\n")
+        assert json.loads(r_emp.stdout.strip())["error"]["code"] == -32602
+
+        # 4. Pattern source conflict with args
+        for conflict_arg in [["-e", "banana"], ["--regexp", "banana"], ["-f", "somefile"], ["extra_pos"]]:
+            r_conf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+                "jsonrpc": "2.0", "id": 13, "method": "tools/call",
+                "params": {"name": "trg_search", "arguments": {"pattern": "apple", "path": str(t103_dir), "args": conflict_arg}}
+            }) + "\n")
+            assert json.loads(r_conf.stdout.strip())["error"]["code"] == -32602
+
+        # 5. Mode flag isolation: -E conflicts with typed mode, NOT pattern source
+        r_mode_conf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 14, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "apple", "mode": "literal", "path": str(t103_dir), "args": ["-E"]}}
+        }) + "\n")
+        assert json.loads(r_mode_conf.stdout.strip())["error"]["code"] == -32602
+        assert "typed property 'mode' conflicts" in json.loads(r_mode_conf.stdout.strip())["error"]["message"]
+    finally:
+        if t103_dir.exists():
+            shutil.rmtree(t103_dir)
+
+    # Test 104: Multi-Paths (paths[]) & Mutual Exclusion
+    log("Test 104: Multi-Paths (paths[]) & Mutual Exclusion")
+    t104_dir = fixtures_dir / "test_t104"
+    try:
+        t104_dir.mkdir(parents=True, exist_ok=True)
+        dir1 = t104_dir / "dir1"
+        dir2 = t104_dir / "dir2"
+        dir1.mkdir(parents=True, exist_ok=True)
+        dir2.mkdir(parents=True, exist_ok=True)
+        (dir1 / "a.txt").write_text("common_target alpha\n", encoding="utf-8")
+        (dir2 / "b.txt").write_text("common_target beta\n", encoding="utf-8")
+
+        # 1. paths[] multi-directory traversal
+        r_paths = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 15, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "common_target", "paths": [str(dir1), str(dir2)]}}
+        }) + "\n")
+        res_paths = json.loads(r_paths.stdout.strip())["result"]["structuredContent"]
+        assert res_paths["stats"]["matches_emitted"] == 2
+        p_texts = [rec["path"] for rec in res_paths["records"]]
+        assert any("dir1" in p for p in p_texts)
+        assert any("dir2" in p for p in p_texts)
+
+        # 2. Mutual exclusion: path + paths -> -32602
+        r_mut_p = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 16, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "common_target", "path": str(dir1), "paths": [str(dir2)]}}
+        }) + "\n")
+        assert json.loads(r_mut_p.stdout.strip())["error"]["code"] == -32602
+        assert "Cannot provide both 'path' and 'paths'" in json.loads(r_mut_p.stdout.strip())["error"]["message"]
+
+        # 3. Conflict with args positional path -> -32602
+        r_conf_p = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 17, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "common_target", "paths": [str(dir1)], "args": [str(dir2)]}}
+        }) + "\n")
+        assert json.loads(r_conf_p.stdout.strip())["error"]["code"] == -32602
+        assert "typed property 'path' conflicts with positional arg" in json.loads(r_conf_p.stdout.strip())["error"]["message"]
+    finally:
+        if t104_dir.exists():
+            shutil.rmtree(t104_dir)
+
+    # Test 105: Typed globs[] and types[] Array Ordering
+    log("Test 105: Typed globs[] and types[] Array Ordering")
+    t105_dir = fixtures_dir / "test_t105"
+    try:
+        t105_dir.mkdir(parents=True, exist_ok=True)
+        (t105_dir / "one.py").write_text("match_var = 1\n", encoding="utf-8")
+        (t105_dir / "two.tk").write_text("auto match_var = 2\n", encoding="utf-8")
+        (t105_dir / "three.rs").write_text("let match_var = 3;\n", encoding="utf-8")
+        (t105_dir / "bad_ignore.py").write_text("match_var = 4\n", encoding="utf-8")
+
+        # 1. types[] multi-type filtering
+        r_types = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 18, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "match_var", "types": ["py", "tk"], "path": str(t105_dir)}}
+        }) + "\n")
+        res_types = json.loads(r_types.stdout.strip())["result"]["structuredContent"]
+        exts = [rec["path"].split(".")[-1] for rec in res_types["records"]]
+        assert "py" in exts and "tk" in exts
+        assert "rs" not in exts
+
+        # 2. globs[] ordering and negation
+        r_globs = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 19, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "match_var", "globs": ["*.py", "!*bad*"], "path": str(t105_dir)}}
+        }) + "\n")
+        res_globs = json.loads(r_globs.stdout.strip())["result"]["structuredContent"]
+        assert res_globs["stats"]["matches_emitted"] == 1
+        assert "one.py" in res_globs["records"][0]["path"]
+
+        # 3. Conflicts
+        r_t_conf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 20, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "match_var", "types": ["py"], "path": str(t105_dir), "args": ["-t", "tk"]}}
+        }) + "\n")
+        assert json.loads(r_t_conf.stdout.strip())["error"]["code"] == -32602
+
+        r_g_conf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "match_var", "globs": ["*.py"], "path": str(t105_dir), "args": ["-g", "*.tk"]}}
+        }) + "\n")
+        assert json.loads(r_g_conf.stdout.strip())["error"]["code"] == -32602
+    finally:
+        if t105_dir.exists():
+            shutil.rmtree(t105_dir)
+
+    # Test 106: Agent-Safe Default Budgets vs Explicit null
+    log("Test 106: Agent-Safe Default Budgets vs Explicit null")
+    t106_dir = fixtures_dir / "test_t106"
+    try:
+        t106_dir.mkdir(parents=True, exist_ok=True)
+        # Create a file with 100 matching lines
+        (t106_dir / "stream.txt").write_text("\n".join(f"TARGET_LINE {i}" for i in range(100)) + "\n", encoding="utf-8")
+
+        # 1. Unspecified budget: defaults to 50 matches, 64KiB bytes
+        r_def_bud = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "TARGET_LINE", "path": str(t106_dir)}}
+        }) + "\n")
+        res_def_bud = json.loads(r_def_bud.stdout.strip())["result"]["structuredContent"]
+        assert res_def_bud["stats"]["matches_emitted"] == 50
+        assert res_def_bud["complete"] is False
+        assert res_def_bud["truncated"] is True
+        assert res_def_bud["termination_reason"] == "max_total_matches"
+        assert res_def_bud["limits"]["max_total_matches"] == 50
+        assert res_def_bud["limits"]["max_result_bytes"] == 65536
+
+        # 2. Explicit null: unlimited budget emits all 100 matches
+        r_null_bud = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 23, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "TARGET_LINE",
+                    "path": str(t106_dir),
+                    "max_total_matches": None,
+                    "max_result_bytes": None
+                }
+            }
+        }) + "\n")
+        res_null_bud = json.loads(r_null_bud.stdout.strip())["result"]["structuredContent"]
+        assert res_null_bud["stats"]["matches_emitted"] == 100
+        assert res_null_bud["complete"] is True
+        assert res_null_bud["truncated"] is False
+        assert res_null_bud["termination_reason"] == "completed"
+        assert res_null_bud["limits"]["max_total_matches"] is None
+        assert res_null_bud["limits"]["max_result_bytes"] is None
+    finally:
+        if t106_dir.exists():
+            shutil.rmtree(t106_dir)
+
+    # Test 107: Protocol-Invariant Canonical Record Budgeting
+    log("Test 107: Protocol-Invariant Canonical Record Budgeting")
+    t107_dir = fixtures_dir / "test_t107"
+    try:
+        t107_dir.mkdir(parents=True, exist_ok=True)
+        (t107_dir / "budget_test.txt").write_text(
+            "\n".join(f"ctx_before_{i}\nMATCH_MARKER_{i}\nctx_after_{i}" for i in range(25)) + "\n",
+            encoding="utf-8"
+        )
+        # Verify match count parity under 2024 vs 2025 protocol
+        call_req = json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "MATCH_MARKER",
+                    "path": str(t107_dir),
+                    "max_total_matches": 10,
+                    "context": 1
+                }
+            }
+        }) + "\n"
+
+        notif_req = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        init_2024 = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}}) + "\n"
+        r_2024 = run_cmd([trg, "--mcp"], input_data=init_2024 + notif_req + call_req)
+        resps_2024 = [json.loads(l) for l in r_2024.stdout.strip().split("\n") if l.strip()]
+        meta_2024 = resps_2024[1]["result"]["_meta"]["summary"]
+
+        init_2025 = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
+        r_2025 = run_cmd([trg, "--mcp"], input_data=init_2025 + notif_req + call_req)
+        resps_2025 = [json.loads(l) for l in r_2025.stdout.strip().split("\n") if l.strip()]
+        sc_2025 = resps_2025[1]["result"]["structuredContent"]
+
+        # Exact match parity across protocol versions!
+        assert meta_2024["matches_emitted"] == sc_2025["stats"]["matches_emitted"] == 10
+        assert sc_2025["stats"]["budgeted_record_bytes_emitted"] <= sc_2025["limits"]["max_result_bytes"]
+
+        # Byte budget cut-off test: assert canonical byte truncation under max_result_bytes
+        byte_limit = 500
+        call_byte_req = json.dumps({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "MATCH_MARKER",
+                    "path": str(t107_dir),
+                    "max_total_matches": None,
+                    "max_result_bytes": byte_limit
+                }
+            }
+        }) + "\n"
+        r_byte_2025 = run_cmd([trg, "--mcp"], input_data=init_2025 + notif_req + call_byte_req)
+        resps_byte_2025 = [json.loads(l) for l in r_byte_2025.stdout.strip().split("\n") if l.strip()]
+        sc_byte = resps_byte_2025[1]["result"]["structuredContent"]
+        assert sc_byte["truncated"] is True
+        assert sc_byte["termination_reason"] == "max_result_bytes"
+        assert sc_byte["stats"]["budgeted_record_bytes_emitted"] <= byte_limit
+        assert sc_byte["limits"]["max_result_bytes"] == byte_limit
+        assert sc_byte["stats"]["matches_emitted"] < 25
+
+        r_byte_2024 = run_cmd([trg, "--mcp"], input_data=init_2024 + notif_req + call_byte_req)
+        resps_byte_2024 = [json.loads(l) for l in r_byte_2024.stdout.strip().split("\n") if l.strip()]
+        meta_byte = resps_byte_2024[1]["result"]["_meta"]["summary"]
+        assert meta_byte["matches_emitted"] == sc_byte["stats"]["matches_emitted"]
+        assert meta_byte["termination_reason"] == "max_result_bytes"
+        assert meta_byte["truncated"] is True
+
+        # Atomic batch preflight verification: every context record belongs to an emitted match
+        recs = sc_2025["records"]
+        match_group_ids = {r["group_id"] for r in recs if r["kind"] == "match"}
+        ctx_group_ids = {r["group_id"] for r in recs if r["kind"] == "context"}
+        assert ctx_group_ids.issubset(match_group_ids), "Orphaned context records detected without corresponding match!"
+    finally:
+        if t107_dir.exists():
+            shutil.rmtree(t107_dir)
+
+    # Test 108: Typed max_per_file, max_files_with_matches & sort
+    log("Test 108: Typed max_per_file, max_files_with_matches & sort")
+    t108_dir = fixtures_dir / "test_t108"
+    try:
+        t108_dir.mkdir(parents=True, exist_ok=True)
+        (t108_dir / "a_file.txt").write_text("HIT 1\nHIT 2\nHIT 3\n", encoding="utf-8")
+        (t108_dir / "b_file.txt").write_text("HIT 4\nHIT 5\nHIT 6\n", encoding="utf-8")
+        (t108_dir / "c_file.txt").write_text("HIT 7\nHIT 8\nHIT 9\n", encoding="utf-8")
+
+        # 1. max_per_file: 2 -> 2 per file = 6 total, completed successfully
+        r_mpf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 24, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "HIT",
+                    "path": str(t108_dir),
+                    "max_per_file": 2,
+                    "max_total_matches": None,
+                    "max_result_bytes": None
+                }
+            }
+        }) + "\n")
+        res_mpf = json.loads(r_mpf.stdout.strip())["result"]["structuredContent"]
+        assert res_mpf["stats"]["matches_emitted"] == 6
+        assert res_mpf["complete"] is True
+        assert res_mpf["termination_reason"] == "completed"
+
+        # 2. max_files_with_matches: 2 -> only 2 files emitted, truncated = True
+        r_mfm = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 25, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "HIT",
+                    "path": str(t108_dir),
+                    "max_files_with_matches": 2,
+                    "max_total_matches": None,
+                    "max_result_bytes": None
+                }
+            }
+        }) + "\n")
+        res_mfm = json.loads(r_mfm.stdout.strip())["result"]["structuredContent"]
+        assert res_mfm["stats"]["files_with_match_emitted"] == 2
+        assert res_mfm["truncated"] is True
+        assert res_mfm["termination_reason"] == "max_files_with_matches"
+
+        # 3. sort: path vs reverse_path
+        r_sort_asc = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 26, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "HIT", "path": str(t108_dir), "sort": "path", "max_per_file": 1}}
+        }) + "\n")
+        files_asc = [r["path"] for r in json.loads(r_sort_asc.stdout.strip())["result"]["structuredContent"]["records"]]
+        assert "a_file.txt" in files_asc[0] and "c_file.txt" in files_asc[2]
+
+        r_sort_desc = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 27, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "HIT", "path": str(t108_dir), "sort": "reverse_path", "max_per_file": 1}}
+        }) + "\n")
+        files_desc = [r["path"] for r in json.loads(r_sort_desc.stdout.strip())["result"]["structuredContent"]["records"]]
+        assert "c_file.txt" in files_desc[0] and "a_file.txt" in files_desc[2]
+    finally:
+        if t108_dir.exists():
+            shutil.rmtree(t108_dir)
+
+    # Test 109: Stateful classify_args & Forbidden Flags
+    log("Test 109: Stateful classify_args & Forbidden Flags")
+    # Value consuming flags like -g *.tk should not be treated as path positional
+    r_stateful = run_cmd([trg, "--mcp"], input_data=json.dumps({
+        "jsonrpc": "2.0", "id": 28, "method": "tools/call",
+        "params": {"name": "trg_search", "arguments": {"pattern": "fn", "args": ["-g", "*.tk"]}}
+    }) + "\n")
+    assert "result" in json.loads(r_stateful.stdout.strip()), "Valid -g argument triggered false conflict!"
+
+    # Forbidden flags & unknown options return code -32602
+    forbidden_flags = [
+        "-q", "--quiet", "-c", "--count", "-l", "--files-with-matches", "--files", "--mcp",
+        "-h", "--help", "-V", "--version", "--type-list", "-v", "--invert-match", "-o", "--only-matching",
+        "--json", "--json=compact", "--json-compact",
+        "-nq", "-qn", "-nC2q", "--definitely-unknown", "-z"
+    ]
+    for ff in forbidden_flags:
+        r_forb = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 29, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "test", "args": [ff]}}
+        }) + "\n")
+        res_forb = json.loads(r_forb.stdout.strip())
+        assert res_forb["error"]["code"] == -32602, f"Forbidden/unknown flag {ff} was not rejected with -32602: {res_forb}"
+
+    # Test 110: Legacy Alias Compatibility (max_bytes, max_matches, path, type)
+    log("Test 110: Legacy Alias Compatibility (max_bytes, max_matches, path, type)")
+    t110_dir = fixtures_dir / "test_t110"
+    try:
+        t110_dir.mkdir(parents=True, exist_ok=True)
+        (t110_dir / "target.py").write_text("hello 1\nhello 2\nhello 3\nhello 4\nhello 5\n", encoding="utf-8")
+
+        # 1. path alias for paths
+        r_p_alias = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 30, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "path": str(t110_dir / "target.py")}}
+        }) + "\n")
+        assert json.loads(r_p_alias.stdout.strip())["result"]["structuredContent"]["stats"]["matches_emitted"] == 5
+
+        # 2. type alias for types
+        r_t_alias = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 31, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "path": str(t110_dir), "type": "py"}}
+        }) + "\n")
+        assert json.loads(r_t_alias.stdout.strip())["result"]["structuredContent"]["stats"]["matches_emitted"] == 5
+
+        # 3. max_matches alias for max_total_matches
+        r_mm_alias = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 32, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "path": str(t110_dir), "max_matches": 2}}
+        }) + "\n")
+        assert json.loads(r_mm_alias.stdout.strip())["result"]["structuredContent"]["stats"]["matches_emitted"] == 2
+
+        # 4. max_bytes alias for max_result_bytes
+        r_mb_alias = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 33, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "hello", "path": str(t110_dir), "max_bytes": "100"}}
+        }) + "\n")
+        assert json.loads(r_mb_alias.stdout.strip())["result"]["structuredContent"]["limits"]["max_result_bytes"] == 100
+
+        # 5. Passing both canonical and alias rejects with -32602
+        for p1, p2 in [("max_matches", "max_total_matches"), ("max_bytes", "max_result_bytes")]:
+            r_both = run_cmd([trg, "--mcp"], input_data=json.dumps({
+                "jsonrpc": "2.0", "id": 34, "method": "tools/call",
+                "params": {"name": "trg_search", "arguments": {"pattern": "hello", "path": str(t110_dir), p1: 10, p2: 10}}
+            }) + "\n")
+            assert json.loads(r_both.stdout.strip())["error"]["code"] == -32602
+    finally:
+        if t110_dir.exists():
+            shutil.rmtree(t110_dir)
+
+    # Test 111: Universal Default Injection & Boolean Semantics
+    log("Test 111: Universal Default Injection & Boolean Semantics")
+    t111_dir = fixtures_dir / "test_t111"
+    try:
+        t111_dir.mkdir(parents=True, exist_ok=True)
+        (t111_dir / "service.tk").write_text("class Test {\n    fn run() {\n        magic_var()\n    }\n}\n", encoding="utf-8")
+
+        # Explicit block: false search
+        r_bf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 35, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": False}}
+        }) + "\n")
+        res_bf = json.loads(r_bf.stdout.strip())["result"]["structuredContent"]
+        assert len(res_bf["records"]) == 1 # Only the match record, no block context records
+        assert res_bf["effective_query"]["block"] is False
+        assert res_bf["effective_query"]["max_block_lines"] is None
+
+        # Explicit boolean property conflicts with opposite flag in args
+        r_b_conf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 36, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": False, "args": ["--block"]}}
+        }) + "\n")
+        assert json.loads(r_b_conf.stdout.strip())["error"]["code"] == -32602
+        assert "typed property 'block' conflicts" in json.loads(r_b_conf.stdout.strip())["error"]["message"]
+
+        r_df_conf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 37, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "def_first": False, "args": ["--def-first"]}}
+        }) + "\n")
+        assert json.loads(r_df_conf.stdout.strip())["error"]["code"] == -32602
+        assert "typed property 'def_first' conflicts" in json.loads(r_df_conf.stdout.strip())["error"]["message"]
+
+        # P1-1: Strict null accept/reject differential matrix
+        # Non-nullable properties with null MUST return -32602
+        non_nullable_props = [
+            ("block", None), ("mode", None), ("match_boundary", None), ("case_mode", None),
+            ("paths", None), ("path", None), ("globs", None), ("types", None), ("type", None),
+            ("sort", None), ("def_first", None), ("scope", None), ("args", None),
+            ("pattern", None), ("patterns", None)
+        ]
+        for prop, val in non_nullable_props:
+            args_obj = {"pattern": "magic_var", "path": str(t111_dir), prop: val}
+            if prop == "pattern":
+                args_obj = {"path": str(t111_dir), "pattern": None}
+            r_null = run_cmd([trg, "--mcp"], input_data=json.dumps({
+                "jsonrpc": "2.0", "id": 38, "method": "tools/call",
+                "params": {"name": "trg_search", "arguments": args_obj}
+            }) + "\n")
+            res_null = json.loads(r_null.stdout.strip())
+            assert "error" in res_null, f"Non-nullable property '{prop}: null' did not error: {res_null}"
+            assert res_null["error"]["code"] == -32602, f"Non-nullable property '{prop}: null' error code != -32602: {res_null}"
+
+        # Nullable properties with null MUST succeed
+        nullable_props = [
+            ("context", None), ("max_total_matches", None), ("max_matches", None),
+            ("max_result_bytes", None), ("max_bytes", None), ("max_per_file", None),
+            ("max_files_with_matches", None)
+        ]
+        for prop, val in nullable_props:
+            args_obj = {"pattern": "magic_var", "path": str(t111_dir), prop: val}
+            r_null_ok = run_cmd([trg, "--mcp"], input_data=json.dumps({
+                "jsonrpc": "2.0", "id": 39, "method": "tools/call",
+                "params": {"name": "trg_search", "arguments": args_obj}
+            }) + "\n")
+            res_null_ok = json.loads(r_null_ok.stdout.strip())
+            assert "result" in res_null_ok, f"Nullable property '{prop}: null' failed unexpectedly: {res_null_ok}"
+
+        # P1-2: max_block_lines typed contract, search domain proof & orthogonality
+        # 1. args: ["--block", "--max-block-lines=1"]
+        r_mbl1 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 40, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "args": ["--block", "--max-block-lines=1"]}}
+        }) + "\n")
+        eq_mbl1 = json.loads(r_mbl1.stdout.strip())["result"]["structuredContent"]["effective_query"]
+        assert eq_mbl1["block"] is True
+        assert eq_mbl1["max_block_lines"] == 1
+
+        # 2. block: True + args: ["--max-block-lines=1"] (orthogonal, not conflicting)
+        r_mbl2 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 41, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": True, "args": ["--max-block-lines=1"]}}
+        }) + "\n")
+        eq_mbl2 = json.loads(r_mbl2.stdout.strip())["result"]["structuredContent"]["effective_query"]
+        assert eq_mbl2["block"] is True
+        assert eq_mbl2["max_block_lines"] == 1
+
+        # 3. typed block: True, max_block_lines: 5
+        r_mbl3 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 42, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": True, "max_block_lines": 5}}
+        }) + "\n")
+        eq_mbl3 = json.loads(r_mbl3.stdout.strip())["result"]["structuredContent"]["effective_query"]
+        assert eq_mbl3["block"] is True
+        assert eq_mbl3["max_block_lines"] == 5
+
+        # 4. typed block: True, max_block_lines: null -> defaults to 80
+        r_mbl4 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 43, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": True, "max_block_lines": None}}
+        }) + "\n")
+        eq_mbl4 = json.loads(r_mbl4.stdout.strip())["result"]["structuredContent"]["effective_query"]
+        assert eq_mbl4["block"] is True
+        assert eq_mbl4["max_block_lines"] == 80
+
+        # 5. block: False + max_block_lines: 1 -> rejects with -32602
+        r_mbl_rej1 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 44, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": False, "max_block_lines": 1}}
+        }) + "\n")
+        assert json.loads(r_mbl_rej1.stdout.strip())["error"]["code"] == -32602
+        assert "requires 'block' to be enabled" in json.loads(r_mbl_rej1.stdout.strip())["error"]["message"]
+
+        # 6. args: ["--max-block-lines=1"] without block -> rejects with -32602
+        r_mbl_rej2 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 45, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "args": ["--max-block-lines=1"]}}
+        }) + "\n")
+        assert json.loads(r_mbl_rej2.stdout.strip())["error"]["code"] == -32602
+        assert "requires 'block' to be enabled" in json.loads(r_mbl_rej2.stdout.strip())["error"]["message"]
+
+        # 7. typed max_block_lines conflict with raw args
+        r_mbl_conf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 46, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": True, "max_block_lines": 5, "args": ["--max-block-lines=10"]}}
+        }) + "\n")
+        assert json.loads(r_mbl_conf.stdout.strip())["error"]["code"] == -32602
+        assert "typed property 'max_block_lines' conflicts" in json.loads(r_mbl_conf.stdout.strip())["error"]["message"]
+
+        # 8. block: False + max_block_lines: null -> permitted, max_block_lines in effective_query is null
+        r_mbl_null = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 47, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": False, "max_block_lines": None}}
+        }) + "\n")
+        resp_mbl_null = json.loads(r_mbl_null.stdout.strip())
+        assert "result" in resp_mbl_null, f"Expected success for block=False + max_block_lines=None, got: {resp_mbl_null}"
+        eq_mbl_null = resp_mbl_null["result"]["structuredContent"]["effective_query"]
+        assert eq_mbl_null["block"] is False
+        assert eq_mbl_null["max_block_lines"] is None
+
+        # 9. max_block_lines ceiling enforcement (> 1000)
+        r_mbl_over = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 48, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": True, "max_block_lines": 1001}}
+        }) + "\n")
+        assert json.loads(r_mbl_over.stdout.strip())["error"]["code"] == -32602
+
+        # 10. raw args max-block-lines ceiling enforcement (> 1000)
+        r_mbl_raw_over = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 49, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "args": ["--block", "--max-block-lines=1001"]}}
+        }) + "\n")
+        assert json.loads(r_mbl_raw_over.stdout.strip())["error"]["code"] == -32602
+
+        # 11. Safe-integer violations in string size and raw args (> 2^53 - 1 = 9007199254740991)
+        # 11a: typed max_result_bytes string
+        r_si_str = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 50, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "max_result_bytes": "9007199254740992"}}
+        }) + "\n")
+        assert json.loads(r_si_str.stdout.strip())["error"]["code"] == -32602
+
+        # 11b: raw args --max-result-bytes
+        r_si_raw_mrb = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 51, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "args": ["--max-result-bytes=9007199254740992"]}}
+        }) + "\n")
+        assert json.loads(r_si_raw_mrb.stdout.strip())["error"]["code"] == -32602
+
+        # 11c: raw args --max-total-matches
+        r_si_raw_mtm = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 52, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "args": ["--max-total-matches=9007199254740992"]}}
+        }) + "\n")
+        assert json.loads(r_si_raw_mtm.stdout.strip())["error"]["code"] == -32602
+
+        # 11d: raw args --max-files-with-matches
+        r_si_raw_mfm = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 53, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "args": ["--max-files-with-matches=9007199254740992"]}}
+        }) + "\n")
+        assert json.loads(r_si_raw_mfm.stdout.strip())["error"]["code"] == -32602
+
+        # 11e: raw args --max-count
+        r_si_raw_mc = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 54, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "args": ["--max-count=9007199254740992"]}}
+        }) + "\n")
+        assert json.loads(r_si_raw_mc.stdout.strip())["error"]["code"] == -32602
+
+        # 11f: raw args --max-columns
+        r_si_raw_mcol = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 55, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "args": ["--max-columns=9007199254740992"]}}
+        }) + "\n")
+        assert json.loads(r_si_raw_mcol.stdout.strip())["error"]["code"] == -32602
+    finally:
+        if t111_dir.exists():
+            shutil.rmtree(t111_dir)
+
+    # Test 112: outputSchema Declaration & Live Schema Validation
+    log("Test 112: outputSchema Declaration & Live Schema Validation")
+    # Verify tools/list advertises outputSchema under 2025-11-25
+    r_list = run_cmd([trg, "--mcp"], input_data=json.dumps({
+        "jsonrpc": "2.0", "id": 38, "method": "tools/list"
+    }) + "\n")
+    tools = json.loads(r_list.stdout.strip())["result"]["tools"]
+    search_tool = next(t for t in tools if t["name"] == "trg_search")
+    assert "outputSchema" in search_tool
+    out_schema = search_tool["outputSchema"]
+    assert out_schema["type"] == "object"
+    assert "effective_query" in out_schema["properties"]
+    assert "records" in out_schema["properties"]
+
+    # Structural schema validator for structuredContent
+    t112_dir = fixtures_dir / "test_t112"
+    try:
+        t112_dir.mkdir(parents=True, exist_ok=True)
+        (t112_dir / "code.tk").write_text("class Demo {\n    fn test() {\n        let target = 42;\n    }\n}\n", encoding="utf-8")
+        r_sc_val = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 39, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "target", "path": str(t112_dir), "block": True, "scope": True, "context": 1}}
+        }) + "\n")
+        sc = json.loads(r_sc_val.stdout.strip())["result"]["structuredContent"]
+
+        # 1. Top-level contract
+        assert sc["schema"] == "trg-mcp-result-v1"
+        assert isinstance(sc["complete"], bool)
+        assert isinstance(sc["truncated"], bool)
+        assert sc["termination_reason"] in ["completed", "max_total_matches", "max_result_bytes", "max_files_with_matches", "search_error"]
+
+        # 2. effective_query completeness (18 canonical fields)
+        eq = sc["effective_query"]
+        assert isinstance(eq["patterns"], list)
+        assert eq["mode"] in ["literal", "regex"]
+        assert eq["match_boundary"] in ["substring", "word", "line"]
+        assert eq["case_mode"] in ["smart", "sensitive", "ignore"]
+        assert isinstance(eq["paths"], list)
+        assert isinstance(eq["globs"], list)
+        assert isinstance(eq["types"], list)
+        assert isinstance(eq["ignore_enabled"], bool)
+        assert isinstance(eq["hidden_enabled"], bool)
+        assert eq["symlink_policy"] == "skip"
+        assert eq["binary_policy"] == "skip"
+        assert eq["sort"] in ["path", "reverse_path", "none"]
+        assert eq["block"] is True
+        assert eq["max_block_lines"] == 80
+        assert eq["scope"] is True
+        assert isinstance(eq["def_first"], bool)
+
+        # 3. limits validation
+        lim = sc["limits"]
+        assert "max_total_matches" in lim
+        assert "max_result_bytes" in lim
+        assert "max_per_file" in lim
+        assert "max_files_with_matches" in lim
+
+        # 4. stats validation (9 numeric fields)
+        st = sc["stats"]
+        for k in ["matches_emitted", "matches_observed", "files_scanned", "files_with_match_observed", "files_with_match_emitted", "file_scan_passes", "text_record_bytes_emitted", "structured_record_bytes_emitted", "budgeted_record_bytes_emitted"]:
+            assert isinstance(st[k], int) and st[k] >= 0
+
+        # 5. records validation
+        for rec in sc["records"]:
+            assert rec["kind"] in ["match", "context"]
+            assert isinstance(rec["group_id"], int)
+            assert isinstance(rec["path"], str)
+            assert isinstance(rec["line_number"], int) and rec["line_number"] >= 1
+            assert isinstance(rec["absolute_offset"], int)
+            assert isinstance(rec["text"], str)
+            if rec["kind"] == "match":
+                assert isinstance(rec["submatches"], list)
+                for sm in rec["submatches"]:
+                    assert isinstance(sm["match_text"], str)
+                    assert isinstance(sm["start"], int) and isinstance(sm["end"], int)
+            elif rec["kind"] == "context":
+                assert "context_roles" not in rec, "context_roles must not be present in structured context records"
+
+        # 6. Live recursive JSON Schema validation against advertised outputSchema
+        validate_json_schema(sc, out_schema)
+    finally:
+        if t112_dir.exists():
+            shutil.rmtree(t112_dir)
+
+    # Test 113: Protocol Lifecycle & Version Negotiation
+    log("Test 113: Protocol Lifecycle & Version Negotiation")
+    t113_dir = fixtures_dir / "test_t113"
+    try:
+        t113_dir.mkdir(parents=True, exist_ok=True)
+        (t113_dir / "target.txt").write_text("proto_test_symbol\n", encoding="utf-8")
+        search_req = json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "proto_test_symbol", "path": str(t113_dir)}}
+        }) + "\n"
+        notif_req = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+
+        # 1. Calling tools/list or tools/call before initialize -> code -32600
+        r_pre_list = run_cmd([trg, "--mcp"], input_data=json.dumps({"jsonrpc": "2.0", "id": 10, "method": "tools/list"}) + "\n", raw_mcp=True)
+        assert json.loads(r_pre_list.stdout.strip())["error"]["code"] == -32600
+        r_pre_call = run_cmd([trg, "--mcp"], input_data=search_req, raw_mcp=True)
+        assert json.loads(r_pre_call.stdout.strip())["error"]["code"] == -32600
+
+        # 2. Invalid protocolVersion type or missing -> code -32602
+        r_bad_ver = run_cmd([trg, "--mcp"], input_data=json.dumps({"jsonrpc": "2.0", "id": 11, "method": "initialize", "params": {"protocolVersion": 123}}) + "\n", raw_mcp=True)
+        assert json.loads(r_bad_ver.stdout.strip())["error"]["code"] == -32602
+
+        # 3. Unsupported version fallback to latest supported
+        r_fallback = run_cmd([trg, "--mcp"], input_data=json.dumps({"jsonrpc": "2.0", "id": 12, "method": "initialize", "params": {"protocolVersion": "9999-01-01"}}) + "\n", raw_mcp=True)
+        assert json.loads(r_fallback.stdout.strip())["result"]["protocolVersion"] == "2025-11-25"
+
+        # 4. Calling tools/call before notifications/initialized -> code -32600
+        init_2025_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
+        r_not_ready = run_cmd([trg, "--mcp"], input_data=init_2025_req + search_req, raw_mcp=True)
+        lines_nr = [json.loads(l) for l in r_not_ready.stdout.strip().split("\n") if l.strip()]
+        assert lines_nr[1]["error"]["code"] == -32600
+
+        # 5. Duplicate initialize -> code -32600
+        r_dup = run_cmd([trg, "--mcp"], input_data=init_2025_req + init_2025_req, raw_mcp=True)
+        lines_dup = [json.loads(l) for l in r_dup.stdout.strip().split("\n") if l.strip()]
+        assert lines_dup[1]["error"]["code"] == -32600
+
+        # 6. 2024-11-05 client negotiation -> pure content + _meta, NO structuredContent
+        init_2024_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}}) + "\n"
+        r_proto_2024 = run_cmd([trg, "--mcp"], input_data=init_2024_req + notif_req + search_req, raw_mcp=True)
+        lines_2024 = [json.loads(l) for l in r_proto_2024.stdout.strip().split("\n") if l.strip()]
+        assert lines_2024[0]["result"]["protocolVersion"] == "2024-11-05"
+        call_res_2024 = lines_2024[1]["result"]
+        assert "content" in call_res_2024
+        assert "_meta" in call_res_2024
+        assert "structuredContent" not in call_res_2024, "2024-11-05 response must not include structuredContent"
+
+        # 7. 2025-11-25 client negotiation -> content + structuredContent + _meta
+        r_proto_2025 = run_cmd([trg, "--mcp"], input_data=init_2025_req + notif_req + search_req, raw_mcp=True)
+        lines_2025 = [json.loads(l) for l in r_proto_2025.stdout.strip().split("\n") if l.strip()]
+        assert lines_2025[0]["result"]["protocolVersion"] == "2025-11-25"
+        call_res_2025 = lines_2025[1]["result"]
+        assert "content" in call_res_2025
+        assert "_meta" in call_res_2025
+        assert "structuredContent" in call_res_2025, "2025-11-25 response must include structuredContent"
+
+        # 8. notifications/initialized handled silently without error
+        ping_req = json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}) + "\n"
+        r_notif = run_cmd([trg, "--mcp"], input_data=init_2025_req + notif_req + ping_req, raw_mcp=True)
+        notif_lines = [json.loads(l) for l in r_notif.stdout.strip().split("\n") if l.strip()]
+        assert len(notif_lines) == 2 # Only initialize and ping emit responses
+        assert notif_lines[0]["id"] == 1
+        assert notif_lines[1]["id"] == 3
+    finally:
+        if t113_dir.exists():
+            shutil.rmtree(t113_dir)
+
+    # Test 114: Complete Error Contract Matrix
+    log("Test 114: Complete Error Contract Matrix")
+    t114_dir = fixtures_dir / "test_t114"
+    try:
+        t114_dir.mkdir(parents=True, exist_ok=True)
+        (t114_dir / "empty.txt").write_text("no matching words\n", encoding="utf-8")
+
+        # 1. Zero matches -> isError is False/absent, complete is True
+        r_zero = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 40, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "nonexistent_token", "path": str(t114_dir)}}
+        }) + "\n")
+        resp_zero = json.loads(r_zero.stdout.strip())["result"]
+        assert resp_zero.get("isError", False) is False
+        assert resp_zero["structuredContent"]["complete"] is True
+        assert resp_zero["structuredContent"]["termination_reason"] == "completed"
+        assert len(resp_zero["structuredContent"]["errors"]) == 0
+
+        # 2. Directory walk error -> isError is True, complete is False, termination_reason is search_error, errno present
+        nonexistent_path = str(t114_dir / "does_not_exist_folder")
+        r_walk_err = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 41, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "any", "path": nonexistent_path}}
+        }) + "\n")
+        resp_walk = json.loads(r_walk_err.stdout.strip())["result"]
+        assert resp_walk["isError"] is True
+        sc_walk = resp_walk["structuredContent"]
+        assert sc_walk["complete"] is False
+        assert sc_walk["termination_reason"] == "search_error"
+        assert len(sc_walk["errors"]) >= 1
+        err_entry = sc_walk["errors"][0]
+        assert err_entry["kind"] == "walk"
+        assert err_entry["errno"] == 2 # ENOENT
+
+        # 3. Regex syntax error -> isError is True, termination_reason is search_error, errors[0].kind == 'regex'
+        r_regex_err = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 42, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "(unclosed_group", "mode": "regex", "path": str(t114_dir)}}
+        }) + "\n")
+        resp_regex = json.loads(r_regex_err.stdout.strip())["result"]
+        assert resp_regex["isError"] is True
+        sc_regex = resp_regex["structuredContent"]
+        assert sc_regex["termination_reason"] == "search_error"
+        assert len(sc_regex["errors"]) >= 1
+        assert sc_regex["errors"][0]["kind"] == "regex"
+    finally:
+        if t114_dir.exists():
+            shutil.rmtree(t114_dir)
+
+    # Test 115: Memory Scalability & RSS Boundedness
+    log("Test 115: Memory Scalability & RSS Boundedness")
+    t115_dir = fixtures_dir / "test_t115"
+    try:
+        t115_dir.mkdir(parents=True, exist_ok=True)
+        # Generate 50,000 synthetic matching lines
+        large_file = t115_dir / "large.txt"
+        with open(large_file, "w", encoding="utf-8") as f:
+            for i in range(50000):
+                f.write(f"SYNTHETIC_DATA_LINE {i:06d} padding padding padding\n")
+
+        # Measure search with default 50 match budget and isolate child RSS measurement
+        t_start = time.time()
+        mcp_payload = (
+            json.dumps({"jsonrpc": "2.0", "id": "init_session", "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": 43, "method": "tools/call", "params": {"name": "trg_search", "arguments": {"pattern": "SYNTHETIC_DATA_LINE", "path": str(large_file)}}}) + "\n"
+        )
+        rss_probe_code = f"""
+import subprocess, resource, json, sys
+p = subprocess.Popen([{trg!r}, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+stdout, _ = p.communicate({mcp_payload!r})
+ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+rss = ru.ru_maxrss
+if sys.platform == "darwin":
+    rss_mb = rss / (1024 * 1024)
+else:
+    rss_mb = rss / 1024
+lines = [l for l in stdout.strip().splitlines() if l.strip() and "init_session" not in l]
+call_out = lines[0] if lines else ""
+print(json.dumps({{"rss_mb": rss_mb, "stdout": call_out}}))
+"""
+        r_probe = subprocess.run([sys.executable, "-c", rss_probe_code], stdout=subprocess.PIPE, text=True)
+        assert r_probe.returncode == 0
+        probe_res = json.loads(r_probe.stdout.strip())
+        elapsed = time.time() - t_start
+        assert elapsed < 2.0, f"Search under default budget took too long ({elapsed:.2f}s)!"
+
+        # Actual process RSS measurement with platform threshold
+        rss_mb = probe_res["rss_mb"]
+        assert rss_mb < 50.0, f"Process RSS exceeded threshold: {rss_mb:.2f} MB"
+
+        resp_scale = json.loads(probe_res["stdout"])["result"]
+        sc_scale = resp_scale["structuredContent"]
+        summary_scale = resp_scale["_meta"]["summary"]
+
+        # Verify mathematical consistency across channels & bounded records
+        assert sc_scale["stats"]["matches_emitted"] == 50
+        assert summary_scale["matches_emitted"] == 50
+        assert len(sc_scale["records"]) == 50
+        assert sc_scale["complete"] is False
+        assert sc_scale["truncated"] is True
+        assert summary_scale["complete"] is False
+        assert summary_scale["truncated"] is True
+        assert sc_scale["termination_reason"] == "max_total_matches"
+    finally:
+        if t115_dir.exists():
+            shutil.rmtree(t115_dir)
+
     log("=" * 60)
-    log("ALL 101 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.2)!")
+    log("ALL 115 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.10.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

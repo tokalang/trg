@@ -1,0 +1,1165 @@
+// Typed MCP Search parameters, stateful classify_args, conflict detection, and default injection.
+import core/str::{str}
+import core/option::{Option}
+import core/result::{Result}
+import std/vec::{Vec}
+import std/hashmap::{HashMap}
+import stdx/serde/json::{JsonNode}
+import std/math::{is_finite, floor}
+import src/parse::{parse_size_bytes_strict}
+import src/printer::{u64_to_string}
+import src/types::{CliOptions}
+
+pub const MCP_MAX_SAFE_INTEGER: usize = 9007199254740991:usize
+
+pub shape OptionFamily (
+    None = 0 |
+    PatternMode = 1 |       // -E, -F, --extended-regexp, --fixed-strings
+    PatternSource = 2 |     // -e, --regexp, -f, --file, positional pattern
+    MatchBoundary = 3 |     // -w, -x, --word-regexp, --line-regexp
+    CaseMode = 4 |          // -i, -S, --ignore-case, --smart-case
+    Path = 5 |              // positional paths
+    Glob = 6 |              // -g, --glob, --glob=*
+    TypeFilter = 7 |        // -t, --type, --type=*, attached -t*
+    MaxTotalMatches = 8 |   // --max-total-matches, --max-total-matches=*
+    MaxResultBytes = 9 |    // --max-result-bytes, --max-result-bytes=*
+    MaxPerFile = 10 |       // -m, --max-count, --max-count=*, attached -m*
+    MaxFiles = 11 |         // --max-files-with-matches, --max-files-with-matches=*
+    DefFirst = 12 |         // --def-first, --no-def-first
+    Block = 13 |            // --block, --no-block, --context-block
+    Scope = 14 |            // --scope, --no-scope
+    Sort = 15 |             // --sort, --sortr
+    Context = 16 |          // -C, -B, -A, --context, --before-context, --after-context
+    ForbiddenInMcp = 17 |   // --mcp, -h, --help, -V, --version, --type-list, --files, -q, -c, -l, -v, -o, --json*
+    ExcludeType = 18 |      // -T, --type-not, attached -T*
+    MaxColumns = 19 |       // --max-columns, --max-columns=*
+    Hidden = 20 |           // --hidden
+    NoIgnore = 21 |         // --no-ignore
+    NoPrefilter = 22 |      // --no-prefilter
+    LineNumber = 23 |       // -n, -N, --line-number, --no-line-number
+    MaxBlockLines = 24      // --max-block-lines, --max-block-lines=*
+)
+
+pub shape OptionToken (
+    family: OptionFamily,
+    token: string
+)
+
+pub shape ParamStringState (
+    state: u8, // 0: missing, 1: null, 2: value
+    value: string
+)
+
+pub shape ParamUsizeState (
+    state: u8,
+    value: usize
+)
+
+pub shape ParamBoolState (
+    state: u8,
+    value: bool
+)
+
+pub shape ParamVecState (
+    state: u8,
+    value: Vec<string>
+)
+
+fn is_forbidden_token(view: str) -> bool {
+    if view == "--mcp" || view == "-h" || view == "--help" || view == "-V" || view == "--version" {
+        return true
+    }
+    if view == "--type-list" || view == "--files" {
+        return true
+    }
+    if view == "-q" || view == "--quiet" || view == "-c" || view == "--count" || view == "--include-zero" {
+        return true
+    }
+    if view == "-l" || view == "--files-with-matches" {
+        return true
+    }
+    if view == "-v" || view == "--invert-match" {
+        return true
+    }
+    if view == "-o" || view == "--only-matching" {
+        return true
+    }
+    if view == "--no-truncation-notice" {
+        return true
+    }
+    if view == "--json" || view == "--json-compact" || view.starts_with("--json=") {
+        return true
+    }
+    return false
+}
+
+pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<OptionToken>, string> {
+    auto families# = Vec<OptionToken>::new()
+    auto num_args = args.len()
+    auto i# = 0:usize
+    auto pattern_source_seen# = has_typed_pattern
+    auto end_of_options# = false
+
+    loop i < num_args {
+        auto &arg_str = args.borrow(i)
+        auto view = arg_str.as_str()
+
+        if end_of_options {
+            families#.push(OptionToken(family = OptionFamily::Path, token = string::from(view)))
+            i = i + 1
+            continue
+        }
+
+        if view == "--" {
+            end_of_options = true
+            i = i + 1
+            continue
+        }
+
+        if is_forbidden_token(view) {
+            auto err# = string::from("Flag '")
+            err#.push_str(view)
+            err#.push_str("' is not allowed in MCP search")
+            return Result<Vec<OptionToken>, string>::Err(cede err)
+        }
+
+        if view.starts_with("--") {
+            // Attached long options
+            if view.starts_with("--glob=") {
+                families#.push(OptionToken(family = OptionFamily::Glob, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--type=") {
+                families#.push(OptionToken(family = OptionFamily::TypeFilter, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--type-not=") {
+                families#.push(OptionToken(family = OptionFamily::ExcludeType, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--regexp=") || view.starts_with("--file=") {
+                families#.push(OptionToken(family = OptionFamily::PatternSource, token = string::from(view)))
+                pattern_source_seen = true
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--max-count=") {
+                families#.push(OptionToken(family = OptionFamily::MaxPerFile, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--max-columns=") {
+                families#.push(OptionToken(family = OptionFamily::MaxColumns, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--max-total-matches=") {
+                families#.push(OptionToken(family = OptionFamily::MaxTotalMatches, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--max-result-bytes=") {
+                families#.push(OptionToken(family = OptionFamily::MaxResultBytes, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--max-files-with-matches=") {
+                families#.push(OptionToken(family = OptionFamily::MaxFiles, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--sort=") || view.starts_with("--sortr=") {
+                families#.push(OptionToken(family = OptionFamily::Sort, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--context=") || view.starts_with("--before-context=") || view.starts_with("--after-context=") {
+                families#.push(OptionToken(family = OptionFamily::Context, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--max-block-lines=") {
+                families#.push(OptionToken(family = OptionFamily::MaxBlockLines, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+
+            // Two-token value-taking long options
+            if view == "--glob" || view == "--type" || view == "--type-not" || view == "--regexp" ||
+               view == "--file" || view == "--max-count" || view == "--max-columns" ||
+               view == "--max-total-matches" || view == "--max-result-bytes" ||
+               view == "--max-files-with-matches" || view == "--sort" || view == "--sortr" ||
+               view == "--context" || view == "--before-context" || view == "--after-context" ||
+               view == "--max-block-lines" {
+                if i + 1 >= num_args {
+                    auto err# = string::from("Option '")
+                    err#.push_str(view)
+                    err#.push_str("' requires a value")
+                    return Result<Vec<OptionToken>, string>::Err(cede err)
+                }
+                auto fam# = OptionFamily::Glob
+                if view == "--type" { fam = OptionFamily::TypeFilter }
+                else if view == "--type-not" { fam = OptionFamily::ExcludeType }
+                else if view == "--regexp" || view == "--file" { fam = OptionFamily::PatternSource; pattern_source_seen = true }
+                else if view == "--max-count" { fam = OptionFamily::MaxPerFile }
+                else if view == "--max-columns" { fam = OptionFamily::MaxColumns }
+                else if view == "--max-total-matches" { fam = OptionFamily::MaxTotalMatches }
+                else if view == "--max-result-bytes" { fam = OptionFamily::MaxResultBytes }
+                else if view == "--max-files-with-matches" { fam = OptionFamily::MaxFiles }
+                else if view == "--sort" || view == "--sortr" { fam = OptionFamily::Sort }
+                else if view == "--context" || view == "--before-context" || view == "--after-context" { fam = OptionFamily::Context }
+                else if view == "--max-block-lines" { fam = OptionFamily::MaxBlockLines }
+
+                families#.push(OptionToken(family = fam, token = string::from(view)))
+                i = i + 2:usize
+                continue
+            }
+
+            // Zero-argument long options
+            if view == "--extended-regexp" || view == "--regex-mode" || view == "--fixed-strings" {
+                families#.push(OptionToken(family = OptionFamily::PatternMode, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--word-regexp" || view == "--line-regexp" {
+                families#.push(OptionToken(family = OptionFamily::MatchBoundary, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--ignore-case" || view == "--smart-case" {
+                families#.push(OptionToken(family = OptionFamily::CaseMode, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--def-first" || view == "--no-def-first" {
+                families#.push(OptionToken(family = OptionFamily::DefFirst, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--block" || view == "--no-block" || view == "--context-block" {
+                families#.push(OptionToken(family = OptionFamily::Block, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--scope" || view == "--no-scope" {
+                families#.push(OptionToken(family = OptionFamily::Scope, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--hidden" {
+                families#.push(OptionToken(family = OptionFamily::Hidden, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--no-ignore" {
+                families#.push(OptionToken(family = OptionFamily::NoIgnore, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--no-prefilter" {
+                families#.push(OptionToken(family = OptionFamily::NoPrefilter, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--line-number" || view == "--no-line-number" {
+                families#.push(OptionToken(family = OptionFamily::LineNumber, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+
+            // Reject any unrecognized -- option
+            auto err# = string::from("Unknown option '")
+            err#.push_str(view)
+            err#.push_str("'")
+            return Result<Vec<OptionToken>, string>::Err(cede err)
+        }
+
+        if view.starts_with("-") {
+            if view == "-" {
+                families#.push(OptionToken(family = OptionFamily::Path, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+
+            // Parse short flag cluster or attached value
+            auto j# = 1:usize
+            loop j < view.len {
+                auto ch = view.byte_at(j)
+                if ch == ('q' as char) || ch == ('c' as char) || ch == ('l' as char) ||
+                   ch == ('v' as char) || ch == ('o' as char) || ch == ('h' as char) ||
+                   ch == ('V' as char) {
+                    auto err# = string::from("Flag '-")
+                    err#.push_str(view.substr(j, 1:usize))
+                    err#.push_str("' is not allowed in MCP search")
+                    return Result<Vec<OptionToken>, string>::Err(cede err)
+                }
+
+                if ch == ('F' as char) || ch == ('E' as char) {
+                    auto tok# = string::from("-")
+                    tok#.push_str(view.substr(j, 1:usize))
+                    families#.push(OptionToken(family = OptionFamily::PatternMode, token = cede tok))
+                    j = j + 1
+                    continue
+                }
+                if ch == ('w' as char) || ch == ('x' as char) {
+                    auto tok# = string::from("-")
+                    tok#.push_str(view.substr(j, 1:usize))
+                    families#.push(OptionToken(family = OptionFamily::MatchBoundary, token = cede tok))
+                    j = j + 1
+                    continue
+                }
+                if ch == ('i' as char) || ch == ('S' as char) {
+                    auto tok# = string::from("-")
+                    tok#.push_str(view.substr(j, 1:usize))
+                    families#.push(OptionToken(family = OptionFamily::CaseMode, token = cede tok))
+                    j = j + 1
+                    continue
+                }
+                if ch == ('n' as char) || ch == ('N' as char) {
+                    auto tok# = string::from("-")
+                    tok#.push_str(view.substr(j, 1:usize))
+                    families#.push(OptionToken(family = OptionFamily::LineNumber, token = cede tok))
+                    j = j + 1
+                    continue
+                }
+
+                if ch == ('g' as char) || ch == ('t' as char) || ch == ('T' as char) ||
+                   ch == ('e' as char) || ch == ('f' as char) || ch == ('m' as char) ||
+                   ch == ('A' as char) || ch == ('B' as char) || ch == ('C' as char) {
+                    auto fam# = OptionFamily::Glob
+                    if ch == ('t' as char) { fam = OptionFamily::TypeFilter }
+                    else if ch == ('T' as char) { fam = OptionFamily::ExcludeType }
+                    else if ch == ('e' as char) || ch == ('f' as char) { fam = OptionFamily::PatternSource; pattern_source_seen = true }
+                    else if ch == ('m' as char) { fam = OptionFamily::MaxPerFile }
+                    else if ch == ('A' as char) || ch == ('B' as char) || ch == ('C' as char) { fam = OptionFamily::Context }
+
+                    if j + 1 < view.len {
+                        // Attached value: rest of this token
+                        families#.push(OptionToken(family = fam, token = string::from(view)))
+                        break
+                    } else {
+                        // Separate value: next token
+                        if i + 1 >= num_args {
+                            auto err# = string::from("Option '-")
+                            err#.push_str(view.substr(j, 1:usize))
+                            err#.push_str("' requires a value")
+                            return Result<Vec<OptionToken>, string>::Err(cede err)
+                        }
+                        families#.push(OptionToken(family = fam, token = string::from(view)))
+                        i = i + 1 // consume next token as value
+                        break
+                    }
+                }
+
+                // Any other short flag character is unknown
+                auto err# = string::from("Unknown option '-")
+                err#.push_str(view.substr(j, 1:usize))
+                err#.push_str("'")
+                return Result<Vec<OptionToken>, string>::Err(cede err)
+            }
+            i = i + 1
+            continue
+        }
+
+        // Positional argument
+        if !pattern_source_seen {
+            families#.push(OptionToken(family = OptionFamily::PatternSource, token = string::from(view)))
+            pattern_source_seen = true
+        } else {
+            families#.push(OptionToken(family = OptionFamily::Path, token = string::from(view)))
+        }
+        i = i + 1
+    }
+
+    return Result<Vec<OptionToken>, string>::Ok(cede families)
+}
+
+pub fn find_family_token(tokens: Vec<OptionToken>, target: OptionFamily) -> Option<string> {
+    auto i# = 0:usize
+    loop i < tokens.len() {
+        auto &ot = tokens.borrow(i)
+        auto matched# = false
+        match ot.family {
+            auto OptionFamily::None => {
+                match target { auto OptionFamily::None => { matched = true } _ => {} }
+            }
+            auto OptionFamily::PatternMode => {
+                match target { auto OptionFamily::PatternMode => { matched = true } _ => {} }
+            }
+            auto OptionFamily::PatternSource => {
+                match target { auto OptionFamily::PatternSource => { matched = true } _ => {} }
+            }
+            auto OptionFamily::MatchBoundary => {
+                match target { auto OptionFamily::MatchBoundary => { matched = true } _ => {} }
+            }
+            auto OptionFamily::CaseMode => {
+                match target { auto OptionFamily::CaseMode => { matched = true } _ => {} }
+            }
+            auto OptionFamily::Path => {
+                match target { auto OptionFamily::Path => { matched = true } _ => {} }
+            }
+            auto OptionFamily::Glob => {
+                match target { auto OptionFamily::Glob => { matched = true } _ => {} }
+            }
+            auto OptionFamily::TypeFilter => {
+                match target { auto OptionFamily::TypeFilter => { matched = true } _ => {} }
+            }
+            auto OptionFamily::MaxTotalMatches => {
+                match target { auto OptionFamily::MaxTotalMatches => { matched = true } _ => {} }
+            }
+            auto OptionFamily::MaxResultBytes => {
+                match target { auto OptionFamily::MaxResultBytes => { matched = true } _ => {} }
+            }
+            auto OptionFamily::MaxPerFile => {
+                match target { auto OptionFamily::MaxPerFile => { matched = true } _ => {} }
+            }
+            auto OptionFamily::MaxFiles => {
+                match target { auto OptionFamily::MaxFiles => { matched = true } _ => {} }
+            }
+            auto OptionFamily::DefFirst => {
+                match target { auto OptionFamily::DefFirst => { matched = true } _ => {} }
+            }
+            auto OptionFamily::Block => {
+                match target { auto OptionFamily::Block => { matched = true } _ => {} }
+            }
+            auto OptionFamily::Scope => {
+                match target { auto OptionFamily::Scope => { matched = true } _ => {} }
+            }
+            auto OptionFamily::Sort => {
+                match target { auto OptionFamily::Sort => { matched = true } _ => {} }
+            }
+            auto OptionFamily::Context => {
+                match target { auto OptionFamily::Context => { matched = true } _ => {} }
+            }
+            auto OptionFamily::ForbiddenInMcp => {
+                match target { auto OptionFamily::ForbiddenInMcp => { matched = true } _ => {} }
+            }
+            auto OptionFamily::ExcludeType => {
+                match target { auto OptionFamily::ExcludeType => { matched = true } _ => {} }
+            }
+            auto OptionFamily::MaxColumns => {
+                match target { auto OptionFamily::MaxColumns => { matched = true } _ => {} }
+            }
+            auto OptionFamily::Hidden => {
+                match target { auto OptionFamily::Hidden => { matched = true } _ => {} }
+            }
+            auto OptionFamily::NoIgnore => {
+                match target { auto OptionFamily::NoIgnore => { matched = true } _ => {} }
+            }
+            auto OptionFamily::NoPrefilter => {
+                match target { auto OptionFamily::NoPrefilter => { matched = true } _ => {} }
+            }
+            auto OptionFamily::LineNumber => {
+                match target { auto OptionFamily::LineNumber => { matched = true } _ => {} }
+            }
+            auto OptionFamily::MaxBlockLines => {
+                match target { auto OptionFamily::MaxBlockLines => { matched = true } _ => {} }
+            }
+        }
+        if matched {
+            return Option<string>::Some(ot.token.clone())
+        }
+        i = i + 1
+    }
+    return Option<string>::None
+}
+
+pub fn has_family(tokens: Vec<OptionToken>, target: OptionFamily) -> bool {
+    return find_family_token(tokens, target).is_some()
+}
+
+fn parse_string_param(node: JsonNode, key: str) -> Result<ParamStringState, string> {
+    match node {
+        auto JsonNode::StrNode(&s) => {
+            return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = s.clone()))
+        }
+        _ => {
+            auto err# = string::from("Invalid params: '")
+            err#.push_str(key)
+            err#.push_str("' must be a string")
+            return Result<ParamStringState, string>::Err(cede err)
+        }
+    }
+}
+
+fn parse_nullable_usize_param(node: JsonNode, key: str, min_val: usize, max_val: usize) -> Result<ParamUsizeState, string> {
+    match node {
+        auto JsonNode::NullNode(_) => {
+            return Result<ParamUsizeState, string>::Ok(ParamUsizeState(state = 1:u8, value = 0:usize))
+        }
+        auto JsonNode::NumNode(f) => {
+            if is_finite(f) && f >= (min_val as f64) && f == floor(f) && (f as usize) <= max_val {
+                return Result<ParamUsizeState, string>::Ok(ParamUsizeState(state = 2:u8, value = f as usize))
+            }
+            auto err# = string::from("Invalid params: '")
+            err#.push_str(key)
+            if min_val > 0 {
+                err#.push_str("' must be an integer >= ")
+                err#.push_str(u64_to_string(min_val as u64).as_str())
+                err#.push_str(" and <= ")
+            } else {
+                err#.push_str("' must be a non-negative integer <= ")
+            }
+            err#.push_str(u64_to_string(max_val as u64).as_str())
+            return Result<ParamUsizeState, string>::Err(cede err)
+        }
+        _ => {
+            auto err# = string::from("Invalid params: '")
+            err#.push_str(key)
+            err#.push_str("' must be an integer or null")
+            return Result<ParamUsizeState, string>::Err(cede err)
+        }
+    }
+}
+
+fn parse_bool_param(node: JsonNode, key: str) -> Result<ParamBoolState, string> {
+    match node {
+        auto JsonNode::BoolNode(b) => {
+            return Result<ParamBoolState, string>::Ok(ParamBoolState(state = 2:u8, value = b))
+        }
+        _ => {
+            auto err# = string::from("Invalid params: '")
+            err#.push_str(key)
+            err#.push_str("' must be a boolean")
+            return Result<ParamBoolState, string>::Err(cede err)
+        }
+    }
+}
+
+fn parse_vec_string_param(node: JsonNode, key: str, min_items: usize) -> Result<ParamVecState, string> {
+    match node {
+        auto JsonNode::ArrayNode(&arr) => {
+            if min_items > 0 && arr.len() < min_items {
+                auto err# = string::from("Invalid params: '")
+                err#.push_str(key)
+                err#.push_str("' must have at least ")
+                err#.push_str(u64_to_string(min_items as u64).as_str())
+                err#.push_str(" item(s)")
+                return Result<ParamVecState, string>::Err(cede err)
+            }
+            auto res# = Vec<string>::new()
+            auto i# = 0:usize
+            loop i < arr.len() {
+                auto &item = arr.borrow(i)
+                match item {
+                    auto JsonNode::StrNode(&s) => {
+                        res#.push(s.clone())
+                    }
+                    _ => {
+                        auto err# = string::from("Invalid params: '")
+                        err#.push_str(key)
+                        err#.push_str("' items must be strings")
+                        return Result<ParamVecState, string>::Err(cede err)
+                    }
+                }
+                i = i + 1
+            }
+            return Result<ParamVecState, string>::Ok(ParamVecState(state = 2:u8, value = cede res))
+        }
+        _ => {
+            auto err# = string::from("Invalid params: '")
+            err#.push_str(key)
+            err#.push_str("' must be an array of strings")
+            return Result<ParamVecState, string>::Err(cede err)
+        }
+    }
+}
+
+fn parse_nullable_size_param(node: JsonNode, key: str) -> Result<ParamStringState, string> {
+    match node {
+        auto JsonNode::NullNode(_) => {
+            return Result<ParamStringState, string>::Ok(ParamStringState(state = 1:u8, value = string::new()))
+        }
+        auto JsonNode::StrNode(&s) => {
+            auto p_res = parse_size_bytes_strict(s.as_str(), key)
+            if p_res.is_err() {
+                auto err# = string::from("Invalid params: ")
+                err#.push_str(p_res.unwrap_err().as_str())
+                return Result<ParamStringState, string>::Err(cede err)
+            }
+            if p_res.unwrap() > MCP_MAX_SAFE_INTEGER {
+                auto err# = string::from("Invalid params: '")
+                err#.push_str(key)
+                err#.push_str("' exceeds MCP maximum safe integer (9007199254740991)")
+                return Result<ParamStringState, string>::Err(cede err)
+            }
+            return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = s.clone()))
+        }
+        auto JsonNode::NumNode(f) => {
+            if is_finite(f) && f >= 0.0 && f == floor(f) && f <= 9007199254740991.0 {
+                return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = u64_to_string(f as u64)))
+            }
+            auto err# = string::from("Invalid params: '")
+            err#.push_str(key)
+            err#.push_str("' must be a non-negative integer or valid size string")
+            return Result<ParamStringState, string>::Err(cede err)
+        }
+        _ => {
+            auto err# = string::from("Invalid params: '")
+            err#.push_str(key)
+            err#.push_str("' must be a string, integer, or null")
+            return Result<ParamStringState, string>::Err(cede err)
+        }
+    }
+}
+
+pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
+    match args_node {
+        auto JsonNode::ObjectNode(&map) => {
+            auto pattern# = ParamStringState(state = 0:u8, value = string::new())
+            auto patterns# = ParamVecState(state = 0:u8, value = Vec<string>::new())
+            auto mode# = ParamStringState(state = 0:u8, value = string::new())
+            auto match_boundary# = ParamStringState(state = 0:u8, value = string::new())
+            auto case_mode# = ParamStringState(state = 0:u8, value = string::new())
+            auto paths# = ParamVecState(state = 0:u8, value = Vec<string>::new())
+            auto path# = ParamStringState(state = 0:u8, value = string::new())
+            auto globs# = ParamVecState(state = 0:u8, value = Vec<string>::new())
+            auto types# = ParamVecState(state = 0:u8, value = Vec<string>::new())
+            auto type_val# = ParamStringState(state = 0:u8, value = string::new())
+            auto sort# = ParamStringState(state = 0:u8, value = string::new())
+            auto context# = ParamUsizeState(state = 0:u8, value = 0:usize)
+            auto def_first# = ParamBoolState(state = 0:u8, value = false)
+            auto block# = ParamBoolState(state = 0:u8, value = false)
+            auto max_block_lines# = ParamUsizeState(state = 0:u8, value = 0:usize)
+            auto scope# = ParamBoolState(state = 0:u8, value = false)
+            auto max_total_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
+            auto max_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
+            auto max_result_bytes# = ParamStringState(state = 0:u8, value = string::new())
+            auto max_bytes# = ParamStringState(state = 0:u8, value = string::new())
+            auto max_per_file# = ParamUsizeState(state = 0:u8, value = 0:usize)
+            auto max_files_with_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
+            auto raw_args_state# = ParamVecState(state = 0:u8, value = Vec<string>::new())
+
+            auto iter# = map.iter()
+            loop true {
+                auto opt = iter#.next_ref()
+                if opt.is_none() { break }
+                auto entry = opt.unwrap()
+                auto &k_str = entry.key()
+                auto k = k_str.as_str()
+                auto &node = entry.val()
+
+                if k == "pattern" {
+                    auto r = parse_string_param(node, "pattern")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    pattern = r.unwrap()
+                } else if k == "patterns" {
+                    auto r = parse_vec_string_param(node, "patterns", 1:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    patterns = r.unwrap()
+                } else if k == "mode" {
+                    auto r = parse_string_param(node, "mode")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    mode = r.unwrap()
+                } else if k == "match_boundary" {
+                    auto r = parse_string_param(node, "match_boundary")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    match_boundary = r.unwrap()
+                } else if k == "case_mode" {
+                    auto r = parse_string_param(node, "case_mode")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    case_mode = r.unwrap()
+                } else if k == "paths" {
+                    auto r = parse_vec_string_param(node, "paths", 1:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    paths = r.unwrap()
+                } else if k == "path" {
+                    auto r = parse_string_param(node, "path")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    path = r.unwrap()
+                } else if k == "globs" {
+                    auto r = parse_vec_string_param(node, "globs", 1:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    globs = r.unwrap()
+                } else if k == "types" {
+                    auto r = parse_vec_string_param(node, "types", 1:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    types = r.unwrap()
+                } else if k == "type" {
+                    auto r = parse_string_param(node, "type")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    type_val = r.unwrap()
+                } else if k == "sort" {
+                    auto r = parse_string_param(node, "sort")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    sort = r.unwrap()
+                } else if k == "context" {
+                    auto r = parse_nullable_usize_param(node, "context", 0:usize, 1000:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    context = r.unwrap()
+                } else if k == "def_first" {
+                    auto r = parse_bool_param(node, "def_first")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    def_first = r.unwrap()
+                } else if k == "block" {
+                    auto r = parse_bool_param(node, "block")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    block = r.unwrap()
+                } else if k == "max_block_lines" {
+                    auto r = parse_nullable_usize_param(node, "max_block_lines", 1:usize, 1000:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    max_block_lines = r.unwrap()
+                } else if k == "scope" {
+                    auto r = parse_bool_param(node, "scope")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    scope = r.unwrap()
+                } else if k == "max_total_matches" {
+                    auto r = parse_nullable_usize_param(node, "max_total_matches", 0:usize, 9007199254740991:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    max_total_matches = r.unwrap()
+                } else if k == "max_matches" {
+                    auto r = parse_nullable_usize_param(node, "max_matches", 0:usize, 9007199254740991:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    max_matches = r.unwrap()
+                } else if k == "max_result_bytes" {
+                    auto r = parse_nullable_size_param(node, "max_result_bytes")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    max_result_bytes = r.unwrap()
+                } else if k == "max_bytes" {
+                    auto r = parse_nullable_size_param(node, "max_bytes")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    max_bytes = r.unwrap()
+                } else if k == "max_per_file" {
+                    auto r = parse_nullable_usize_param(node, "max_per_file", 0:usize, 9007199254740991:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    max_per_file = r.unwrap()
+                } else if k == "max_files_with_matches" {
+                    auto r = parse_nullable_usize_param(node, "max_files_with_matches", 0:usize, 9007199254740991:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    max_files_with_matches = r.unwrap()
+                } else if k == "args" {
+                    auto r = parse_vec_string_param(node, "args", 0:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    raw_args_state = r.unwrap()
+                } else {
+                    auto err# = string::from("Invalid params: unexpected property '")
+                    err#.push_str(k)
+                    err#.push_str("'")
+                    return Result<Vec<string>, string>::Err(cede err)
+                }
+            }
+
+            auto raw_args# = Vec<string>::new()
+            if raw_args_state.state == 2:u8 {
+                auto ai# = 0:usize
+                loop ai < raw_args_state.value.len() {
+                    raw_args#.push(raw_args_state.value.borrow(ai).clone())
+                    ai = ai + 1
+                }
+            }
+
+            // 3. Mutual exclusions
+            if pattern.state == 2:u8 && patterns.state == 2:u8 {
+                return Result<Vec<string>, string>::Err(string::from("Cannot provide both 'pattern' and 'patterns'"))
+            }
+            if path.state == 2:u8 && paths.state == 2:u8 {
+                return Result<Vec<string>, string>::Err(string::from("Cannot provide both 'path' and 'paths'"))
+            }
+            if type_val.state == 2:u8 && types.state == 2:u8 {
+                return Result<Vec<string>, string>::Err(string::from("Cannot provide both 'type' and 'types'"))
+            }
+            if max_matches.state != 0:u8 && max_total_matches.state != 0:u8 {
+                return Result<Vec<string>, string>::Err(string::from("Cannot provide both 'max_matches' and 'max_total_matches'"))
+            }
+            if max_bytes.state != 0:u8 && max_result_bytes.state != 0:u8 {
+                return Result<Vec<string>, string>::Err(string::from("Cannot provide both 'max_bytes' and 'max_result_bytes'"))
+            }
+
+            // 4. Enum validation
+            if mode.state == 2:u8 {
+                if mode.value.as_str() != "literal" && mode.value.as_str() != "regex" {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: 'mode' must be 'literal' or 'regex'"))
+                }
+            }
+            if match_boundary.state == 2:u8 {
+                if match_boundary.value.as_str() != "substring" && match_boundary.value.as_str() != "word" && match_boundary.value.as_str() != "line" {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: 'match_boundary' must be 'substring', 'word', or 'line'"))
+                }
+            }
+            if case_mode.state == 2:u8 {
+                if case_mode.value.as_str() != "smart" && case_mode.value.as_str() != "sensitive" && case_mode.value.as_str() != "ignore" {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: 'case_mode' must be 'smart', 'sensitive', or 'ignore'"))
+                }
+            }
+            if sort.state == 2:u8 {
+                if sort.value.as_str() != "path" && sort.value.as_str() != "reverse_path" && sort.value.as_str() != "none" {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: 'sort' must be 'path', 'reverse_path', or 'none'"))
+                }
+            }
+
+            // 5. Classify raw args
+            auto has_typed_pattern = pattern.state == 2:u8 || patterns.state == 2:u8
+            auto families_res = classify_args(raw_args.clone(), has_typed_pattern)
+            if families_res.is_err() {
+                return Result<Vec<string>, string>::Err(families_res.unwrap_err())
+            }
+            auto families = families_res.unwrap()
+
+            // 6. Check pattern requirement
+            if !has_typed_pattern && !has_family(families, OptionFamily::PatternSource) {
+                return Result<Vec<string>, string>::Err(string::from("Invalid params: 'pattern' is required"))
+            }
+
+            // 7. Conflict matrix against args
+            auto tok_ps = find_family_token(families, OptionFamily::PatternSource)
+            if tok_ps.is_some() && has_typed_pattern {
+                auto err# = string::from("Invalid params: typed property 'pattern' conflicts with args option '")
+                err#.push_str(tok_ps.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_pm = find_family_token(families, OptionFamily::PatternMode)
+            if tok_pm.is_some() && mode.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'mode' conflicts with args option '")
+                err#.push_str(tok_pm.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_mb = find_family_token(families, OptionFamily::MatchBoundary)
+            if tok_mb.is_some() && match_boundary.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'match_boundary' conflicts with args option '")
+                err#.push_str(tok_mb.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_cm = find_family_token(families, OptionFamily::CaseMode)
+            if tok_cm.is_some() && case_mode.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'case_mode' conflicts with args option '")
+                err#.push_str(tok_cm.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_p = find_family_token(families, OptionFamily::Path)
+            if tok_p.is_some() && (path.state == 2:u8 || paths.state == 2:u8) {
+                auto err# = string::from("Invalid params: typed property 'path' conflicts with positional arg '")
+                err#.push_str(tok_p.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_g = find_family_token(families, OptionFamily::Glob)
+            if tok_g.is_some() && globs.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'globs' conflicts with args option '")
+                err#.push_str(tok_g.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_t = find_family_token(families, OptionFamily::TypeFilter)
+            if tok_t.is_some() && (type_val.state == 2:u8 || types.state == 2:u8) {
+                auto err# = string::from("Invalid params: typed property 'type' conflicts with args option '")
+                err#.push_str(tok_t.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_mtm = find_family_token(families, OptionFamily::MaxTotalMatches)
+            if tok_mtm.is_some() && (max_total_matches.state != 0:u8 || max_matches.state != 0:u8) {
+                auto err# = string::from("Invalid params: typed property 'max_matches' conflicts with args option '")
+                err#.push_str(tok_mtm.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_mrb = find_family_token(families, OptionFamily::MaxResultBytes)
+            if tok_mrb.is_some() && (max_result_bytes.state != 0:u8 || max_bytes.state != 0:u8) {
+                auto err# = string::from("Invalid params: typed property 'max_bytes' conflicts with args option '")
+                err#.push_str(tok_mrb.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_mpf = find_family_token(families, OptionFamily::MaxPerFile)
+            if tok_mpf.is_some() && max_per_file.state != 0:u8 {
+                auto err# = string::from("Invalid params: typed property 'max_per_file' conflicts with args option '")
+                err#.push_str(tok_mpf.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_mf = find_family_token(families, OptionFamily::MaxFiles)
+            if tok_mf.is_some() && max_files_with_matches.state != 0:u8 {
+                auto err# = string::from("Invalid params: typed property 'max_files_with_matches' conflicts with args option '")
+                err#.push_str(tok_mf.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_s = find_family_token(families, OptionFamily::Sort)
+            if tok_s.is_some() && sort.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'sort' conflicts with args option '")
+                err#.push_str(tok_s.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_c = find_family_token(families, OptionFamily::Context)
+            if tok_c.is_some() && context.state != 0:u8 {
+                auto err# = string::from("Invalid params: typed property 'context' conflicts with args option '")
+                err#.push_str(tok_c.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_df = find_family_token(families, OptionFamily::DefFirst)
+            if tok_df.is_some() && def_first.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'def_first' conflicts with args option '")
+                err#.push_str(tok_df.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_b = find_family_token(families, OptionFamily::Block)
+            if tok_b.is_some() && block.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'block' conflicts with args option '")
+                err#.push_str(tok_b.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_mbl = find_family_token(families, OptionFamily::MaxBlockLines)
+            if tok_mbl.is_some() && max_block_lines.state != 0:u8 {
+                auto err# = string::from("Invalid params: typed property 'max_block_lines' conflicts with args option '")
+                err#.push_str(tok_mbl.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto is_block_active# = false
+            if block.state == 2:u8 && block.value {
+                is_block_active = true
+            } else if block.state == 0:u8 {
+                auto tok_b_check = find_family_token(families, OptionFamily::Block)
+                if tok_b_check.is_some() {
+                    auto bt = tok_b_check.unwrap()
+                    if bt.as_str() == "--block" || bt.as_str() == "--context-block" {
+                        is_block_active = true
+                    }
+                }
+            }
+
+            if !is_block_active && (max_block_lines.state == 2:u8 || tok_mbl.is_some()) {
+                return Result<Vec<string>, string>::Err(string::from("Invalid params: 'max_block_lines' requires 'block' to be enabled"))
+            }
+
+            auto tok_sc = find_family_token(families, OptionFamily::Scope)
+            if tok_sc.is_some() && scope.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'scope' conflicts with args option '")
+                err#.push_str(tok_sc.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            // 8. Build final CLI argument vector
+            auto cli_args# = Vec<string>::new()
+            cli_args#.push(string::from("trg"))
+            cli_args#.push(string::from("--mcp"))
+
+            // Pattern
+            if pattern.state == 2:u8 {
+                cli_args#.push(string::from("-e"))
+                cli_args#.push(pattern.value.clone())
+            } else if patterns.state == 2:u8 {
+                auto pi# = 0:usize
+                loop pi < patterns.value.len() {
+                    cli_args#.push(string::from("-e"))
+                    cli_args#.push(patterns.value.borrow(pi).clone())
+                    pi = pi + 1
+                }
+            }
+
+            // Mode
+            if mode.state == 2:u8 {
+                if mode.value.as_str() == "literal" {
+                    cli_args#.push(string::from("-F"))
+                } else {
+                    cli_args#.push(string::from("-E"))
+                }
+            } else if !has_family(families, OptionFamily::PatternMode) {
+                cli_args#.push(string::from("-F"))
+            }
+
+            // Match boundary
+            if match_boundary.state == 2:u8 {
+                if match_boundary.value.as_str() == "word" {
+                    cli_args#.push(string::from("-w"))
+                } else if match_boundary.value.as_str() == "line" {
+                    cli_args#.push(string::from("-x"))
+                }
+            }
+
+            // Case mode
+            if case_mode.state == 2:u8 {
+                if case_mode.value.as_str() == "smart" {
+                    cli_args#.push(string::from("-S"))
+                } else if case_mode.value.as_str() == "ignore" {
+                    cli_args#.push(string::from("-i"))
+                }
+            }
+
+            // Sort
+            if sort.state == 2:u8 {
+                if sort.value.as_str() == "path" {
+                    cli_args#.push(string::from("--sort=path"))
+                } else if sort.value.as_str() == "reverse_path" {
+                    cli_args#.push(string::from("--sortr=path"))
+                } else if sort.value.as_str() == "none" {
+                    cli_args#.push(string::from("--sort=none"))
+                }
+            } else if !has_family(families, OptionFamily::Sort) {
+                cli_args#.push(string::from("--sort=path"))
+            }
+
+            // Def-first
+            if def_first.state == 2:u8 && def_first.value {
+                cli_args#.push(string::from("--def-first"))
+            }
+
+            // Block
+            if block.state == 2:u8 && block.value {
+                cli_args#.push(string::from("--block"))
+            }
+
+            // Max block lines
+            if max_block_lines.state == 2:u8 {
+                auto s# = string::from("--max-block-lines=")
+                s#.push_str(u64_to_string(max_block_lines.value as u64).as_str())
+                cli_args#.push(cede s)
+            }
+
+            // Scope
+            if scope.state == 2:u8 && scope.value {
+                cli_args#.push(string::from("--scope"))
+            }
+
+            // Context
+            if context.state == 2:u8 {
+                cli_args#.push(string::from("-C"))
+                cli_args#.push(u64_to_string(context.value as u64))
+            }
+
+            // Max per file
+            if max_per_file.state == 2:u8 {
+                cli_args#.push(string::from("-m"))
+                cli_args#.push(u64_to_string(max_per_file.value as u64))
+            }
+
+            // Max files with matches
+            if max_files_with_matches.state == 2:u8 {
+                auto s# = string::from("--max-files-with-matches=")
+                s#.push_str(u64_to_string(max_files_with_matches.value as u64).as_str())
+                cli_args#.push(cede s)
+            }
+
+            // Max total matches
+            if max_total_matches.state == 2:u8 {
+                auto s# = string::from("--max-total-matches=")
+                s#.push_str(u64_to_string(max_total_matches.value as u64).as_str())
+                cli_args#.push(cede s)
+            } else if max_matches.state == 2:u8 {
+                auto s# = string::from("--max-total-matches=")
+                s#.push_str(u64_to_string(max_matches.value as u64).as_str())
+                cli_args#.push(cede s)
+            } else if max_total_matches.state == 0:u8 && max_matches.state == 0:u8 {
+                if !has_family(families, OptionFamily::MaxTotalMatches) {
+                    cli_args#.push(string::from("--max-total-matches=50"))
+                }
+            }
+
+            // Max result bytes
+            if max_result_bytes.state == 2:u8 {
+                auto s# = string::from("--max-result-bytes=")
+                s#.push_str(max_result_bytes.value.as_str())
+                cli_args#.push(cede s)
+            } else if max_bytes.state == 2:u8 {
+                auto s# = string::from("--max-result-bytes=")
+                s#.push_str(max_bytes.value.as_str())
+                cli_args#.push(cede s)
+            } else if max_result_bytes.state == 0:u8 && max_bytes.state == 0:u8 {
+                if !has_family(families, OptionFamily::MaxResultBytes) {
+                    cli_args#.push(string::from("--max-result-bytes=64K"))
+                }
+            }
+
+            // Globs
+            if globs.state == 2:u8 {
+                auto gi# = 0:usize
+                loop gi < globs.value.len() {
+                    cli_args#.push(string::from("-g"))
+                    cli_args#.push(globs.value.borrow(gi).clone())
+                    gi = gi + 1
+                }
+            }
+
+            // Types
+            if type_val.state == 2:u8 {
+                cli_args#.push(string::from("-t"))
+                cli_args#.push(type_val.value.clone())
+            } else if types.state == 2:u8 {
+                auto ti# = 0:usize
+                loop ti < types.value.len() {
+                    cli_args#.push(string::from("-t"))
+                    cli_args#.push(types.value.borrow(ti).clone())
+                    ti = ti + 1
+                }
+            }
+
+            // Pass-through raw args
+            auto ri# = 0:usize
+            loop ri < raw_args.len() {
+                cli_args#.push(raw_args.borrow(ri).clone())
+                ri = ri + 1
+            }
+
+            // Paths
+            if path.state == 2:u8 {
+                cli_args#.push(path.value.clone())
+            } else if paths.state == 2:u8 {
+                auto pai# = 0:usize
+                loop pai < paths.value.len() {
+                    cli_args#.push(paths.value.borrow(pai).clone())
+                    pai = pai + 1
+                }
+            } else if !has_family(families, OptionFamily::Path) {
+                cli_args#.push(string::from("."))
+            }
+
+            return Result<Vec<string>, string>::Ok(cede cli_args)
+        }
+        _ => {
+            return Result<Vec<string>, string>::Err(string::from("Invalid params: arguments must be an object"))
+        }
+    }
+}
+
+pub fn validate_mcp_cli_options(opts: CliOptions) -> Result<(), string> {
+    if opts.budget_limits.max_total_matches_enabled && opts.budget_limits.max_total_matches > MCP_MAX_SAFE_INTEGER {
+        return Result<(), string>::Err(string::from("Invalid params: 'max_total_matches' exceeds MCP maximum safe integer (9007199254740991)"))
+    }
+    if opts.budget_limits.max_result_bytes_enabled && opts.budget_limits.max_result_bytes > MCP_MAX_SAFE_INTEGER {
+        return Result<(), string>::Err(string::from("Invalid params: 'max_result_bytes' exceeds MCP maximum safe integer (9007199254740991)"))
+    }
+    if opts.budget_limits.max_files_with_matches_enabled && opts.budget_limits.max_files_with_matches > MCP_MAX_SAFE_INTEGER {
+        return Result<(), string>::Err(string::from("Invalid params: 'max_files_with_matches' exceeds MCP maximum safe integer (9007199254740991)"))
+    }
+    if opts.max_count_enabled && opts.max_count > MCP_MAX_SAFE_INTEGER {
+        return Result<(), string>::Err(string::from("Invalid params: 'max_count' exceeds MCP maximum safe integer (9007199254740991)"))
+    }
+    if opts.max_columns > MCP_MAX_SAFE_INTEGER {
+        return Result<(), string>::Err(string::from("Invalid params: 'max_columns' exceeds MCP maximum safe integer (9007199254740991)"))
+    }
+    if opts.max_block_lines > 1000:usize {
+        return Result<(), string>::Err(string::from("Invalid params: 'max_block_lines' exceeds maximum allowed limit (1000)"))
+    }
+    if opts.before_context > 1000:usize || opts.after_context > 1000:usize {
+        return Result<(), string>::Err(string::from("Invalid params: 'context' exceeds maximum allowed limit (1000)"))
+    }
+    return Result<(), string>::Ok(())
+}

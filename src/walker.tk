@@ -1,8 +1,9 @@
 // Symlink-safe recursive directory walker with error tracking and last-match-wins glob evaluation.
 import core/types::{usize, Addr}
 import core/result::{Result}
+import core/option::{Option}
 import std/vec::{Vec}
-import src/types::{CliOptions, GlobRule, SortMode}
+import src/types::{CliOptions, GlobRule, SortMode, SearchDiagnostic}
 import src/posix::{posix_stat, posix_opendir, posix_readdir, posix_closedir, posix_get_errno}
 import src/ignore::{IgnoreStack}
 import src/glob::{is_glob_allowed}
@@ -25,7 +26,8 @@ fn log_walker_err(path: str, msg: str) {
 
 pub shape WalkResult (
     files: Vec<string>,
-    had_error: bool
+    had_error: bool,
+    diagnostics: Vec<SearchDiagnostic>
 )
 
 fn str_compare(a: str, b: str) -> i32 {
@@ -133,7 +135,8 @@ fn walk_dir_recursive(
     opts: CliOptions,
     ignore_stack#: IgnoreStack,
     collected#: Vec<string>,
-    had_error#: bool
+    had_error#: bool,
+    diagnostics#: Vec<SearchDiagnostic>
 ) {
     if !opts.no_ignore {
         ignore_stack#.push_dir(dir_path.clone())
@@ -141,7 +144,16 @@ fn walk_dir_recursive(
 
     auto dir_res = posix_opendir(dir_path.clone())
     if dir_res.is_err() {
-        log_walker_err(dir_path.as_str(), "Permission denied or unable to open directory")
+        auto err_code = dir_res.unwrap_err()
+        diagnostics#.push(SearchDiagnostic::new(
+            string::from("walk"),
+            Option<string>::Some(dir_path.clone()),
+            string::from("Permission denied or unable to open directory"),
+            Option<i32>::Some(err_code)
+        ))
+        if !opts.mcp_mode {
+            log_walker_err(dir_path.as_str(), "Permission denied or unable to open directory")
+        }
         had_error = true
         if !opts.no_ignore {
             ignore_stack#.pop_dir()
@@ -154,7 +166,16 @@ fn walk_dir_recursive(
     loop true {
         auto entry_res = posix_readdir(dir)
         if entry_res.is_err() {
-            log_walker_err(dir_path.as_str(), "Error reading directory entries")
+            auto err_code = entry_res.unwrap_err()
+            diagnostics#.push(SearchDiagnostic::new(
+                string::from("walk"),
+                Option<string>::Some(dir_path.clone()),
+                string::from("Error reading directory entries"),
+                Option<i32>::Some(err_code)
+            ))
+            if !opts.mcp_mode {
+                log_walker_err(dir_path.as_str(), "Error reading directory entries")
+            }
             had_error = true
             break
         }
@@ -171,7 +192,16 @@ fn walk_dir_recursive(
         auto full_path = build_child_path(dir_path.as_str(), entry_str)
         auto stat_res = posix_stat(full_path.clone())
         if stat_res.is_err() {
-            log_walker_err(full_path.as_str(), "Failed to stat entry")
+            auto err_code = stat_res.unwrap_err()
+            diagnostics#.push(SearchDiagnostic::new(
+                string::from("walk"),
+                Option<string>::Some(full_path.clone()),
+                string::from("Failed to stat entry"),
+                Option<i32>::Some(err_code)
+            ))
+            if !opts.mcp_mode {
+                log_walker_err(full_path.as_str(), "Failed to stat entry")
+            }
             had_error = true
             continue
         }
@@ -194,7 +224,7 @@ fn walk_dir_recursive(
             }
 
             // Recurse into directory
-            walk_dir_recursive(full_path, opts, ignore_stack#, collected#, had_error#)
+            walk_dir_recursive(full_path, opts, ignore_stack#, collected#, had_error#, diagnostics#)
         } else if stat.is_file {
             // Check file ignore rule
             if !opts.no_ignore && ignore_stack.is_ignored(full_path.as_str(), false) {
@@ -223,6 +253,7 @@ fn walk_dir_recursive(
 
 pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
     auto files# = Vec<string>::new()
+    auto diagnostics# = Vec<SearchDiagnostic>::new()
     auto num_paths = opts.paths.len()
     auto had_error# = false
 
@@ -240,7 +271,16 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
 
         auto stat_res = posix_stat(path_arg.clone())
         if stat_res.is_err() {
-            log_walker_err(path_view, "No such file or directory")
+            auto err_code = stat_res.unwrap_err()
+            diagnostics#.push(SearchDiagnostic::new(
+                string::from("walk"),
+                Option<string>::Some(path_arg.clone()),
+                string::from("No such file or directory"),
+                Option<i32>::Some(err_code)
+            ))
+            if !opts.mcp_mode {
+                log_walker_err(path_view, "No such file or directory")
+            }
             had_error = true
             i = i + 1
             continue
@@ -254,7 +294,7 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
             }
         } else if stat.is_dir {
             auto ignore_stack# = IgnoreStack::new()
-            walk_dir_recursive(path_arg.clone(), opts, ignore_stack#, files#, had_error#)
+            walk_dir_recursive(path_arg.clone(), opts, ignore_stack#, files#, had_error#, diagnostics#)
         } else {
             // If it's a symlink at the root argument level, do not follow by default
             if !stat.is_symlink {
@@ -279,6 +319,7 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
 
     return WalkResult(
         files = cede files,
-        had_error = had_error
+        had_error = had_error,
+        diagnostics = cede diagnostics
     )
 }

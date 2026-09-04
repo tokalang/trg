@@ -1,5 +1,6 @@
 // Unified Search Executor for trg.
 import core/str::{str}
+import core/option::{Option}
 import std/vec::{Vec}
 import src/types::{
     CliOptions,
@@ -8,7 +9,8 @@ import src/types::{
     SearchReport,
     GlobalStats,
     ScanPass,
-    OutputFormat
+    OutputFormat,
+    SearchDiagnostic
 }
 import src/matcher::{SearchPlan}
 import src/walker::{collect_search_targets}
@@ -25,23 +27,25 @@ import src/printer::{
 pub fn execute_files_mode(
     opts: CliOptions,
     writer: OutputBudgetWriter
-) -> Result<SearchReport, string> {
+) -> Result<SearchReport, SearchDiagnostic> {
     auto walk_res = collect_search_targets(opts)
     auto global_had_error# = walk_res.had_error
-    auto files = walk_res.files.clone()
+    auto files = cede walk_res.files
     auto num_files = files.len()
+    auto all_diagnostics# = cede walk_res.diagnostics
 
     auto budget_state# = BudgetState::new(opts.budget_limits)
     budget_state.files_selected = num_files
 
     if opts.quiet {
         auto found = num_files > 0
-        return Result<SearchReport, string>::Ok(SearchReport(
+        return Result<SearchReport, SearchDiagnostic>::Ok(SearchReport(
             found_result = found,
             had_error = global_had_error,
             is_broken_pipe = false,
             budget_state = cede budget_state,
-            elapsed_nanos = 0:u64
+            elapsed_nanos = 0:u64,
+            diagnostics = cede all_diagnostics
         ))
     }
 
@@ -53,7 +57,7 @@ pub fn execute_files_mode(
         auto &path_str = files.borrow(f_idx)
         auto wire_str# = path_str.clone()
         wire_str#.push_str("\n")
-        auto batch = OutputBatch(payload_str = cede wire_str, path = path_str.clone(), line_number = 0, is_payload = true)
+        auto batch = OutputBatch::new_payload(cede wire_str, path_str.clone(), 0)
         auto outcome = writer.emit_payload(budget_state#, dummy_frame#, batch)
         match outcome {
             EmitOutcome::Written => {}
@@ -71,19 +75,20 @@ pub fn execute_files_mode(
     }
 
     auto found = f_idx > 0
-    return Result<SearchReport, string>::Ok(SearchReport(
+    return Result<SearchReport, SearchDiagnostic>::Ok(SearchReport(
         found_result = found,
         had_error = global_had_error,
         is_broken_pipe = is_broken_pipe,
         budget_state = cede budget_state,
-        elapsed_nanos = 0:u64
+        elapsed_nanos = 0:u64,
+        diagnostics = cede all_diagnostics
     ))
 }
 
 pub fn execute_search(
     opts: CliOptions,
     writer: OutputBudgetWriter
-) -> Result<SearchReport, string> {
+) -> Result<SearchReport, SearchDiagnostic> {
     if opts.files_mode {
         return execute_files_mode(opts, writer)
     }
@@ -91,25 +96,32 @@ pub fn execute_search(
     // Fail-fast on regex/plan compilation before touching filesystem
     auto plan_res = SearchPlan::create(opts)
     if plan_res.is_err() {
-        return Result<SearchReport, string>::Err(plan_res.unwrap_err())
+        return Result<SearchReport, SearchDiagnostic>::Err(SearchDiagnostic::new(
+            string::from("regex"),
+            Option<string>::None,
+            plan_res.unwrap_err(),
+            Option<i32>::None
+        ))
     }
     auto plan = plan_res.unwrap()
 
     auto walk_res = collect_search_targets(opts)
     auto global_had_error# = walk_res.had_error
-    auto files = walk_res.files.clone()
+    auto files = cede walk_res.files
     auto num_files = files.len()
+    auto all_diagnostics# = cede walk_res.diagnostics
 
     auto budget_state# = BudgetState::new(opts.budget_limits)
     budget_state.files_selected = num_files
 
     if num_files == 0 {
-        return Result<SearchReport, string>::Ok(SearchReport(
+        return Result<SearchReport, SearchDiagnostic>::Ok(SearchReport(
             found_result = false,
             had_error = global_had_error,
             is_broken_pipe = false,
             budget_state = cede budget_state,
-            elapsed_nanos = 0:u64
+            elapsed_nanos = 0:u64,
+            diagnostics = cede all_diagnostics
         ))
     }
 
@@ -141,10 +153,17 @@ pub fn execute_search(
             auto has_m# = false
             {
                 auto &f_state# = file_states#.borrow_mut(i)
-                auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, cur_pass, f_state#)
+                auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, cur_pass, f_state#)
                 is_bp = scan_res.is_broken_pipe
                 had_err = scan_res.had_error
                 has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
+                auto num_diag = scan_res.diagnostics.len()
+                auto di# = 0:usize
+                loop di < num_diag {
+                    auto d = scan_res.diagnostics#.pop().unwrap()
+                    all_diagnostics#.push(cede d)
+                    di = di + 1
+                }
             }
 
             if had_err {
@@ -178,10 +197,14 @@ pub fn execute_search(
                     auto has_m# = false
                     {
                         auto &f_state# = file_states#.borrow_mut(j)
-                        auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, ScanPass::UsagesOnly, f_state#)
+                        auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, ScanPass::UsagesOnly, f_state#)
                         is_bp = scan_res.is_broken_pipe
                         had_err = scan_res.had_error
                         has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
+                        loop scan_res.diagnostics.len() > 0 {
+                            auto d = scan_res.diagnostics#.pop().unwrap()
+                            all_diagnostics#.push(cede d)
+                        }
                     }
 
                     if had_err {
@@ -214,10 +237,17 @@ pub fn execute_search(
             auto has_m# = false
             {
                 auto &f_state# = file_states#.borrow_mut(i)
-                auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, ScanPass::All, f_state#)
+                auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, ScanPass::All, f_state#)
                 is_bp = scan_res.is_broken_pipe
                 had_err = scan_res.had_error
                 has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
+                auto num_diag = scan_res.diagnostics.len()
+                auto di# = 0:usize
+                loop di < num_diag {
+                    auto d = scan_res.diagnostics#.pop().unwrap()
+                    all_diagnostics#.push(cede d)
+                    di = di + 1
+                }
             }
 
             if had_err {
@@ -239,12 +269,13 @@ pub fn execute_search(
     }
 
     auto found = found_any_match || budget_state.matched_lines_observed > 0
-    return Result<SearchReport, string>::Ok(SearchReport(
+    return Result<SearchReport, SearchDiagnostic>::Ok(SearchReport(
         found_result = found,
         had_error = global_had_error,
         is_broken_pipe = broken_pipe_occurred,
         budget_state = cede budget_state,
-        elapsed_nanos = 0:u64
+        elapsed_nanos = 0:u64,
+        diagnostics = cede all_diagnostics
     ))
 }
 

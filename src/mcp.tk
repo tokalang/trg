@@ -1,218 +1,23 @@
 // Native stdio JSON-RPC 2.0 MCP (Model Context Protocol) server for trg.
 import core/str::{str}
-import core/option::{Option}
-import core/result::{Result}
 import std/vec::{Vec}
 import std/hashmap::{HashMap}
 import stdx/serde/json::{JsonNode}
 import std/math::{is_finite, floor}
-import src/types::{CliOptions, OutputFormat}
+import src/types::{CliOptions, OutputFormat, SearchReport, SearchDiagnostic, BudgetState}
 import src/posix::{posix_write_stdout, posix_read_stdin_line}
 import src/cli::{parse_cli_args_from_vec}
-import src/parse::{parse_usize_strict, parse_size_bytes_strict}
 import src/printer::{
     OutputBudgetWriter,
-    EmitOutcome,
     u64_to_string,
     i64_to_string,
     json_escape
 }
 import src/executor::{execute_search, finalize_search}
-
-pub shape McpParamError (
-    message: string
-)
-
-fn get_string_param(map: HashMap<string, JsonNode>, key: str) -> Result<Option<string>, McpParamError> {
-    match map.try_borrow(string::from(key)) {
-        auto Option<&JsonNode>::Some(&node) => {
-            match node {
-                auto JsonNode::StrNode(&s) => {
-                    return Result<Option<string>, McpParamError>::Ok(Option<string>::Some(s.clone()))
-                }
-                _ => {
-                    auto err# = string::from("Invalid params: '")
-                    err#.push_str(key)
-                    err#.push_str("' must be a string")
-                    return Result<Option<string>, McpParamError>::Err(McpParamError(message = cede err))
-                }
-            }
-        }
-        _ => {
-            return Result<Option<string>, McpParamError>::Ok(Option<string>::None)
-        }
-    }
-}
-
-fn get_bool_param(map: HashMap<string, JsonNode>, key: str) -> Result<Option<bool>, McpParamError> {
-    match map.try_borrow(string::from(key)) {
-        auto Option<&JsonNode>::Some(&node) => {
-            match node {
-                auto JsonNode::BoolNode(b) => {
-                    return Result<Option<bool>, McpParamError>::Ok(Option<bool>::Some(b))
-                }
-                _ => {
-                    auto err# = string::from("Invalid params: '")
-                    err#.push_str(key)
-                    err#.push_str("' must be a boolean")
-                    return Result<Option<bool>, McpParamError>::Err(McpParamError(message = cede err))
-                }
-            }
-        }
-        _ => {
-            return Result<Option<bool>, McpParamError>::Ok(Option<bool>::None)
-        }
-    }
-}
-
-fn get_usize_param(map: HashMap<string, JsonNode>, key: str) -> Result<Option<usize>, McpParamError> {
-    match map.try_borrow(string::from(key)) {
-        auto Option<&JsonNode>::Some(&node) => {
-            match node {
-                auto JsonNode::NumNode(f) => {
-                    if is_finite(f) && f >= 0.0 && f == floor(f) && f <= 9007199254740991.0 {
-                        return Result<Option<usize>, McpParamError>::Ok(Option<usize>::Some(f as usize))
-                    }
-                    auto err# = string::from("Invalid params: '")
-                    err#.push_str(key)
-                    err#.push_str("' must be a non-negative integer <= 2^53-1")
-                    return Result<Option<usize>, McpParamError>::Err(McpParamError(message = cede err))
-                }
-                _ => {
-                    auto err# = string::from("Invalid params: '")
-                    err#.push_str(key)
-                    err#.push_str("' must be an integer")
-                    return Result<Option<usize>, McpParamError>::Err(McpParamError(message = cede err))
-                }
-            }
-        }
-        _ => {
-            return Result<Option<usize>, McpParamError>::Ok(Option<usize>::None)
-        }
-    }
-}
-
-fn get_size_param(map: HashMap<string, JsonNode>, key: str) -> Result<Option<string>, McpParamError> {
-    match map.try_borrow(string::from(key)) {
-        auto Option<&JsonNode>::Some(&node) => {
-            match node {
-                auto JsonNode::StrNode(&s) => {
-                    auto p_res = parse_size_bytes_strict(s.as_str(), key)
-                    if p_res.is_err() {
-                        auto err# = string::from("Invalid params: ")
-                        err#.push_str(p_res.unwrap_err().as_str())
-                        return Result<Option<string>, McpParamError>::Err(McpParamError(message = cede err))
-                    }
-                    return Result<Option<string>, McpParamError>::Ok(Option<string>::Some(s.clone()))
-                }
-                auto JsonNode::NumNode(f) => {
-                    if is_finite(f) && f >= 0.0 && f == floor(f) && f <= 9007199254740991.0 {
-                        return Result<Option<string>, McpParamError>::Ok(Option<string>::Some(u64_to_string(f as u64)))
-                    }
-                    auto err# = string::from("Invalid params: '")
-                    err#.push_str(key)
-                    err#.push_str("' must be a non-negative integer or valid size string")
-                    return Result<Option<string>, McpParamError>::Err(McpParamError(message = cede err))
-                }
-                _ => {
-                    auto err# = string::from("Invalid params: '")
-                    err#.push_str(key)
-                    err#.push_str("' must be a string or integer")
-                    return Result<Option<string>, McpParamError>::Err(McpParamError(message = cede err))
-                }
-            }
-        }
-        _ => {
-            return Result<Option<string>, McpParamError>::Ok(Option<string>::None)
-        }
-    }
-}
-
-fn get_string_array_param(map: HashMap<string, JsonNode>, key: str) -> Result<Option<Vec<string>>, McpParamError> {
-    match map.try_borrow(string::from(key)) {
-        auto Option<&JsonNode>::Some(&node) => {
-            match node {
-                auto JsonNode::ArrayNode(&arr) => {
-                    auto res# = Vec<string>::new()
-                    auto i# = 0:usize
-                    loop i < arr.len() {
-                        auto &item = arr.borrow(i)
-                        match item {
-                            auto JsonNode::StrNode(&s) => {
-                                res#.push(s.clone())
-                            }
-                            _ => {
-                                auto err# = string::from("Invalid params: '")
-                                err#.push_str(key)
-                                err#.push_str("' items must be strings")
-                                return Result<Option<Vec<string>>, McpParamError>::Err(McpParamError(message = cede err))
-                            }
-                        }
-                        i = i + 1
-                    }
-                    return Result<Option<Vec<string>>, McpParamError>::Ok(Option<Vec<string>>::Some(cede res))
-                }
-                _ => {
-                    auto err# = string::from("Invalid params: '")
-                    err#.push_str(key)
-                    err#.push_str("' must be an array of strings")
-                    return Result<Option<Vec<string>>, McpParamError>::Err(McpParamError(message = cede err))
-                }
-            }
-        }
-        _ => {
-            return Result<Option<Vec<string>>, McpParamError>::Ok(Option<Vec<string>>::None)
-        }
-    }
-}
-
-fn check_property_conflict(prop: str, args: Vec<string>) -> Option<string> {
-    auto i# = 0:usize
-    loop i < args.len() {
-        auto &a = args.borrow(i)
-        auto a_str = a.as_str()
-        auto is_conflict# = false
-
-        if prop == "block" {
-            if a_str == "--block" || a_str == "--no-block" || a_str == "--context-block" {
-                is_conflict = true
-            }
-        } else if prop == "scope" {
-            if a_str == "--scope" || a_str == "--no-scope" {
-                is_conflict = true
-            }
-        } else if prop == "def_first" {
-            if a_str == "--def-first" || a_str == "--no-def-first" {
-                is_conflict = true
-            }
-        } else if prop == "max_matches" {
-            if a_str == "--max-total-matches" || a_str.starts_with("--max-total-matches=") {
-                is_conflict = true
-            }
-        } else if prop == "max_bytes" {
-            if a_str == "--max-result-bytes" || a_str.starts_with("--max-result-bytes=") {
-                is_conflict = true
-            }
-        } else if prop == "type" {
-            if a_str == "-t" || a_str == "--type" || a_str.starts_with("--type=") {
-                is_conflict = true
-            } else if a_str.starts_with("-t") && !a_str.starts_with("-T") && a_str != "--type-list" && !a_str.starts_with("--type-not") {
-                is_conflict = true
-            }
-        }
-
-        if is_conflict {
-            auto msg# = string::from("Invalid params: typed property '")
-            msg#.push_str(prop)
-            msg#.push_str("' conflicts with args option '")
-            msg#.push_str(a_str)
-            msg#.push_str("'")
-            return Option<string>::Some(cede msg)
-        }
-        i = i + 1
-    }
-    return Option<string>::None
-}
+import src/mcp_protocol::{McpServerState}
+import src/mcp_schema::{format_tools_list_response}
+import src/mcp_params::{build_mcp_cli_args, validate_mcp_cli_options}
+import src/mcp_result::{format_tool_call_response}
 
 pub shape JsonIdResult (
     has_id: bool,
@@ -250,61 +55,11 @@ fn json_map_extract_id(map: HashMap<string, JsonNode>) -> JsonIdResult {
     }
 }
 
-pub shape McpSearchResult (
-    output_text: string,
-    complete: bool,
-    truncated: bool,
-    termination_reason: string,
-    matches_emitted: usize,
-    files_scanned: usize,
-    file_scan_passes: usize
-)
-
-pub fn run_search_to_memory(opts: CliOptions) -> Result<McpSearchResult, string> {
-    auto format = OutputFormat::from_cli_options(opts)
-    auto writer = OutputBudgetWriter::new_memory(format)
-    auto search_res = execute_search(opts, writer)
-    if search_res.is_err() {
-        return Result<McpSearchResult, string>::Err(search_res.unwrap_err())
-    }
-    auto report = search_res.unwrap()
-
-    auto fin_outcome = finalize_search(opts, writer, report)
-    match fin_outcome {
-        EmitOutcome::FatalError => {
-            return Result<McpSearchResult, string>::Err(string::from("Write error"))
-        }
-        _ => {}
-    }
-
-    auto is_trunc = report.budget_state.is_truncated
-    auto is_comp = !is_trunc && !report.had_error
-    auto term_reason# = string::from("completed")
-    if is_trunc {
-        term_reason = report.budget_state.truncation_reason.clone()
-    } else if report.had_error {
-        term_reason = string::from("search_error")
-    }
-
-    auto emitted# = report.budget_state.matched_lines_emitted
-    if opts.files_mode {
-        emitted = report.budget_state.files_scanned
-    }
-
-    return Result<McpSearchResult, string>::Ok(McpSearchResult(
-        output_text = writer.take_output(),
-        complete = is_comp,
-        truncated = is_trunc,
-        termination_reason = cede term_reason,
-        matches_emitted = emitted,
-        files_scanned = report.budget_state.files_scanned,
-        file_scan_passes = report.budget_state.file_scan_passes
-    ))
-}
-
 fn send_mcp_response(resp: str) -> bool {
     auto s# = string::from(resp)
-    s#.push_str("\n")
+    if !s.as_str().ends_with("\n") {
+        s#.push_str("\n")
+    }
     auto res = posix_write_stdout(s.as_str())
     return res == 0
 }
@@ -316,7 +71,7 @@ fn send_error(id_str: str, code: i32, message: str) -> bool {
     resp#.push_str(string::from_int(code).as_str())
     resp#.push_str(",\"message\":\"")
     resp#.push_str(json_escape(message).as_str())
-    resp#.push_str("\"}}")
+    resp#.push_str("\"}}\n")
     return send_mcp_response(resp.as_str())
 }
 
@@ -325,11 +80,13 @@ fn send_tool_error(id_str: str, message: str) -> bool {
     resp#.push_str(id_str)
     resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
     resp#.push_str(json_escape(message).as_str())
-    resp#.push_str("\"}],\"isError\":true}}")
+    resp#.push_str("\"}],\"isError\":true}}\n")
     return send_mcp_response(resp.as_str())
 }
 
 pub fn run_mcp_server() -> i32 {
+    auto server_state# = McpServerState::new()
+
     loop true {
         auto line_opt = posix_read_stdin_line()
         if line_opt.is_none() {
@@ -390,21 +147,20 @@ pub fn run_mcp_server() -> i32 {
                 }
 
                 // Verify "method" is string
-                auto method_res = get_string_param(map, "method")
                 auto method# = string::new()
-                match method_res {
-                    auto Result::Ok(m_opt) => {
-                        match m_opt {
-                            auto Option::Some(&m_str) => {
-                                method = m_str.clone()
+                match map.try_borrow(string::from("method")) {
+                    auto Option<&JsonNode>::Some(&m_node) => {
+                        match m_node {
+                            auto JsonNode::StrNode(&m_s) => {
+                                method = m_s.clone()
                             }
-                            auto Option::None => {
+                            _ => {
                                 send_error(id_str.as_str(), -32600, "Invalid Request")
                                 continue
                             }
                         }
                     }
-                    auto Result::Err(_) => {
+                    _ => {
                         send_error(id_str.as_str(), -32600, "Invalid Request")
                         continue
                     }
@@ -412,44 +168,95 @@ pub fn run_mcp_server() -> i32 {
 
                 // Notifications (no id) MUST NOT receive a response per JSON-RPC 2.0
                 if !has_id {
+                    if method.as_str() == "notifications/initialized" || method.as_str() == "initialized" {
+                        server_state#.mark_ready()
+                    }
                     continue
                 }
 
                 if method.as_str() == "initialize" {
+                    if !server_state.is_uninitialized() {
+                        send_error(id_str.as_str(), -32600, "Invalid Request: server already initialized")
+                        continue
+                    }
+                    auto req_ver# = string::new()
+                    auto valid_params# = false
+                    match map.try_borrow(string::from("params")) {
+                        auto Option<&JsonNode>::Some(&p_node) => {
+                            match p_node {
+                                auto JsonNode::ObjectNode(&p_map) => {
+                                    match p_map.try_borrow(string::from("protocolVersion")) {
+                                        auto Option<&JsonNode>::Some(&v_node) => {
+                                            match v_node {
+                                                auto JsonNode::StrNode(&v_s) => {
+                                                    req_ver = v_s.clone()
+                                                    valid_params = true
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                    if !valid_params {
+                        send_error(id_str.as_str(), -32602, "Invalid params: protocolVersion must be a string")
+                        continue
+                    }
+                    auto negotiated = server_state#.handle_initialize(req_ver.as_str())
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
                     resp#.push_str(id_str.as_str())
-                    resp#.push_str(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.9.2\"}}}")
+                    resp#.push_str(",\"result\":{\"protocolVersion\":\"")
+                    resp#.push_str(negotiated.as_str())
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.10.0\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
                     resp#.push_str(id_str.as_str())
-                    resp#.push_str(",\"result\":{}}")
+                    resp#.push_str(",\"result\":{}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "tools/list" {
-                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-                    resp#.push_str(id_str.as_str())
-                    resp#.push_str(",\"result\":{\"tools\":[{\"name\":\"trg_search\",\"description\":\"Fast ripgrep-compatible code search with semantic block context, scopes, and budget control.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Search pattern (literal or regex with -E)\"},\"path\":{\"type\":\"string\",\"description\":\"Path or directory to search\"},\"block\":{\"type\":\"boolean\",\"description\":\"Include enclosing code block context\"},\"scope\":{\"type\":\"boolean\",\"description\":\"Show enclosing class/function header for matches\"},\"def_first\":{\"type\":\"boolean\",\"description\":\"Prioritize definitions before usages\"},\"max_matches\":{\"type\":\"integer\",\"description\":\"Limit total matches returned (integer >= 0)\"},\"max_bytes\":{\"description\":\"Limit total result bytes emitted (e.g. \\\"4K\\\", \\\"1M\\\", or integer bytes)\",\"oneOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]},\"type\":{\"type\":\"string\",\"description\":\"Filter by file type (e.g. rust, py, tk)\"},\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Additional CLI arguments, e.g. [\\\"--json=compact\\\"]\"}},\"required\":[\"pattern\"]}}]}}")
+                    if server_state.is_uninitialized() {
+                        send_error(id_str.as_str(), -32600, "Server not initialized: call 'initialize' first")
+                        continue
+                    }
+                    if !server_state.is_ready() {
+                        send_error(id_str.as_str(), -32600, "Server not ready: 'notifications/initialized' expected")
+                        continue
+                    }
+                    auto resp = format_tools_list_response(id_str, server_state.negotiated_version.as_str())
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "tools/call" {
+                    if server_state.is_uninitialized() {
+                        send_error(id_str.as_str(), -32600, "Server not initialized: call 'initialize' first")
+                        continue
+                    }
+                    if !server_state.is_ready() {
+                        send_error(id_str.as_str(), -32600, "Server not ready: 'notifications/initialized' expected")
+                        continue
+                    }
                     match map.try_borrow(string::from("params")) {
                         auto Option<&JsonNode>::Some(&p_val) => {
                             match p_val {
                                 auto JsonNode::ObjectNode(&p_map) => {
-                                    auto tool_name_res = get_string_param(p_map, "name")
                                     auto tool_name# = string::new()
-                                    match tool_name_res {
-                                        auto Result::Ok(t_opt) => {
-                                            match t_opt {
-                                                auto Option::Some(&t_str) => {
-                                                    tool_name = t_str.clone()
+                                    match p_map.try_borrow(string::from("name")) {
+                                        auto Option<&JsonNode>::Some(&name_node) => {
+                                            match name_node {
+                                                auto JsonNode::StrNode(&n_s) => {
+                                                    tool_name = n_s.clone()
                                                 }
-                                                auto Option::None => {
+                                                _ => {
                                                     send_error(id_str.as_str(), -32602, "Invalid params: 'name' must be a string")
                                                     continue
                                                 }
                                             }
                                         }
-                                        auto Result::Err(_) => {
+                                        _ => {
                                             send_error(id_str.as_str(), -32602, "Invalid params: 'name' must be a string")
                                             continue
                                         }
@@ -461,234 +268,52 @@ pub fn run_mcp_server() -> i32 {
 
                                     match p_map.try_borrow(string::from("arguments")) {
                                         auto Option<&JsonNode>::Some(&a_val) => {
-                                            match a_val {
-                                                auto JsonNode::ObjectNode(&a_map) => {
-                                                    // 1. Validate required "pattern"
-                                                    auto pat_res = get_string_param(a_map, "pattern")
-                                                    if pat_res.is_err() {
-                                                        send_error(id_str.as_str(), -32602, pat_res.unwrap_err().message.as_str())
-                                                        continue
-                                                    }
-                                                    auto pat_opt = pat_res.unwrap()
-                                                    if pat_opt.is_none() {
-                                                        send_error(id_str.as_str(), -32602, "Invalid params: 'pattern' is required and must be a string")
-                                                        continue
-                                                    }
-                                                    auto pattern = pat_opt.unwrap()
-
-                                                    // 2. Validate "path"
-                                                    auto path_res = get_string_param(a_map, "path")
-                                                    if path_res.is_err() {
-                                                        send_error(id_str.as_str(), -32602, path_res.unwrap_err().message.as_str())
-                                                        continue
-                                                    }
-                                                    auto path_opt = path_res.unwrap()
-
-                                                    // 3. Validate "block"
-                                                    auto block_res = get_bool_param(a_map, "block")
-                                                    if block_res.is_err() {
-                                                        send_error(id_str.as_str(), -32602, block_res.unwrap_err().message.as_str())
-                                                        continue
-                                                    }
-                                                    auto block_opt = block_res.unwrap()
-
-                                                    // 4. Validate "scope"
-                                                    auto scope_res = get_bool_param(a_map, "scope")
-                                                    if scope_res.is_err() {
-                                                        send_error(id_str.as_str(), -32602, scope_res.unwrap_err().message.as_str())
-                                                        continue
-                                                    }
-                                                    auto scope_opt = scope_res.unwrap()
-
-                                                    // 5. Validate "def_first"
-                                                    auto def_first_res = get_bool_param(a_map, "def_first")
-                                                    if def_first_res.is_err() {
-                                                        send_error(id_str.as_str(), -32602, def_first_res.unwrap_err().message.as_str())
-                                                        continue
-                                                    }
-                                                    auto def_first_opt = def_first_res.unwrap()
-
-                                                    // 6. Validate "max_matches"
-                                                    auto max_matches_res = get_usize_param(a_map, "max_matches")
-                                                    if max_matches_res.is_err() {
-                                                        send_error(id_str.as_str(), -32602, max_matches_res.unwrap_err().message.as_str())
-                                                        continue
-                                                    }
-                                                    auto max_matches_opt = max_matches_res.unwrap()
-
-                                                    // 7. Validate "max_bytes"
-                                                    auto max_bytes_res = get_size_param(a_map, "max_bytes")
-                                                    if max_bytes_res.is_err() {
-                                                        send_error(id_str.as_str(), -32602, max_bytes_res.unwrap_err().message.as_str())
-                                                        continue
-                                                    }
-                                                    auto max_bytes_opt = max_bytes_res.unwrap()
-
-                                                    // 8. Validate "type"
-                                                    auto type_res = get_string_param(a_map, "type")
-                                                    if type_res.is_err() {
-                                                        send_error(id_str.as_str(), -32602, type_res.unwrap_err().message.as_str())
-                                                        continue
-                                                    }
-                                                    auto type_opt = type_res.unwrap()
-
-                                                    // 9. Validate "args"
-                                                    auto extra_args# = Vec<string>::new()
-                                                    if a_map.contains_key(string::from("args")) {
-                                                        auto arr_res = get_string_array_param(a_map, "args")
-                                                        if arr_res.is_err() {
-                                                            send_error(id_str.as_str(), -32602, arr_res.unwrap_err().message.as_str())
-                                                            continue
-                                                        }
-                                                        extra_args = arr_res.unwrap().unwrap()
-                                                    }
-
-                                                    // 10. Check conflicts between typed properties and args
-                                                    auto conflict_found# = false
-                                                    auto conflict_msg# = string::new()
-
-                                                    if block_opt.is_some() {
-                                                        auto c = check_property_conflict("block", extra_args)
-                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
-                                                    }
-                                                    if !conflict_found && scope_opt.is_some() {
-                                                        auto c = check_property_conflict("scope", extra_args)
-                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
-                                                    }
-                                                    if !conflict_found && def_first_opt.is_some() {
-                                                        auto c = check_property_conflict("def_first", extra_args)
-                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
-                                                    }
-                                                    if !conflict_found && max_matches_opt.is_some() {
-                                                        auto c = check_property_conflict("max_matches", extra_args)
-                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
-                                                    }
-                                                    if !conflict_found && max_bytes_opt.is_some() {
-                                                        auto c = check_property_conflict("max_bytes", extra_args)
-                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
-                                                    }
-                                                    if !conflict_found && type_opt.is_some() {
-                                                        auto c = check_property_conflict("type", extra_args)
-                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
-                                                    }
-
-                                                    if conflict_found {
-                                                        send_error(id_str.as_str(), -32602, conflict_msg.as_str())
-                                                        continue
-                                                    }
-
-                                                    auto argv# = Vec<string>::new()
-                                                    argv#.push(string::from("trg"))
-                                                    argv#.push(pattern)
-                                                    auto has_path = path_opt.is_some()
-                                                    if has_path {
-                                                        argv#.push(path_opt.unwrap())
-                                                    }
-                                                    if block_opt.is_some() {
-                                                        auto b = block_opt.unwrap()
-                                                        if b {
-                                                            argv#.push(string::from("--block"))
-                                                        }
-                                                    }
-                                                    if scope_opt.is_some() {
-                                                        auto s = scope_opt.unwrap()
-                                                        if s {
-                                                            argv#.push(string::from("--scope"))
-                                                        }
-                                                    }
-                                                    if def_first_opt.is_some() {
-                                                        auto d = def_first_opt.unwrap()
-                                                        if d {
-                                                            argv#.push(string::from("--def-first"))
-                                                        }
-                                                    }
-                                                    if max_matches_opt.is_some() {
-                                                        argv#.push(string::from("--max-total-matches"))
-                                                        argv#.push(u64_to_string(max_matches_opt.unwrap() as u64))
-                                                    }
-                                                    if max_bytes_opt.is_some() {
-                                                        argv#.push(string::from("--max-result-bytes"))
-                                                        argv#.push(max_bytes_opt.unwrap())
-                                                    }
-                                                    if type_opt.is_some() {
-                                                        argv#.push(string::from("-t"))
-                                                        argv#.push(type_opt.unwrap())
-                                                    }
-                                                    auto a_idx# = 0:usize
-                                                    auto a_len = extra_args.len()
-                                                    loop a_idx < a_len {
-                                                        argv#.push(extra_args.borrow(a_idx).clone())
-                                                        a_idx = a_idx + 1
-                                                    }
-
+                                            auto build_res = build_mcp_cli_args(a_val)
+                                            if build_res.is_err() {
+                                                send_error(id_str.as_str(), -32602, build_res.unwrap_err().as_str())
+                                                continue
+                                            }
+                                                    auto argv = build_res.unwrap()
                                                     auto opts_res = parse_cli_args_from_vec(argv)
                                                     if opts_res.is_err() {
-                                                        send_tool_error(id_str.as_str(), opts_res.unwrap_err().as_str())
+                                                        send_error(id_str.as_str(), -32602, opts_res.unwrap_err().as_str())
                                                         continue
                                                     }
-
                                                     auto search_opts = opts_res.unwrap()
-                                                    if has_path && search_opts.paths.len() > 1 {
-                                                        auto msg# = string::from("Invalid params: typed property 'path' conflicts with positional arg '")
-                                                        msg#.push_str(search_opts.paths.borrow(1).as_str())
-                                                        msg#.push_str("'")
-                                                        send_error(id_str.as_str(), -32602, msg.as_str())
+                                                    auto val_res = validate_mcp_cli_options(search_opts)
+                                                    if val_res.is_err() {
+                                                        send_error(id_str.as_str(), -32602, val_res.unwrap_err().as_str())
                                                         continue
                                                     }
-                                                    auto search_res = run_search_to_memory(search_opts)
+                                                    auto writer = OutputBudgetWriter::new_mcp()
+                                                    auto search_res = execute_search(search_opts, writer)
+                                                    auto report# = SearchReport(
+                                                        found_result = false,
+                                                        had_error = false,
+                                                        is_broken_pipe = false,
+                                                        budget_state = BudgetState::new(search_opts.budget_limits),
+                                                        elapsed_nanos = 0:u64,
+                                                        diagnostics = Vec<SearchDiagnostic>::new()
+                                                    )
                                                     if search_res.is_err() {
-                                                        send_tool_error(id_str.as_str(), search_res.unwrap_err().as_str())
-                                                        continue
+                                                        auto diag = search_res.unwrap_err()
+                                                        auto all_diag# = Vec<SearchDiagnostic>::new()
+                                                        all_diag#.push(diag)
+                                                        auto bstate = BudgetState::new(search_opts.budget_limits)
+                                                        report = SearchReport(
+                                                            found_result = false,
+                                                            had_error = true,
+                                                            is_broken_pipe = false,
+                                                            budget_state = cede bstate,
+                                                            elapsed_nanos = 0:u64,
+                                                            diagnostics = cede all_diag
+                                                        )
+                                                    } else {
+                                                        report = search_res.unwrap()
+                                                        finalize_search(search_opts, writer, report)
                                                     }
-
-                                                    auto mcp_res = search_res.unwrap()
-                                                    auto text_out# = mcp_res.output_text.clone()
-
-                                                    if !search_opts.json_mode {
-                                                        if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
-                                                            text_out#.push_str("\n")
-                                                        }
-                                                        text_out#.push_str("[trg: complete=")
-                                                        if mcp_res.complete { text_out#.push_str("true") } else { text_out#.push_str("false") }
-                                                        text_out#.push_str(", truncated=")
-                                                        if mcp_res.truncated { text_out#.push_str("true") } else { text_out#.push_str("false") }
-                                                        text_out#.push_str(", reason=")
-                                                        text_out#.push_str(mcp_res.termination_reason.as_str())
-                                                        text_out#.push_str(", matches=")
-                                                        text_out#.push_str(u64_to_string(mcp_res.matches_emitted as u64).as_str())
-                                                        text_out#.push_str(", scanned=")
-                                                        text_out#.push_str(u64_to_string(mcp_res.files_scanned as u64).as_str())
-                                                        text_out#.push_str(", passes=")
-                                                        text_out#.push_str(u64_to_string(mcp_res.file_scan_passes as u64).as_str())
-                                                        text_out#.push_str("]\n")
-                                                    }
-
-                                                    auto esc_output = json_escape(text_out.as_str())
-                                                    auto esc_reason = json_escape(mcp_res.termination_reason.as_str())
-
-                                                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-                                                    resp#.push_str(id_str.as_str())
-                                                    resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
-                                                    resp#.push_str(esc_output.as_str())
-                                                    resp#.push_str("\"}],\"_meta\":{\"summary\":{\"complete\":")
-                                                    if mcp_res.complete { resp#.push_str("true") } else { resp#.push_str("false") }
-                                                    resp#.push_str(",\"truncated\":")
-                                                    if mcp_res.truncated { resp#.push_str("true") } else { resp#.push_str("false") }
-                                                    resp#.push_str(",\"termination_reason\":\"")
-                                                    resp#.push_str(esc_reason.as_str())
-                                                    resp#.push_str("\",\"matches_emitted\":")
-                                                    resp#.push_str(u64_to_string(mcp_res.matches_emitted as u64).as_str())
-                                                    resp#.push_str(",\"files_scanned\":")
-                                                    resp#.push_str(u64_to_string(mcp_res.files_scanned as u64).as_str())
-                                                    resp#.push_str(",\"file_scan_passes\":")
-                                                    resp#.push_str(u64_to_string(mcp_res.file_scan_passes as u64).as_str())
-                                                    resp#.push_str("}}}}")
-                                                    send_mcp_response(resp.as_str())
-                                                }
-                                                _ => {
-                                                    send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
-                                                }
-                                            }
+                                            auto resp = format_tool_call_response(id_str, report, search_opts, writer, server_state.negotiated_version.as_str())
+                                            send_mcp_response(resp.as_str())
                                         }
                                         _ => {
                                             send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")

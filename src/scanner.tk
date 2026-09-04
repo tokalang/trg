@@ -1,5 +1,6 @@
 // True incremental 64KB chunk-buffered streaming scanner with O(1) circular BeforeRing, OpeningMatchBatch atomic preflight, and lazy JSON framing.
 import core/str::{str}
+import core/option::{Option}
 import std/vec::{Vec}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
 import src/types::{
@@ -15,10 +16,11 @@ import src/types::{
     ScopeFrame,
     FileRunState,
     ScanPass,
-    SyntaxFamily
+    SyntaxFamily,
+    SearchDiagnostic
 }
 import src/matcher::{SearchPlan}
-import src/posix::{posix_ferror}
+import src/posix::{posix_ferror, posix_get_errno}
 import src/printer::{
     OutputBudgetWriter,
     FileFrameState,
@@ -33,6 +35,8 @@ import src/printer::{
     format_human_match,
     format_human_context,
     format_group_separator,
+    format_mcp_structured_match,
+    format_mcp_structured_context,
     emit_json_begin,
     emit_json_end,
     write_line,
@@ -109,7 +113,9 @@ fn process_logical_line(
         }
 
         auto batch_payload# = string::new()
-        // 1. Group separator
+        auto structured_recs# = Vec<string>::new()
+
+        // 1. Group separator & Group ID
         auto has_context = opts.before_context > 0 || opts.after_context > 0 || opts.context_block
         if has_context && state.last_emitted_line_num > 0 && state.had_emitted_group {
             auto first_to_emit# = line.line_number
@@ -120,11 +126,16 @@ fn process_logical_line(
                 }
             }
             if first_to_emit > state.last_emitted_line_num + 1 {
+                state.current_group_id = state.current_group_id + 1
                 if !opts.json_mode {
                     batch_payload#.push_str(format_group_separator().as_str())
                 }
             }
+        } else if !has_context && state.had_emitted_group {
+            state.current_group_id = state.current_group_id + 1
         }
+
+        auto cur_gid = state.current_group_id
 
         // 2. Before-context lines
         auto num_ring = state.ring.count
@@ -159,6 +170,11 @@ fn process_logical_line(
             auto actual_idx = (state.ring.head + r_idx) % state.ring.capacity
             auto r_line_num = state.ring.lines.borrow(actual_idx).line_number
             if r_line_num > state.last_emitted_line_num {
+                auto roles# = Vec<string>::new()
+                roles#.push(string::from("before"))
+                if opts.context_block && r_idx < num_ring - opts.before_context {
+                    roles#.push(string::from("block"))
+                }
                 auto ev = MatchEvent(
                     path = string::from(target_path),
                     line_text = state.ring.lines.borrow(actual_idx).text.clone(),
@@ -166,7 +182,10 @@ fn process_logical_line(
                     absolute_offset = state.ring.lines.borrow(actual_idx).absolute_offset,
                     submatches = Vec<SubMatch>::new(),
                     scope_name = string::from(""),
-                    block_truncated = false
+                    block_truncated = false,
+                    is_context = true,
+                    group_id = cur_gid,
+                    context_roles = cede roles
                 )
                 if opts.json_mode {
                     if opts.json_compact {
@@ -177,6 +196,10 @@ fn process_logical_line(
                 } else {
                     batch_payload#.push_str(format_human_context(ev, opts, multiple_files).as_str())
                 }
+                if opts.mcp_mode {
+                    auto rec_str = format_mcp_structured_context(ev)
+                    structured_recs#.push(cede rec_str)
+                }
                 state.last_emitted_line_num = r_line_num
             }
             r_idx = r_idx + 1
@@ -185,7 +208,7 @@ fn process_logical_line(
 
         // 3. Match record
         auto submatches# = Vec<SubMatch>::new()
-        if opts.json_mode || opts.only_matching {
+        if opts.json_mode || opts.only_matching || opts.mcp_mode {
             if !opts.invert_match {
                 auto s_idx# = 0:usize
                 loop s_idx < ranges.len() {
@@ -211,7 +234,10 @@ fn process_logical_line(
             absolute_offset = line.absolute_offset,
             submatches = cede submatches,
             scope_name = string::from(scope_name),
-            block_truncated = false
+            block_truncated = false,
+            is_context = false,
+            group_id = cur_gid,
+            context_roles = Vec<string>::new()
         )
         if opts.json_mode {
             if opts.json_compact {
@@ -222,6 +248,10 @@ fn process_logical_line(
         } else {
             batch_payload#.push_str(format_human_match(ev, opts, multiple_files).as_str())
         }
+        if opts.mcp_mode {
+            auto rec_str = format_mcp_structured_match(ev)
+            structured_recs#.push(cede rec_str)
+        }
 
         // 4. Emit via Writer (Atomic OpeningMatchBatch)
         auto is_first_emitted = !file_has_emitted_match
@@ -229,7 +259,8 @@ fn process_logical_line(
             payload_str = cede batch_payload,
             path = string::from(target_path),
             line_number = line.line_number,
-            is_payload = true
+            is_payload = true,
+            structured_records = cede structured_recs
         )
         auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
         match outcome {
@@ -284,6 +315,12 @@ fn process_logical_line(
         }
 
         if line.line_number > state.last_emitted_line_num {
+            auto roles# = Vec<string>::new()
+            if state.pending_after > 0 {
+                roles#.push(string::from("after"))
+            }
+            roles#.push(string::from("block"))
+            auto target_gid = state.current_group_id
             auto ev = MatchEvent(
                 path = string::from(target_path),
                 line_text = line.text.clone(),
@@ -291,7 +328,10 @@ fn process_logical_line(
                 absolute_offset = line.absolute_offset,
                 submatches = Vec<SubMatch>::new(),
                 scope_name = string::from(""),
-                block_truncated = is_block_truncated
+                block_truncated = is_block_truncated,
+                is_context = true,
+                group_id = target_gid,
+                context_roles = cede roles
             )
             auto ctx_payload# = string::new()
             if opts.json_mode {
@@ -309,11 +349,17 @@ fn process_logical_line(
                 }
             }
             if ctx_payload.len() > 0 {
+                auto structured_recs# = Vec<string>::new()
+                if opts.mcp_mode {
+                    auto rec_str = format_mcp_structured_context(ev)
+                    structured_recs#.push(cede rec_str)
+                }
                 auto batch = OutputBatch(
                     payload_str = cede ctx_payload,
                     path = string::from(target_path),
                     line_number = line.line_number,
-                    is_payload = true
+                    is_payload = true,
+                    structured_records = cede structured_recs
                 )
                 auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
                 match outcome {
@@ -345,6 +391,9 @@ fn process_logical_line(
     // Normal pending after-context line
     if state.pending_after > 0 {
         if line.line_number > state.last_emitted_line_num {
+            auto roles# = Vec<string>::new()
+            roles#.push(string::from("after"))
+            auto target_gid = state.current_group_id
             auto ev = MatchEvent(
                 path = string::from(target_path),
                 line_text = line.text.clone(),
@@ -352,7 +401,10 @@ fn process_logical_line(
                 absolute_offset = line.absolute_offset,
                 submatches = Vec<SubMatch>::new(),
                 scope_name = string::from(""),
-                block_truncated = false
+                block_truncated = false,
+                is_context = true,
+                group_id = target_gid,
+                context_roles = cede roles
             )
             auto ctx_payload# = string::new()
             if opts.json_mode {
@@ -365,11 +417,17 @@ fn process_logical_line(
                 ctx_payload = format_human_context(ev, opts, multiple_files)
             }
             if ctx_payload.len() > 0 {
+                auto structured_recs# = Vec<string>::new()
+                if opts.mcp_mode {
+                    auto rec_str = format_mcp_structured_context(ev)
+                    structured_recs#.push(cede rec_str)
+                }
                 auto batch = OutputBatch(
                     payload_str = cede ctx_payload,
                     path = string::from(target_path),
                     line_number = line.line_number,
-                    is_payload = true
+                    is_payload = true,
+                    structured_records = cede structured_recs
                 )
                 auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
                 match outcome {
@@ -449,7 +507,7 @@ fn scan_and_process_line(
     auto ranges# = Vec<MatchRange>::new()
 
     if !max_count_reached {
-        if opts.json_mode || opts.only_matching {
+        if opts.json_mode || opts.only_matching || opts.mcp_mode {
             auto decision = plan.find_matches(line_text)
             if !opts.invert_match {
                 line_matches = decision.matched
@@ -507,12 +565,7 @@ fn scan_and_process_line(
                 }
                 auto path_line# = string::from(target_path)
                 path_line#.push_str("\n")
-                auto batch = OutputBatch(
-                    payload_str = cede path_line,
-                    path = string::from(target_path),
-                    line_number = line_num,
-                    is_payload = true
-                )
+                auto batch = OutputBatch::new_payload(cede path_line, string::from(target_path), line_num)
                 auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
                 match outcome {
                     EmitOutcome::Written => {
@@ -609,6 +662,8 @@ pub fn scan_file_stream_with_pass(
         open_path = string::from("/dev/stdin")
     }
 
+    auto diagnostics# = Vec<SearchDiagnostic>::new()
+
     auto mode_buf# = [0:char; 8]
     mode_buf[0] = 'r' as char
     mode_buf[1] = 'b' as char
@@ -619,14 +674,24 @@ pub fn scan_file_stream_with_pass(
         auto *path_c = open_path.c_str()
         auto nul *fp = libc_fopen(*path_c, *mode_ptr)
         if *fp == null {
-            log_scanner_err(target_path.as_str(), "Permission denied or failed to open file")
+            auto err_code = posix_get_errno()
+            diagnostics#.push(SearchDiagnostic::new(
+                string::from("open"),
+                Option<string>::Some(target_path.clone()),
+                string::from("Permission denied or failed to open file"),
+                Option<i32>::Some(err_code)
+            ))
+            if !opts.mcp_mode {
+                log_scanner_err(target_path.as_str(), "Permission denied or failed to open file")
+            }
             return ScanResult(
                 path = target_path.clone(),
                 matches_count = 0,
                 has_match = false,
                 is_binary = false,
                 had_error = true,
-                is_broken_pipe = false
+                is_broken_pipe = false,
+                diagnostics = cede diagnostics
             )
         }
 
@@ -634,14 +699,23 @@ pub fn scan_file_stream_with_pass(
         auto nul *raw_buf = libc_malloc(65536:usize)
         if *raw_buf == null {
             libc_fclose(*file)
-            log_scanner_err(target_path.as_str(), "Out of memory allocating chunk buffer")
+            diagnostics#.push(SearchDiagnostic::new(
+                string::from("open"),
+                Option<string>::Some(target_path.clone()),
+                string::from("Out of memory allocating chunk buffer"),
+                Option<i32>::None
+            ))
+            if !opts.mcp_mode {
+                log_scanner_err(target_path.as_str(), "Out of memory allocating chunk buffer")
+            }
             return ScanResult(
                 path = target_path.clone(),
                 matches_count = 0,
                 has_match = false,
                 is_binary = false,
                 had_error = true,
-                is_broken_pipe = false
+                is_broken_pipe = false,
+                diagnostics = cede diagnostics
             )
         }
         auto *buf = raw_buf.unwrap()
@@ -688,7 +762,16 @@ pub fn scan_file_stream_with_pass(
             if bytes_read == 0 {
                 if posix_ferror((*file) as Addr) {
                     had_error = true
-                    log_scanner_err(target_path.as_str(), "I/O read error")
+                    auto err_code = posix_get_errno()
+                    diagnostics#.push(SearchDiagnostic::new(
+                        string::from("read"),
+                        Option<string>::Some(target_path.clone()),
+                        string::from("I/O read error"),
+                        Option<i32>::Some(err_code)
+                    ))
+                    if !opts.mcp_mode {
+                        log_scanner_err(target_path.as_str(), "I/O read error")
+                    }
                 }
                 break
             }
@@ -896,7 +979,8 @@ pub fn scan_file_stream_with_pass(
             has_match = has_match,
             is_binary = is_binary,
             had_error = had_error,
-            is_broken_pipe = is_broken_pipe
+            is_broken_pipe = is_broken_pipe,
+            diagnostics = cede diagnostics
         )
     }
 }

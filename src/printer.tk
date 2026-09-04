@@ -30,13 +30,47 @@ pub shape OutputBatch (
     payload_str: string,
     path: string,
     line_number: usize,
-    is_payload: bool
+    is_payload: bool,
+    structured_records: Vec<string>
 )
+
+impl OutputBatch {
+    pub fn new_payload(cede payload_str: string, cede path: string, line_number: usize) -> OutputBatch {
+        return OutputBatch(
+            payload_str = cede payload_str,
+            path = cede path,
+            line_number = line_number,
+            is_payload = true,
+            structured_records = Vec<string>::new()
+        )
+    }
+
+    pub fn new_mcp_batch(
+        cede payload_str: string,
+        cede path: string,
+        line_number: usize,
+        cede structured_records: Vec<string>
+    ) -> OutputBatch {
+        return OutputBatch(
+            payload_str = cede payload_str,
+            path = cede path,
+            line_number = line_number,
+            is_payload = true,
+            structured_records = cede structured_records
+        )
+    }
+}
 
 pub shape OutputBudgetWriter (
     format: OutputFormat,
     sink: OutputSink,
-    memory_str#: string
+    memory_str#: string,
+    structured_records#: Vec<string>,
+    text_record_bytes#: usize,
+    structured_record_bytes#: usize,
+    canonical_record_bytes#: usize,
+    records_emitted#: usize,
+    mcp_mode: bool
 )
 
 impl OutputBudgetWriter {
@@ -44,7 +78,13 @@ impl OutputBudgetWriter {
         return OutputBudgetWriter(
             format = format,
             sink = OutputSink::Stdout,
-            memory_str = string::new()
+            memory_str = string::new(),
+            structured_records = Vec<string>::new(),
+            text_record_bytes = 0,
+            structured_record_bytes = 0,
+            canonical_record_bytes = 0,
+            records_emitted = 0,
+            mcp_mode = false
         )
     }
 
@@ -52,7 +92,27 @@ impl OutputBudgetWriter {
         return OutputBudgetWriter(
             format = format,
             sink = OutputSink::Memory,
-            memory_str = string::new()
+            memory_str = string::new(),
+            structured_records = Vec<string>::new(),
+            text_record_bytes = 0,
+            structured_record_bytes = 0,
+            canonical_record_bytes = 0,
+            records_emitted = 0,
+            mcp_mode = false
+        )
+    }
+
+    pub fn new_mcp() -> OutputBudgetWriter {
+        return OutputBudgetWriter(
+            format = OutputFormat::Human,
+            sink = OutputSink::Memory,
+            memory_str = string::new(),
+            structured_records = Vec<string>::new(),
+            text_record_bytes = 0,
+            structured_record_bytes = 0,
+            canonical_record_bytes = 0,
+            records_emitted = 0,
+            mcp_mode = true
         )
     }
 
@@ -70,12 +130,21 @@ impl OutputBudgetWriter {
             return EmitOutcome::Truncated
         }
 
-        auto payload_len = batch.payload_str.len()
+        auto budget_delta# = batch.payload_str.len()
+        if self.mcp_mode {
+            auto rec_bytes# = 0:usize
+            auto r_idx# = 0:usize
+            loop r_idx < batch.structured_records.len() {
+                rec_bytes = rec_bytes + batch.structured_records.get(r_idx).len()
+                r_idx = r_idx + 1:usize
+            }
+            budget_delta = rec_bytes
+        }
 
         // Preflight byte budget
         if budget_state.limits.max_result_bytes_enabled {
             if budget_state.result_payload_bytes_emitted >= budget_state.limits.max_result_bytes ||
-               payload_len > budget_state.limits.max_result_bytes - budget_state.result_payload_bytes_emitted {
+               budget_delta > budget_state.limits.max_result_bytes - budget_state.result_payload_bytes_emitted {
                 budget_state.is_truncated = true
                 budget_state.truncation_reason = string::from("max_result_bytes")
                 budget_state.stopped_path = batch.path.clone()
@@ -118,10 +187,22 @@ impl OutputBudgetWriter {
             }
         }
 
+        if self.mcp_mode {
+            auto r_idx# = 0:usize
+            loop r_idx < batch.structured_records.len() {
+                self.structured_records#.push(batch.structured_records.borrow(r_idx).clone())
+                r_idx = r_idx + 1
+            }
+            self.text_record_bytes = self.text_record_bytes + batch.payload_str.len()
+            self.structured_record_bytes = self.structured_record_bytes + budget_delta
+            self.canonical_record_bytes = self.canonical_record_bytes + budget_delta
+            self.records_emitted = self.records_emitted + batch.structured_records.len()
+        }
+
         if batch.is_payload {
-            budget_state.result_payload_bytes_emitted = budget_state.result_payload_bytes_emitted + payload_len
+            budget_state.result_payload_bytes_emitted = budget_state.result_payload_bytes_emitted + budget_delta
         } else {
-            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + payload_len
+            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + budget_delta
         }
 
         return EmitOutcome::Written
@@ -669,4 +750,66 @@ pub fn print_files_list(files: Vec<string>) -> i32 {
         i = i + 1
     }
     return 0
+}
+
+pub fn format_mcp_structured_match(ev: MatchEvent) -> string {
+    auto rec# = string::from("{\"kind\":\"match\",\"group_id\":")
+    rec#.push_str(u64_to_string(ev.group_id as u64).as_str())
+    rec#.push_str(",\"path\":\"")
+    rec#.push_str(json_escape(ev.path.as_str()).as_str())
+    rec#.push_str("\",\"line_number\":")
+    rec#.push_str(u64_to_string(ev.line_number as u64).as_str())
+    rec#.push_str(",\"absolute_offset\":")
+    rec#.push_str(u64_to_string(ev.absolute_offset as u64).as_str())
+    rec#.push_str(",\"text\":\"")
+    rec#.push_str(json_escape(ev.line_text.as_str()).as_str())
+    rec#.push_str("\",\"submatches\":[")
+    auto i# = 0:usize
+    loop i < ev.submatches.len() {
+        if i > 0 { rec#.push_str(",") }
+        auto &sm = ev.submatches.borrow(i)
+        rec#.push_str("{\"match_text\":\"")
+        rec#.push_str(json_escape(sm.match_text.as_str()).as_str())
+        rec#.push_str("\",\"start\":")
+        rec#.push_str(u64_to_string(sm.start as u64).as_str())
+        rec#.push_str(",\"end\":")
+        rec#.push_str(u64_to_string(sm.end as u64).as_str())
+        rec#.push_str("}")
+        i = i + 1
+    }
+    rec#.push_str("],\"scope\":")
+    if ev.scope_name.len() > 0 {
+        rec#.push_str("\"")
+        rec#.push_str(json_escape(ev.scope_name.as_str()).as_str())
+        rec#.push_str("\"")
+    } else {
+        rec#.push_str("null")
+    }
+    rec#.push_str(",\"block_truncated\":")
+    if ev.block_truncated {
+        rec#.push_str("true}")
+    } else {
+        rec#.push_str("false}")
+    }
+    return cede rec
+}
+
+pub fn format_mcp_structured_context(ev: MatchEvent) -> string {
+    auto rec# = string::from("{\"kind\":\"context\",\"group_id\":")
+    rec#.push_str(u64_to_string(ev.group_id as u64).as_str())
+    rec#.push_str(",\"path\":\"")
+    rec#.push_str(json_escape(ev.path.as_str()).as_str())
+    rec#.push_str("\",\"line_number\":")
+    rec#.push_str(u64_to_string(ev.line_number as u64).as_str())
+    rec#.push_str(",\"absolute_offset\":")
+    rec#.push_str(u64_to_string(ev.absolute_offset as u64).as_str())
+    rec#.push_str(",\"text\":\"")
+    rec#.push_str(json_escape(ev.line_text.as_str()).as_str())
+    rec#.push_str("\",\"block_truncated\":")
+    if ev.block_truncated {
+        rec#.push_str("true}")
+    } else {
+        rec#.push_str("false}")
+    }
+    return cede rec
 }
