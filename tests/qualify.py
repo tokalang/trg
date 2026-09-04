@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.9.1 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.9.2 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -97,7 +97,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.1" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.9.1 identity on both binaries
+    # Validate exact 0.9.2 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.9.1 (Toka)", f"Expected 'trg 0.9.1 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.9.2 (Toka)", f"Expected 'trg 0.9.2 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.9.1 (Toka)", f"Expected 'trg 0.9.1 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.9.2 (Toka)", f"Expected 'trg 0.9.2 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.9.1
-    log("Test 1: Help & Version flags (exact 0.9.1 release identity)")
+    # Test 1: Help & Version exact 0.9.2
+    log("Test 1: Help & Version flags (exact 0.9.2 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.9.1 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.9.2 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.9.1 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.9.2 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -692,7 +692,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.9.1" in r_re_ctx.stdout
+    assert "trg 0.9.2" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1928,7 +1928,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.9.1"
+        assert resp1["result"]["serverInfo"]["version"] == "0.9.2"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -2182,8 +2182,231 @@ def main():
         if mcp_trunc_dir.exists():
             shutil.rmtree(mcp_trunc_dir)
 
+    # Test 96: Multi-byte UTF-8 Scope Truncation Safety
+    log("Test 96: Multi-byte UTF-8 Scope Truncation Safety")
+    utf8_dir = fixtures_dir / "test_utf8_scope"
+    try:
+        utf8_dir.mkdir(parents=True, exist_ok=True)
+        utf8_code = (
+            "pub fn 这是一段超长函数名称声明用于测试六十字节跨字符截断边界的处理逻辑() {\n"
+            "    let matched_item = 42;\n"
+            "}\n"
+            "pub fn 🚀🦀💡✨超长表情符号函数声明用于测试四字节字符截断() {\n"
+            "    let matched_emoji = 99;\n"
+            "}\n"
+            "pub fn short_func() {\n"
+            "    let matched_short = 1;\n"
+            "}\n"
+        )
+        (utf8_dir / "test_utf8.tk").write_text(utf8_code, encoding="utf-8")
+
+        # 1. Full JSON mode with --scope: verify 100% valid JSON and valid UTF-8 without UnicodeDecodeError
+        r_json = run_cmd([trg, "--json", "--scope", "matched_item", str(utf8_dir / "test_utf8.tk")])
+        assert r_json.returncode == 0
+        json_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        match_ev = next(ev for ev in json_lines if ev.get("type") == "match")
+        scope_data = match_ev["data"]["scope"]
+        assert scope_data is not None
+        scope_bytes = scope_data["text"].encode("utf-8")
+        assert len(scope_bytes) <= 60
+        assert scope_data["text"].startswith("pub fn")
+
+        # 2. Test 4-byte emoji boundary
+        r_emoji = run_cmd([trg, "--json", "--scope", "matched_emoji", str(utf8_dir / "test_utf8.tk")])
+        assert r_emoji.returncode == 0
+        emoji_lines = [json.loads(l) for l in r_emoji.stdout.strip().split("\n") if l.strip()]
+        emoji_match = next(ev for ev in emoji_lines if ev.get("type") == "match")
+        assert len(emoji_match["data"]["scope"]["text"].encode("utf-8")) <= 60
+
+        # 3. Compact JSON mode with --scope
+        r_compact = run_cmd([trg, "--json=compact", "--scope", "matched_item", str(utf8_dir / "test_utf8.tk")])
+        assert r_compact.returncode == 0
+        c_lines = [json.loads(l) for l in r_compact.stdout.strip().split("\n") if l.strip()]
+        c_match = next(ev for ev in c_lines if ev.get("type") == "match")
+        assert len(c_match["scope"].encode("utf-8")) <= 60
+
+        # 4. Human mode with --scope
+        r_human = run_cmd([trg, "--scope", "matched_item", str(utf8_dir / "test_utf8.tk")])
+        assert r_human.returncode == 0
+        assert "matched_item" in r_human.stdout
+    finally:
+        if utf8_dir.exists():
+            shutil.rmtree(utf8_dir)
+
+    # Test 97: MCP JSON-RPC 2.0 RFC Standards Compliance
+    log("Test 97: MCP JSON-RPC 2.0 RFC Standards Compliance")
+    mcp_rfc_dir = fixtures_dir / "test_mcp_rfc"
+    try:
+        mcp_rfc_dir.mkdir(parents=True, exist_ok=True)
+        (mcp_rfc_dir / "state.tk").write_text("pub shape BudgetState (\n    budget: usize\n)\n", encoding="utf-8")
+
+        # 1. Unicode escape handling: raw \u0042 must match 'B' -> "BudgetState"
+        raw_req_str = '{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"trg_search","arguments":{"pattern":"\\u0042udgetState","path":"' + str(mcp_rfc_dir / "state.tk") + '"}}}\n'
+        assert b"\\u0042" in raw_req_str.encode("utf-8")
+        r_esc = run_cmd([trg, "--mcp"], input_data=raw_req_str)
+        assert r_esc.returncode == 0
+        resp_esc = json.loads(r_esc.stdout.strip())
+        assert resp_esc["id"] == 201
+        assert "pub shape BudgetState" in resp_esc["result"]["content"][0]["text"]
+
+        # 2. Malformed JSON returns -32700 Parse error with id: null
+        malformed_json = '{"jsonrpc": "2.0", "id": 202, "method": "tools/call", invalid\n'
+        r_mal = run_cmd([trg, "--mcp"], input_data=malformed_json)
+        assert r_mal.returncode == 0
+        resp_mal = json.loads(r_mal.stdout.strip())
+        assert resp_mal["id"] is None
+        assert resp_mal["error"]["code"] == -32700
+        assert resp_mal["error"]["message"] == "Parse error"
+
+        # 3. Trailing garbage returns -32700 Parse error
+        trailing_json = '{"jsonrpc": "2.0", "id": 203, "method": "ping"} trailing_garbage\n'
+        r_trail = run_cmd([trg, "--mcp"], input_data=trailing_json)
+        assert r_trail.returncode == 0
+        resp_trail = json.loads(r_trail.stdout.strip())
+        assert resp_trail["id"] is None
+        assert resp_trail["error"]["code"] == -32700
+
+        # 4. Non-object root returns -32600 Invalid Request
+        array_root = '["not", "an", "object"]\n'
+        r_arr = run_cmd([trg, "--mcp"], input_data=array_root)
+        assert r_arr.returncode == 0
+        resp_arr = json.loads(r_arr.stdout.strip())
+        assert resp_arr["id"] is None
+        assert resp_arr["error"]["code"] == -32600
+
+        # 5. Invalid jsonrpc version != "2.0" returns -32600
+        bad_rpc = '{"jsonrpc": "1.0", "id": 204, "method": "ping"}\n'
+        r_rpc = run_cmd([trg, "--mcp"], input_data=bad_rpc)
+        assert r_rpc.returncode == 0
+        resp_rpc = json.loads(r_rpc.stdout.strip())
+        assert resp_rpc["id"] == 204
+        assert resp_rpc["error"]["code"] == -32600
+
+        # 6. Invalid params type returns -32602 Invalid params
+        bad_params = '{"jsonrpc": "2.0", "id": 205, "method": "tools/call", "params": "not_an_object"}\n'
+        r_params = run_cmd([trg, "--mcp"], input_data=bad_params)
+        assert r_params.returncode == 0
+        resp_params = json.loads(r_params.stdout.strip())
+        assert resp_params["id"] == 205
+        assert resp_params["error"]["code"] == -32602
+
+        # 7. Invalid args array items returns -32602
+        bad_args = '{"jsonrpc": "2.0", "id": 206, "method": "tools/call", "params": {"name": "trg_search", "arguments": {"pattern": "BudgetState", "args": [123]}}}\n'
+        r_args = run_cmd([trg, "--mcp"], input_data=bad_args)
+        assert r_args.returncode == 0
+        resp_args = json.loads(r_args.stdout.strip())
+        assert resp_args["id"] == 206
+        assert resp_args["error"]["code"] == -32602
+
+        # 8. Notification silence: notifications without "id" MUST produce NO response
+        notif_and_ping = (
+            '{"jsonrpc": "2.0", "method": "notifications/initialized"}\n'
+            '{"jsonrpc": "2.0", "id": 207, "method": "ping"}\n'
+        )
+        r_notif = run_cmd([trg, "--mcp"], input_data=notif_and_ping)
+        assert r_notif.returncode == 0
+        notif_lines = [l for l in r_notif.stdout.strip().split("\n") if l.strip()]
+        assert len(notif_lines) == 1, f"Expected exactly 1 response for ping, got {len(notif_lines)}: {notif_lines}"
+        resp_ping = json.loads(notif_lines[0])
+        assert resp_ping["id"] == 207
+    finally:
+        if mcp_rfc_dir.exists():
+            shutil.rmtree(mcp_rfc_dir)
+
+    # Test 98: Def-first File Statistics Truthfulness (cross-pass non-duplication)
+    log("Test 98: Def-first File Statistics Truthfulness (cross-pass non-duplication)")
+    stats_dir = fixtures_dir / "test_def_first_stats"
+    try:
+        stats_dir.mkdir(exist_ok=True)
+        (stats_dir / "a_def_and_use.tk").write_text("fn helper_target() {}\nfn caller_a() { helper_target(); }\n", encoding="utf-8")
+        (stats_dir / "b_def_and_use.tk").write_text("pub fn helper_target() {}\nfn caller_b() { helper_target(); }\n", encoding="utf-8")
+        (stats_dir / "c_only_use.tk").write_text("fn caller_c() { helper_target(); }\n", encoding="utf-8")
+        (stats_dir / "d_no_match.tk").write_text("fn unrelated_one() {}\n", encoding="utf-8")
+        (stats_dir / "e_no_match.tk").write_text("fn unrelated_two() {}\n", encoding="utf-8")
+
+        r_df_stat = run_cmd([trg, "--def-first", "--sort", "path", "--json=compact", "helper_target", str(stats_dir)])
+        assert r_df_stat.returncode == 0
+        events = [json.loads(line) for line in r_df_stat.stdout.strip().split("\n") if line.strip()]
+        
+        matches = [e for e in events if e.get("type") == "match"]
+        summaries = [e for e in events if e.get("type") == "summary"]
+        assert len(summaries) == 1
+        summary = summaries[0]
+
+        # Definitions must appear before usages
+        assert len(matches) == 5
+        def_texts = {matches[0]["text"].strip(), matches[1]["text"].strip()}
+        assert "fn helper_target() {}" in def_texts
+        assert "pub fn helper_target() {}" in def_texts
+        for usage_match in matches[2:]:
+            assert "helper_target();" in usage_match["text"]
+
+        # Cross-pass file statistics must NEVER duplicate counts
+        assert summary["files_scanned"] == 5, f"Expected files_scanned == 5, got {summary['files_scanned']}"
+        
+        unique_matched_files = {m["path"] for m in matches}
+        assert len(unique_matched_files) == 3
+        assert summary["files_emitted"] == 3, f"Expected files_emitted == 3, got {summary['files_emitted']}"
+        assert summary["files_observed"] == 3, f"Expected files_observed == 3, got {summary['files_observed']}"
+        assert summary["matches_emitted"] == 5
+    finally:
+        if stats_dir.exists():
+            shutil.rmtree(stats_dir)
+
+    # Test 99: CLI and MCP Output Parity under Budget Constraints
+    log("Test 99: CLI and MCP Execution Parity under Budget Constraints")
+    parity_dir = fixtures_dir / "test_cli_mcp_parity"
+    try:
+        parity_dir.mkdir(exist_ok=True)
+        for idx in range(10):
+            (parity_dir / f"item_{idx}.txt").write_text(f"common_entry line {idx} match\nother line\ncommon_entry line {idx} match again\n", encoding="utf-8")
+
+        # CLI execution with budget capping
+        r_cli_p = run_cmd([trg, "--json=compact", "--max-total-matches=4", "common_entry", str(parity_dir)])
+        assert r_cli_p.returncode == 0
+        cli_events = [json.loads(line) for line in r_cli_p.stdout.strip().split("\n") if line.strip()]
+        cli_matches = [e for e in cli_events if e.get("type") == "match"]
+        cli_summary = [e for e in cli_events if e.get("type") == "summary"][0]
+
+        # MCP execution with identical budget
+        mcp_req = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 301,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "common_entry",
+                    "path": str(parity_dir),
+                    "max_matches": 4,
+                    "args": ["--json=compact"]
+                }
+            }
+        }) + "\n"
+        r_mcp_p = run_cmd([trg, "--mcp"], input_data=mcp_req)
+        assert r_mcp_p.returncode == 0
+        mcp_resp = json.loads(r_mcp_p.stdout.strip())
+        mcp_content = mcp_resp["result"]["content"][0]["text"]
+        mcp_events = [json.loads(line) for line in mcp_content.strip().split("\n") if line.strip()]
+        mcp_matches = [e for e in mcp_events if e.get("type") == "match"]
+        mcp_summary = [e for e in mcp_events if e.get("type") == "summary"][0]
+
+        # Strict parity assertions
+        assert len(cli_matches) == 4
+        assert len(mcp_matches) == 4
+        assert cli_summary["truncated"] is True
+        assert mcp_summary["truncated"] is True
+        assert cli_summary["reason"] == "max_total_matches"
+        assert mcp_summary["reason"] == "max_total_matches"
+        assert cli_summary["matches_emitted"] == mcp_summary["matches_emitted"] == 4
+        assert mcp_resp["result"]["_meta"]["summary"]["complete"] is False
+        assert mcp_resp["result"]["_meta"]["summary"]["termination_reason"] == "max_total_matches"
+    finally:
+        if parity_dir.exists():
+            shutil.rmtree(parity_dir)
+
     log("=" * 60)
-    log("ALL 95 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.1)!")
+    log("ALL 99 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.2)!")
     log("=" * 60)
 
 if __name__ == "__main__":

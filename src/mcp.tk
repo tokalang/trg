@@ -3,209 +3,159 @@ import core/str::{str}
 import core/option::{Option}
 import core/result::{Result}
 import std/vec::{Vec}
-import src/types::{CliOptions, GlobalStats, BudgetState}
+import std/hashmap::{HashMap}
+import stdx/serde/json::{JsonNode}
+import src/types::{CliOptions}
 import src/posix::{posix_write_stdout, posix_read_stdin_line}
 import src/cli::{parse_cli_args_from_vec}
-import src/matcher::{SearchPlan}
-import src/walker::{collect_search_targets}
-import src/scanner::{scan_file_stream_with_pass}
 import src/printer::{
     OutputBudgetWriter,
-    FileFrameState,
-    OutputBatch,
     EmitOutcome,
-    format_summary_json,
-    format_summary_json_compact,
     u64_to_string,
     json_escape
 }
+import src/executor::{execute_search, finalize_search}
 
-fn find_json_key(json: str, key: str) -> Option<usize> {
-    auto pattern# = string::from("\"")
-    pattern#.push_str(key)
-    pattern#.push_str("\"")
-    auto idx_opt = json.index_of_str(pattern.as_str())
-    if idx_opt.is_none() {
-        return Option<usize>::None
-    }
-    auto pos# = idx_opt.unwrap() + pattern.len()
-    loop pos < json.len {
-        auto ch = json.byte_at(pos)
-        if ch == (':' as char) {
-            pos = pos + 1
-            break
+fn parse_usize_str(s: str) -> Option<usize> {
+    if s.len == 0 { return Option<usize>::None }
+    auto res# = 0:usize
+    auto i# = 0:usize
+    loop i < s.len {
+        auto b = s.byte_at(i)
+        if b < ('0' as char) || b > ('9' as char) {
+            return Option<usize>::None
         }
-        pos = pos + 1
+        res = res * 10 + ((b as usize) - ('0' as usize))
+        i = i + 1
     }
-    loop pos < json.len {
-        auto ch = json.byte_at(pos)
-        if ch != (' ' as char) && ch != ('\t' as char) && ch != ('\r' as char) && ch != ('\n' as char) {
-            break
-        }
-        pos = pos + 1
-    }
-    if pos < json.len {
-        return Option<usize>::Some(pos)
-    }
-    return Option<usize>::None
+    return Option<usize>::Some(res)
 }
 
-fn extract_json_raw_id(json: str) -> string {
-    auto pos_opt = find_json_key(json, "id")
-    if pos_opt.is_none() {
-        return string::from("null")
-    }
-    auto pos# = pos_opt.unwrap()
-    if json.byte_at(pos) == ('"' as char) {
-        auto start = pos
-        pos = pos + 1
-        auto escape# = false
-        loop pos < json.len {
-            auto ch = json.byte_at(pos)
-            if escape {
-                escape = false
-            } else if ch == ('\\' as char) {
-                escape = true
-            } else if ch == ('"' as char) {
-                pos = pos + 1
-                break
-            }
-            pos = pos + 1
-        }
-        return string::from(json.substr(start, pos - start))
-    } else {
-        auto start = pos
-        loop pos < json.len {
-            auto ch = json.byte_at(pos)
-            if ch == (',' as char) || ch == ('}' as char) || ch == (']' as char) ||
-               ch == (' ' as char) || ch == ('\t' as char) || ch == ('\r' as char) || ch == ('\n' as char) {
-                break
-            }
-            pos = pos + 1
-        }
-        return string::from(json.substr(start, pos - start))
-    }
-}
-
-fn extract_json_string(json: str, key: str) -> Option<string> {
-    auto pos_opt = find_json_key(json, key)
-    if pos_opt.is_none() {
-        return Option<string>::None
-    }
-    auto pos# = pos_opt.unwrap()
-    if json.byte_at(pos) != ('"' as char) {
-        return Option<string>::None
-    }
-    pos = pos + 1
-    auto out# = string::new()
-    auto escape# = false
-    loop pos < json.len {
-        auto ch = json.byte_at(pos)
-        if escape {
-            if ch == ('n' as char) { out#.push_char('\n' as char) }
-            else if ch == ('r' as char) { out#.push_char('\r' as char) }
-            else if ch == ('t' as char) { out#.push_char('\t' as char) }
-            else if ch == ('"' as char) { out#.push_char('"' as char) }
-            else if ch == ('\\' as char) { out#.push_char('\\' as char) }
-            else { out#.push_char(ch) }
-            escape = false
-        } else if ch == ('\\' as char) {
-            escape = true
-        } else if ch == ('"' as char) {
-            return Option<string>::Some(cede out)
-        } else {
-            out#.push_char(ch)
-        }
-        pos = pos + 1
-    }
-    return Option<string>::None
-}
-
-fn extract_json_string_array(json: str, key: str) -> Vec<string> {
-    auto res# = Vec<string>::new()
-    auto pos_opt = find_json_key(json, key)
-    if pos_opt.is_none() {
-        return cede res
-    }
-    auto pos# = pos_opt.unwrap()
-    if json.byte_at(pos) != ('[' as char) {
-        return cede res
-    }
-    pos = pos + 1
-    loop pos < json.len {
-        auto ch = json.byte_at(pos)
-        if ch == (']' as char) {
-            break
-        }
-        if ch == ('"' as char) {
-            pos = pos + 1
-            auto item# = string::new()
-            auto escape# = false
-            loop pos < json.len {
-                auto c = json.byte_at(pos)
-                if escape {
-                    if c == ('n' as char) { item#.push_char('\n' as char) }
-                    else if c == ('r' as char) { item#.push_char('\r' as char) }
-                    else if c == ('t' as char) { item#.push_char('\t' as char) }
-                    else if c == ('"' as char) { item#.push_char('"' as char) }
-                    else if c == ('\\' as char) { item#.push_char('\\' as char) }
-                    else { item#.push_char(c) }
-                    escape = false
-                } else if c == ('\\' as char) {
-                    escape = true
-                } else if c == ('"' as char) {
-                    pos = pos + 1
-                    break
-                } else {
-                    item#.push_char(c)
+fn json_map_get_string(map: HashMap<string, JsonNode>, key: str) -> Option<string> {
+    match map.try_borrow(string::from(key)) {
+        auto Option<&JsonNode>::Some(&node) => {
+            match node {
+                auto JsonNode::StrNode(&s) => {
+                    return Option<string>::Some(s.clone())
                 }
-                pos = pos + 1
+                _ => {
+                    return Option<string>::None
+                }
             }
-            res#.push(cede item)
-            continue
         }
-        pos = pos + 1
+        _ => {
+            return Option<string>::None
+        }
     }
-    return cede res
 }
 
-fn extract_json_bool(json: str, key: str) -> Option<bool> {
-    auto pos_opt = find_json_key(json, key)
-    if pos_opt.is_none() {
-        return Option<bool>::None
+fn json_map_get_bool(map: HashMap<string, JsonNode>, key: str) -> Option<bool> {
+    match map.try_borrow(string::from(key)) {
+        auto Option<&JsonNode>::Some(&node) => {
+            match node {
+                auto JsonNode::BoolNode(b) => {
+                    return Option<bool>::Some(b)
+                }
+                _ => {
+                    return Option<bool>::None
+                }
+            }
+        }
+        _ => {
+            return Option<bool>::None
+        }
     }
-    auto pos = pos_opt.unwrap()
-    if pos + 4 <= json.len && json.substr(pos, 4:usize) == "true" {
-        return Option<bool>::Some(true)
-    }
-    if pos + 5 <= json.len && json.substr(pos, 5:usize) == "false" {
-        return Option<bool>::Some(false)
-    }
-    return Option<bool>::None
 }
 
-fn extract_json_usize(json: str, key: str) -> Option<usize> {
-    auto pos_opt = find_json_key(json, key)
-    if pos_opt.is_none() {
-        return Option<usize>::None
-    }
-    auto pos# = pos_opt.unwrap()
-    auto num# = 0:usize
-    auto found_digit# = false
-    loop pos < json.len {
-        auto ch = json.byte_at(pos)
-        if ch >= ('0' as char) && ch <= ('9' as char) {
-            found_digit = true
-            num = num * 10 + ((ch as usize) - ('0' as usize))
-        } else {
-            break
+fn json_map_get_usize(map: HashMap<string, JsonNode>, key: str) -> Option<usize> {
+    match map.try_borrow(string::from(key)) {
+        auto Option<&JsonNode>::Some(&node) => {
+            match node {
+                auto JsonNode::NumNode(f) => {
+                    if f >= 0.0 && f <= 9007199254740991.0 {
+                        return Option<usize>::Some(f as usize)
+                    }
+                    return Option<usize>::None
+                }
+                auto JsonNode::StrNode(&s) => {
+                    return parse_usize_str(s.as_str())
+                }
+                _ => {
+                    return Option<usize>::None
+                }
+            }
         }
-        pos = pos + 1
+        _ => {
+            return Option<usize>::None
+        }
     }
-    if found_digit {
-        return Option<usize>::Some(num)
+}
+
+fn json_map_get_string_array(map: HashMap<string, JsonNode>, key: str) -> Option<Vec<string>> {
+    match map.try_borrow(string::from(key)) {
+        auto Option<&JsonNode>::Some(&node) => {
+            match node {
+                auto JsonNode::ArrayNode(&arr) => {
+                    auto res# = Vec<string>::new()
+                    auto i# = 0:usize
+                    loop i < arr.len() {
+                        auto &item = arr.borrow(i)
+                        match item {
+                            auto JsonNode::StrNode(&s) => {
+                                res#.push(s.clone())
+                            }
+                            _ => {
+                                return Option<Vec<string>>::None
+                            }
+                        }
+                        i = i + 1
+                    }
+                    return Option<Vec<string>>::Some(cede res)
+                }
+                _ => {
+                    return Option<Vec<string>>::None
+                }
+            }
+        }
+        _ => {
+            return Option<Vec<string>>::None
+        }
     }
-    return Option<usize>::None
+}
+
+pub shape JsonIdResult (
+    has_id: bool,
+    id_str: string
+)
+
+fn json_map_extract_id(map: HashMap<string, JsonNode>) -> JsonIdResult {
+    match map.try_borrow(string::from("id")) {
+        auto Option<&JsonNode>::Some(&node) => {
+            match node {
+                auto JsonNode::NumNode(n) => {
+                    if n >= 0.0 && n <= 9007199254740991.0 {
+                        return JsonIdResult(has_id = true, id_str = u64_to_string(n as u64))
+                    }
+                    return JsonIdResult(has_id = true, id_str = string::from("null"))
+                }
+                auto JsonNode::StrNode(&s) => {
+                    auto out# = string::from("\"")
+                    out#.push_str(json_escape(s.as_str()).as_str())
+                    out#.push_str("\"")
+                    return JsonIdResult(has_id = true, id_str = cede out)
+                }
+                auto JsonNode::NullNode(_) => {
+                    return JsonIdResult(has_id = true, id_str = string::from("null"))
+                }
+                _ => {
+                    return JsonIdResult(has_id = true, id_str = string::from("null"))
+                }
+            }
+        }
+        _ => {
+            return JsonIdResult(has_id = false, id_str = string::from("null"))
+        }
+    }
 }
 
 pub shape McpSearchResult (
@@ -229,138 +179,33 @@ fn join_memory_buffer(buf: Vec<string>) -> string {
 }
 
 pub fn run_search_to_memory(opts: CliOptions) -> Result<McpSearchResult, string> {
-    auto plan_res = SearchPlan::create(opts)
-    if !opts.files_mode && plan_res.is_err() {
-        return Result<McpSearchResult, string>::Err(plan_res.unwrap_err())
-    }
-
-    auto walk_res = collect_search_targets(opts)
-    auto global_had_error# = walk_res.had_error
-    auto files = walk_res.files.clone()
-    auto num_files = files.len()
-
-    auto budget_state# = BudgetState::new(opts.budget_limits)
-    budget_state.files_selected = num_files
     auto writer = OutputBudgetWriter::new_memory(opts.json_mode, opts.json_compact, opts.budget_limits.is_budget_active())
+    auto search_res = execute_search(opts, writer)
+    if search_res.is_err() {
+        return Result<McpSearchResult, string>::Err(search_res.unwrap_err())
+    }
+    auto report = search_res.unwrap()
 
-    if opts.files_mode {
-        auto f_idx# = 0:usize
-        auto dummy_frame# = FileFrameState(target_path = string::from(""), begin_emitted = false)
-        loop f_idx < num_files {
-            if budget_state.is_truncated { break }
-            auto &path_str = files.borrow(f_idx)
-            auto wire_str# = path_str.clone()
-            wire_str#.push_str("\n")
-            auto batch = OutputBatch(payload_str = cede wire_str, path = path_str.clone(), line_number = 0, is_payload = true)
-            auto outcome = writer.emit_payload(budget_state#, dummy_frame#, batch)
-            match outcome {
-                EmitOutcome::Written => {}
-                EmitOutcome::Truncated => { break }
-                EmitOutcome::BrokenPipe => { break }
-                EmitOutcome::FatalError => { return Result<McpSearchResult, string>::Err(string::from("Write error")) }
-            }
-            f_idx = f_idx + 1
+    auto fin_outcome = finalize_search(opts, writer, report)
+    match fin_outcome {
+        EmitOutcome::FatalError => {
+            return Result<McpSearchResult, string>::Err(string::from("Write error"))
         }
-        auto is_trunc = budget_state.is_truncated
-        auto is_comp = !is_trunc && !global_had_error
-        auto term_reason# = string::from("completed")
-        if is_trunc {
-            term_reason = budget_state.truncation_reason.clone()
-        } else if global_had_error {
-            term_reason = string::from("search_error")
-        }
-        return Result<McpSearchResult, string>::Ok(McpSearchResult(
-            output_text = join_memory_buffer(writer.memory_buffer),
-            complete = is_comp,
-            truncated = is_trunc,
-            termination_reason = cede term_reason,
-            matches_emitted = f_idx,
-            files_scanned = budget_state.files_scanned
-        ))
+        _ => {}
     }
 
-    auto plan = plan_res.unwrap()
-    auto multiple_files = num_files > 1 || opts.paths.len() > 1
-    auto total_matches# = 0:usize
-    auto files_with_match# = 0:usize
-
-    if opts.def_first {
-        auto i# = 0:usize
-        loop i < num_files {
-            if budget_state.is_truncated { break }
-            auto &target_file = files.borrow(i)
-            auto is_stdin = target_file.as_str() == "-"
-            auto cur_pass# = 1:usize
-            if is_stdin { cur_pass = 0:usize }
-            auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, cur_pass)
-            if scan_res.had_error { global_had_error = true }
-            if !scan_res.is_binary && !scan_res.had_error {
-                if scan_res.has_match {
-                    files_with_match = files_with_match + 1
-                    total_matches = total_matches + scan_res.matches_count
-                }
-            }
-            i = i + 1
-        }
-
-        if !budget_state.is_truncated {
-            auto j# = 0:usize
-            loop j < num_files {
-                if budget_state.is_truncated { break }
-                auto &target_file = files.borrow(j)
-                auto is_stdin = target_file.as_str() == "-"
-                if !is_stdin {
-                    auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, 2:usize)
-                    if scan_res.had_error { global_had_error = true }
-                    if !scan_res.is_binary && !scan_res.had_error {
-                        if scan_res.has_match {
-                            total_matches = total_matches + scan_res.matches_count
-                        }
-                    }
-                }
-                j = j + 1
-            }
-        }
-    } else {
-        auto i# = 0:usize
-        loop i < num_files {
-            if budget_state.is_truncated { break }
-            auto &target_file = files.borrow(i)
-            auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, 0:usize)
-            if scan_res.had_error { global_had_error = true }
-            if !scan_res.is_binary && !scan_res.had_error {
-                if scan_res.has_match {
-                    files_with_match = files_with_match + 1
-                    total_matches = total_matches + scan_res.matches_count
-                }
-            }
-            i = i + 1
-        }
-    }
-
-    if opts.json_mode {
-        auto stats = GlobalStats(
-            total_files = num_files,
-            files_with_match = files_with_match,
-            total_matches = total_matches,
-            elapsed_nanos = 0:u64
-        )
-        auto sum_str# = string::new()
-        if opts.json_compact {
-            sum_str = format_summary_json_compact(stats, budget_state, global_had_error)
-        } else {
-            sum_str = format_summary_json(stats, budget_state, global_had_error)
-        }
-        writer.memory_buffer#.push(cede sum_str)
-    }
-
-    auto is_trunc = budget_state.is_truncated
-    auto is_comp = !is_trunc && !global_had_error
+    auto is_trunc = report.budget_state.is_truncated
+    auto is_comp = !is_trunc && !report.had_error
     auto term_reason# = string::from("completed")
     if is_trunc {
-        term_reason = budget_state.truncation_reason.clone()
-    } else if global_had_error {
+        term_reason = report.budget_state.truncation_reason.clone()
+    } else if report.had_error {
         term_reason = string::from("search_error")
+    }
+
+    auto emitted# = report.budget_state.matched_lines_emitted
+    if opts.files_mode {
+        emitted = report.total_matches
     }
 
     return Result<McpSearchResult, string>::Ok(McpSearchResult(
@@ -368,8 +213,8 @@ pub fn run_search_to_memory(opts: CliOptions) -> Result<McpSearchResult, string>
         complete = is_comp,
         truncated = is_trunc,
         termination_reason = cede term_reason,
-        matches_emitted = budget_state.matched_lines_emitted,
-        files_scanned = budget_state.files_scanned
+        matches_emitted = emitted,
+        files_scanned = report.files_scanned
     ))
 }
 
@@ -391,197 +236,293 @@ pub fn run_mcp_server() -> i32 {
         if trimmed.len == 0 {
             continue
         }
-        if !trimmed.starts_with("{") {
+
+        auto root# = JsonNode::NullNode(0):JsonNode
+        auto parse_err# = false
+        match root#.parse_json(trimmed) {
+            auto Result<str, str>::Ok('rem) => {
+                if 'rem.trim().len > 0 {
+                    parse_err = true
+                }
+            }
+            auto Result<str, str>::Err('e) => {
+                parse_err = true
+            }
+        }
+        if parse_err {
+            send_mcp_response("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}")
             continue
         }
 
-        auto id_str = extract_json_raw_id(trimmed)
-        auto method_opt = extract_json_string(trimmed, "method")
-        if method_opt.is_none() {
-            continue
-        }
-        auto method = method_opt.unwrap()
+        match root {
+            auto JsonNode::ObjectNode(&map) => {
+                auto id_res = json_map_extract_id(map)
+                auto has_id = id_res.has_id
+                auto id_str = id_res.id_str.clone()
 
-        if method.as_str() == "initialize" {
-            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-            resp#.push_str(id_str.as_str())
-            resp#.push_str(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.9.1\"}}}")
-            send_mcp_response(resp.as_str())
-        } else if method.as_str() == "notifications/initialized" {
-            // Notification: no response
-        } else if method.as_str() == "ping" {
-            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-            resp#.push_str(id_str.as_str())
-            resp#.push_str(",\"result\":{}}")
-            send_mcp_response(resp.as_str())
-        } else if method.as_str() == "tools/list" {
-            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-            resp#.push_str(id_str.as_str())
-            resp#.push_str(",\"result\":{\"tools\":[{\"name\":\"trg_search\",\"description\":\"Fast ripgrep-compatible code search with semantic block context, scopes, and budget control.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Search pattern (literal or regex with -E)\"},\"path\":{\"type\":\"string\",\"description\":\"Path or directory to search\"},\"block\":{\"type\":\"boolean\",\"description\":\"Include enclosing code block context\"},\"scope\":{\"type\":\"boolean\",\"description\":\"Show enclosing class/function header for matches\"},\"def_first\":{\"type\":\"boolean\",\"description\":\"Prioritize definitions before usages\"},\"max_matches\":{\"type\":\"integer\",\"description\":\"Limit total matches returned\"},\"max_bytes\":{\"type\":\"string\",\"description\":\"Limit total result bytes emitted (e.g. \\\"4K\\\", \\\"1M\\\", \\\"50000\\\")\"},\"type\":{\"type\":\"string\",\"description\":\"Filter by file type (e.g. rust, py, tk)\"},\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Additional CLI arguments, e.g. [\\\"--json=compact\\\"]\"}},\"required\":[\"pattern\"]}}]}}")
-            send_mcp_response(resp.as_str())
-        } else if method.as_str() == "tools/call" {
-            auto tool_name_opt = extract_json_string(trimmed, "name")
-            auto is_valid_tool# = false
-            if tool_name_opt.is_some() {
-                auto tn = tool_name_opt.unwrap()
-                if tn.as_str() == "trg_search" {
-                    is_valid_tool = true
+                // Verify "jsonrpc" == "2.0"
+                auto valid_rpc# = false
+                match map.try_borrow(string::from("jsonrpc")) {
+                    auto Option<&JsonNode>::Some(&rpc_node) => {
+                        match rpc_node {
+                            auto JsonNode::StrNode(&rpc_s) => {
+                                if rpc_s.as_str() == "2.0" {
+                                    valid_rpc = true
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                if !valid_rpc {
+                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                    resp#.push_str(id_str.as_str())
+                    resp#.push_str(",\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}")
+                    send_mcp_response(resp.as_str())
+                    continue
+                }
+
+                // Verify "method" is string
+                auto method_opt = json_map_get_string(map, "method")
+                if method_opt.is_none() {
+                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                    resp#.push_str(id_str.as_str())
+                    resp#.push_str(",\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}")
+                    send_mcp_response(resp.as_str())
+                    continue
+                }
+                auto method = method_opt.unwrap()
+
+                // Notifications (no id) MUST NOT receive a response per JSON-RPC 2.0
+                if !has_id {
+                    continue
+                }
+
+                if method.as_str() == "initialize" {
+                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                    resp#.push_str(id_str.as_str())
+                    resp#.push_str(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.9.2\"}}}")
+                    send_mcp_response(resp.as_str())
+                } else if method.as_str() == "ping" {
+                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                    resp#.push_str(id_str.as_str())
+                    resp#.push_str(",\"result\":{}}")
+                    send_mcp_response(resp.as_str())
+                } else if method.as_str() == "tools/list" {
+                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                    resp#.push_str(id_str.as_str())
+                    resp#.push_str(",\"result\":{\"tools\":[{\"name\":\"trg_search\",\"description\":\"Fast ripgrep-compatible code search with semantic block context, scopes, and budget control.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Search pattern (literal or regex with -E)\"},\"path\":{\"type\":\"string\",\"description\":\"Path or directory to search\"},\"block\":{\"type\":\"boolean\",\"description\":\"Include enclosing code block context\"},\"scope\":{\"type\":\"boolean\",\"description\":\"Show enclosing class/function header for matches\"},\"def_first\":{\"type\":\"boolean\",\"description\":\"Prioritize definitions before usages\"},\"max_matches\":{\"type\":\"integer\",\"description\":\"Limit total matches returned\"},\"max_bytes\":{\"type\":\"string\",\"description\":\"Limit total result bytes emitted (e.g. \\\"4K\\\", \\\"1M\\\", \\\"50000\\\")\"},\"type\":{\"type\":\"string\",\"description\":\"Filter by file type (e.g. rust, py, tk)\"},\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Additional CLI arguments, e.g. [\\\"--json=compact\\\"]\"}},\"required\":[\"pattern\"]}}]}}")
+                    send_mcp_response(resp.as_str())
+                } else if method.as_str() == "tools/call" {
+                    match map.try_borrow(string::from("params")) {
+                        auto Option<&JsonNode>::Some(&p_val) => {
+                            match p_val {
+                                auto JsonNode::ObjectNode(&p_map) => {
+                                    auto tool_name_opt = json_map_get_string(p_map, "name")
+                                    auto is_valid_tool# = false
+                                    if tool_name_opt.is_some() {
+                                        auto tn = tool_name_opt.unwrap()
+                                        if tn.as_str() == "trg_search" {
+                                            is_valid_tool = true
+                                        }
+                                    }
+                                    if !is_valid_tool {
+                                        auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                        resp#.push_str(id_str.as_str())
+                                        resp#.push_str(",\"error\":{\"code\":-32601,\"message\":\"Unknown tool\"}}")
+                                        send_mcp_response(resp.as_str())
+                                        continue
+                                    }
+
+                                    match p_map.try_borrow(string::from("arguments")) {
+                                        auto Option<&JsonNode>::Some(&a_val) => {
+                                            match a_val {
+                                                auto JsonNode::ObjectNode(&a_map) => {
+                                                    auto pattern_opt = json_map_get_string(a_map, "pattern")
+                                                    if pattern_opt.is_none() {
+                                                        auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                        resp#.push_str(id_str.as_str())
+                                                        resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Missing required argument: pattern\"}],\"isError\":true}}")
+                                                        send_mcp_response(resp.as_str())
+                                                        continue
+                                                    }
+
+                                                    auto pattern = pattern_opt.unwrap()
+                                                    auto path_opt = json_map_get_string(a_map, "path")
+                                                    auto block_opt = json_map_get_bool(a_map, "block")
+                                                    auto scope_opt = json_map_get_bool(a_map, "scope")
+                                                    auto def_first_opt = json_map_get_bool(a_map, "def_first")
+                                                    auto max_matches_opt = json_map_get_usize(a_map, "max_matches")
+                                                    auto max_bytes_str_opt = json_map_get_string(a_map, "max_bytes")
+                                                    auto max_bytes_num_opt = json_map_get_usize(a_map, "max_bytes")
+                                                    auto type_opt = json_map_get_string(a_map, "type")
+
+                                                    auto extra_args# = Vec<string>::new()
+                                                    if a_map.contains_key(string::from("args")) {
+                                                        auto arr_opt = json_map_get_string_array(a_map, "args")
+                                                        if arr_opt.is_none() {
+                                                            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                            resp#.push_str(id_str.as_str())
+                                                            resp#.push_str(",\"error\":{\"code\":-32602,\"message\":\"Invalid params: args must be an array of strings\"}}")
+                                                            send_mcp_response(resp.as_str())
+                                                            continue
+                                                        }
+                                                        extra_args = arr_opt.unwrap()
+                                                    }
+
+                                                    auto argv# = Vec<string>::new()
+                                                    argv#.push(string::from("trg"))
+                                                    argv#.push(pattern)
+                                                    if path_opt.is_some() {
+                                                        argv#.push(path_opt.unwrap())
+                                                    }
+                                                    if block_opt.is_some() {
+                                                        auto b = block_opt.unwrap()
+                                                        if b {
+                                                            argv#.push(string::from("--block"))
+                                                        }
+                                                    }
+                                                    if scope_opt.is_some() {
+                                                        auto s = scope_opt.unwrap()
+                                                        if s {
+                                                            argv#.push(string::from("--scope"))
+                                                        }
+                                                    }
+                                                    if def_first_opt.is_some() {
+                                                        auto d = def_first_opt.unwrap()
+                                                        if d {
+                                                            argv#.push(string::from("--def-first"))
+                                                        }
+                                                    }
+                                                    if max_matches_opt.is_some() {
+                                                        argv#.push(string::from("--max-total-matches"))
+                                                        argv#.push(u64_to_string(max_matches_opt.unwrap() as u64))
+                                                    }
+                                                    if max_bytes_str_opt.is_some() {
+                                                        argv#.push(string::from("--max-result-bytes"))
+                                                        argv#.push(max_bytes_str_opt.unwrap())
+                                                    } else if max_bytes_num_opt.is_some() {
+                                                        argv#.push(string::from("--max-result-bytes"))
+                                                        argv#.push(u64_to_string(max_bytes_num_opt.unwrap() as u64))
+                                                    }
+                                                    if type_opt.is_some() {
+                                                        argv#.push(string::from("-t"))
+                                                        argv#.push(type_opt.unwrap())
+                                                    }
+                                                    auto a_idx# = 0:usize
+                                                    auto a_len = extra_args.len()
+                                                    loop a_idx < a_len {
+                                                        argv#.push(extra_args.borrow(a_idx).clone())
+                                                        a_idx = a_idx + 1
+                                                    }
+
+                                                    auto opts_res = parse_cli_args_from_vec(argv)
+                                                    if opts_res.is_err() {
+                                                        auto err_msg = json_escape(opts_res.unwrap_err().as_str())
+                                                        auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                        resp#.push_str(id_str.as_str())
+                                                        resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+                                                        resp#.push_str(err_msg.as_str())
+                                                        resp#.push_str("\"}],\"isError\":true}}")
+                                                        send_mcp_response(resp.as_str())
+                                                        continue
+                                                    }
+
+                                                    auto search_opts = opts_res.unwrap()
+                                                    auto search_res = run_search_to_memory(search_opts)
+                                                    if search_res.is_err() {
+                                                        auto err_msg = json_escape(search_res.unwrap_err().as_str())
+                                                        auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                        resp#.push_str(id_str.as_str())
+                                                        resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+                                                        resp#.push_str(err_msg.as_str())
+                                                        resp#.push_str("\"}],\"isError\":true}}")
+                                                        send_mcp_response(resp.as_str())
+                                                        continue
+                                                    }
+
+                                                    auto mcp_res = search_res.unwrap()
+                                                    auto text_out# = mcp_res.output_text.clone()
+
+                                                    if !search_opts.json_mode {
+                                                        if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
+                                                            text_out#.push_str("\n")
+                                                        }
+                                                        text_out#.push_str("[trg: complete=")
+                                                        if mcp_res.complete { text_out#.push_str("true") } else { text_out#.push_str("false") }
+                                                        text_out#.push_str(", truncated=")
+                                                        if mcp_res.truncated { text_out#.push_str("true") } else { text_out#.push_str("false") }
+                                                        text_out#.push_str(", reason=")
+                                                        text_out#.push_str(mcp_res.termination_reason.as_str())
+                                                        text_out#.push_str(", matches=")
+                                                        text_out#.push_str(u64_to_string(mcp_res.matches_emitted as u64).as_str())
+                                                        text_out#.push_str(", scanned=")
+                                                        text_out#.push_str(u64_to_string(mcp_res.files_scanned as u64).as_str())
+                                                        text_out#.push_str("]\n")
+                                                    }
+
+                                                    auto esc_output = json_escape(text_out.as_str())
+                                                    auto esc_reason = json_escape(mcp_res.termination_reason.as_str())
+
+                                                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                    resp#.push_str(id_str.as_str())
+                                                    resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+                                                    resp#.push_str(esc_output.as_str())
+                                                    resp#.push_str("\"}],\"_meta\":{\"summary\":{\"complete\":")
+                                                    if mcp_res.complete { resp#.push_str("true") } else { resp#.push_str("false") }
+                                                    resp#.push_str(",\"truncated\":")
+                                                    if mcp_res.truncated { resp#.push_str("true") } else { resp#.push_str("false") }
+                                                    resp#.push_str(",\"termination_reason\":\"")
+                                                    resp#.push_str(esc_reason.as_str())
+                                                    resp#.push_str("\",\"matches_emitted\":")
+                                                    resp#.push_str(u64_to_string(mcp_res.matches_emitted as u64).as_str())
+                                                    resp#.push_str(",\"files_scanned\":")
+                                                    resp#.push_str(u64_to_string(mcp_res.files_scanned as u64).as_str())
+                                                    resp#.push_str("}}}}")
+                                                    send_mcp_response(resp.as_str())
+                                                }
+                                                _ => {
+                                                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                    resp#.push_str(id_str.as_str())
+                                                    resp#.push_str(",\"error\":{\"code\":-32602,\"message\":\"Invalid params: arguments must be an object\"}}")
+                                                    send_mcp_response(resp.as_str())
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                            resp#.push_str(id_str.as_str())
+                                            resp#.push_str(",\"error\":{\"code\":-32602,\"message\":\"Invalid params: arguments must be an object\"}}")
+                                            send_mcp_response(resp.as_str())
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                    resp#.push_str(id_str.as_str())
+                                    resp#.push_str(",\"error\":{\"code\":-32602,\"message\":\"Invalid params: params must be an object\"}}")
+                                    send_mcp_response(resp.as_str())
+                                }
+                            }
+                        }
+                        _ => {
+                            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                            resp#.push_str(id_str.as_str())
+                            resp#.push_str(",\"error\":{\"code\":-32602,\"message\":\"Invalid params: params must be an object\"}}")
+                            send_mcp_response(resp.as_str())
+                        }
+                    }
+                } else {
+                    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                    resp#.push_str(id_str.as_str())
+                    resp#.push_str(",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}")
+                    send_mcp_response(resp.as_str())
                 }
             }
-            if !is_valid_tool {
-                auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-                resp#.push_str(id_str.as_str())
-                resp#.push_str(",\"error\":{\"code\":-32601,\"message\":\"Unknown tool\"}}")
-                send_mcp_response(resp.as_str())
-                continue
+            _ => {
+                send_mcp_response("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid Request\"}}")
             }
-
-            // Slice inside arguments for pattern, path, args
-            auto args_slice# = trimmed
-            auto args_pos_opt = find_json_key(trimmed, "arguments")
-            if args_pos_opt.is_some() {
-                auto apos = args_pos_opt.unwrap()
-                args_slice = trimmed.substr(apos, trimmed.len - apos)
-            }
-
-            auto pattern_opt = extract_json_string(args_slice, "pattern")
-            if pattern_opt.is_none() {
-                auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-                resp#.push_str(id_str.as_str())
-                resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Missing required argument: pattern\"}],\"isError\":true}}")
-                send_mcp_response(resp.as_str())
-                continue
-            }
-
-            auto pattern = pattern_opt.unwrap()
-            auto path_opt = extract_json_string(args_slice, "path")
-            auto block_opt = extract_json_bool(args_slice, "block")
-            auto scope_opt = extract_json_bool(args_slice, "scope")
-            auto def_first_opt = extract_json_bool(args_slice, "def_first")
-            auto max_matches_opt = extract_json_usize(args_slice, "max_matches")
-            auto max_bytes_str_opt = extract_json_string(args_slice, "max_bytes")
-            auto max_bytes_num_opt = extract_json_usize(args_slice, "max_bytes")
-            auto type_opt = extract_json_string(args_slice, "type")
-            auto extra_args = extract_json_string_array(args_slice, "args")
-
-            auto argv# = Vec<string>::new()
-            argv#.push(string::from("trg"))
-            argv#.push(pattern)
-            if path_opt.is_some() {
-                argv#.push(path_opt.unwrap())
-            }
-            if block_opt.is_some() {
-                auto b = block_opt.unwrap()
-                if b {
-                    argv#.push(string::from("--block"))
-                }
-            }
-            if scope_opt.is_some() {
-                auto s = scope_opt.unwrap()
-                if s {
-                    argv#.push(string::from("--scope"))
-                }
-            }
-            if def_first_opt.is_some() {
-                auto d = def_first_opt.unwrap()
-                if d {
-                    argv#.push(string::from("--def-first"))
-                }
-            }
-            if max_matches_opt.is_some() {
-                auto m = max_matches_opt.unwrap()
-                argv#.push(string::from("--max-total-matches"))
-                argv#.push(u64_to_string(m as u64))
-            }
-            if max_bytes_str_opt.is_some() {
-                argv#.push(string::from("--max-result-bytes"))
-                argv#.push(max_bytes_str_opt.unwrap())
-            } else if max_bytes_num_opt.is_some() {
-                auto mb = max_bytes_num_opt.unwrap()
-                argv#.push(string::from("--max-result-bytes"))
-                argv#.push(u64_to_string(mb as u64))
-            }
-            if type_opt.is_some() {
-                argv#.push(string::from("-t"))
-                argv#.push(type_opt.unwrap())
-            }
-            auto a_idx# = 0:usize
-            auto a_len = extra_args.len()
-            loop a_idx < a_len {
-                argv#.push(extra_args.borrow(a_idx).clone())
-                a_idx = a_idx + 1
-            }
-
-            auto opts_res = parse_cli_args_from_vec(argv)
-            if opts_res.is_err() {
-                auto err_msg = json_escape(opts_res.unwrap_err().as_str())
-                auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-                resp#.push_str(id_str.as_str())
-                resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
-                resp#.push_str(err_msg.as_str())
-                resp#.push_str("\"}],\"isError\":true}}")
-                send_mcp_response(resp.as_str())
-                continue
-            }
-
-            auto search_opts = opts_res.unwrap()
-            auto search_res = run_search_to_memory(search_opts)
-            if search_res.is_err() {
-                auto err_msg = json_escape(search_res.unwrap_err().as_str())
-                auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-                resp#.push_str(id_str.as_str())
-                resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
-                resp#.push_str(err_msg.as_str())
-                resp#.push_str("\"}],\"isError\":true}}")
-                send_mcp_response(resp.as_str())
-                continue
-            }
-
-            auto mcp_res = search_res.unwrap()
-            auto text_out# = mcp_res.output_text.clone()
-
-            if !search_opts.json_mode {
-                if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
-                    text_out#.push_str("\n")
-                }
-                text_out#.push_str("[trg: complete=")
-                if mcp_res.complete { text_out#.push_str("true") } else { text_out#.push_str("false") }
-                text_out#.push_str(", truncated=")
-                if mcp_res.truncated { text_out#.push_str("true") } else { text_out#.push_str("false") }
-                text_out#.push_str(", reason=")
-                text_out#.push_str(mcp_res.termination_reason.as_str())
-                text_out#.push_str(", matches=")
-                text_out#.push_str(u64_to_string(mcp_res.matches_emitted as u64).as_str())
-                text_out#.push_str(", scanned=")
-                text_out#.push_str(u64_to_string(mcp_res.files_scanned as u64).as_str())
-                text_out#.push_str("]\n")
-            }
-
-            auto esc_output = json_escape(text_out.as_str())
-            auto esc_reason = json_escape(mcp_res.termination_reason.as_str())
-
-            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-            resp#.push_str(id_str.as_str())
-            resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
-            resp#.push_str(esc_output.as_str())
-            resp#.push_str("\"}],\"_meta\":{\"summary\":{\"complete\":")
-            if mcp_res.complete { resp#.push_str("true") } else { resp#.push_str("false") }
-            resp#.push_str(",\"truncated\":")
-            if mcp_res.truncated { resp#.push_str("true") } else { resp#.push_str("false") }
-            resp#.push_str(",\"termination_reason\":\"")
-            resp#.push_str(esc_reason.as_str())
-            resp#.push_str("\",\"matches_emitted\":")
-            resp#.push_str(u64_to_string(mcp_res.matches_emitted as u64).as_str())
-            resp#.push_str(",\"files_scanned\":")
-            resp#.push_str(u64_to_string(mcp_res.files_scanned as u64).as_str())
-            resp#.push_str("}}}}")
-            send_mcp_response(resp.as_str())
-        } else {
-            // Unknown method
-            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
-            resp#.push_str(id_str.as_str())
-            resp#.push_str(",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}")
-            send_mcp_response(resp.as_str())
         }
     }
     return 0

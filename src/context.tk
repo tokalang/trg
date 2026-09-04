@@ -1,0 +1,131 @@
+// Context ring buffer and syntactic block context calculation for trg.
+import std/vec::{Vec}
+import src/types::{LogicalLine}
+import src/syntax::{detect_declaration_scope}
+
+pub shape BeforeRing (
+    lines: Vec<LogicalLine>,
+    head: usize,
+    count: usize,
+    capacity: usize,
+    bytes: usize
+)
+
+pub shape ContextState (
+    ring: BeforeRing,
+    pending_after: usize,
+    last_emitted_line_num: usize,
+    had_emitted_group: bool,
+    block_active: bool,
+    block_target_depth: usize,
+    block_target_indent: usize,
+    block_archetype: usize,
+    block_lines_emitted: usize
+)
+
+pub fn make_context_state(before_cap: usize, archetype: usize) -> ContextState {
+    return ContextState(
+        ring = BeforeRing(
+            lines = Vec<LogicalLine>::with_capacity(before_cap),
+            head = 0:usize,
+            count = 0:usize,
+            capacity = before_cap,
+            bytes = 0:usize
+        ),
+        pending_after = 0:usize,
+        last_emitted_line_num = 0:usize,
+        had_emitted_group = false,
+        block_active = false,
+        block_target_depth = 0:usize,
+        block_target_indent = 0:usize,
+        block_archetype = archetype,
+        block_lines_emitted = 0:usize
+    )
+}
+
+pub fn ring_clear(ring#: BeforeRing) {
+    ring.lines#.clear()
+    ring.head = 0:usize
+    ring.count = 0:usize
+    ring.bytes = 0:usize
+}
+
+pub fn calculate_block_context_start(
+    lines: Vec<LogicalLine>,
+    head: usize,
+    count: usize,
+    capacity: usize,
+    max_block_lines: usize,
+    before_context: usize,
+    archetype: usize,
+    cur_depth: usize,
+    cur_indent: usize,
+    match_is_def: bool,
+    target_depth#: usize,
+    target_indent#: usize
+) -> usize {
+    auto num_ring = count
+    if num_ring == 0 {
+        return 0:usize
+    }
+
+    if match_is_def {
+        auto outer_depth# = cur_depth
+        if archetype == 0 && outer_depth > 0 {
+            outer_depth = outer_depth - 1
+        }
+        target_depth = outer_depth
+        target_indent = cur_indent
+        return num_ring
+    }
+
+    auto found_start# = false
+    auto emit_start_idx# = 0:usize
+    auto s_idx# = num_ring
+    loop s_idx > 0 {
+        s_idx = s_idx - 1
+        auto actual_idx = (head + s_idx) % capacity
+        auto &r_line = lines.borrow(actual_idx)
+        if archetype == 1 {
+            // IndentFamily: find shallower indent line
+            auto trimmed = r_line.text.as_str().trim()
+            if trimmed.len > 0 && !trimmed.starts_with("#") {
+                if r_line.indent_level < cur_indent {
+                    emit_start_idx = s_idx
+                    target_indent = r_line.indent_level
+                    found_start = true
+                    break
+                }
+            }
+        } else {
+            // BraceFamily: find declaration or outer depth
+            if r_line.brace_depth < cur_depth || detect_declaration_scope(r_line.text.as_str()).len() > 0 {
+                emit_start_idx = s_idx
+                auto r_depth = r_line.brace_depth
+                if detect_declaration_scope(r_line.text.as_str()).len() > 0 && r_depth > 0 {
+                    target_depth = r_depth - 1
+                } else {
+                    target_depth = r_depth
+                }
+                found_start = true
+                break
+            }
+        }
+    }
+
+    if !found_start {
+        if num_ring > max_block_lines / 2 {
+            emit_start_idx = num_ring - (max_block_lines / 2)
+        }
+    }
+
+    // Enforce before_context as minimum
+    if before_context > 0 && num_ring > before_context {
+        auto min_start = num_ring - before_context
+        if min_start < emit_start_idx {
+            emit_start_idx = min_start
+        }
+    }
+
+    return emit_start_idx
+}

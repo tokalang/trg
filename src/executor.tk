@@ -1,0 +1,291 @@
+// Unified Search Executor for trg.
+import core/str::{str}
+import std/vec::{Vec}
+import src/types::{
+    CliOptions,
+    BudgetState,
+    FileRunState,
+    SearchReport,
+    GlobalStats
+}
+import src/matcher::{SearchPlan}
+import src/walker::{collect_search_targets}
+import src/scanner::{scan_file_stream_with_pass}
+import src/printer::{
+    OutputBudgetWriter,
+    OutputBatch,
+    FileFrameState,
+    EmitOutcome,
+    format_summary_json,
+    format_summary_json_compact
+}
+
+pub fn execute_search(
+    opts: CliOptions,
+    writer: OutputBudgetWriter
+) -> Result<SearchReport, string> {
+    auto walk_res = collect_search_targets(opts)
+    auto global_had_error# = walk_res.had_error
+    auto files = walk_res.files.clone()
+    auto num_files = files.len()
+
+    auto budget_state# = BudgetState::new(opts.budget_limits)
+    budget_state.files_selected = num_files
+
+    if opts.files_mode {
+        if opts.quiet {
+            auto quiet_files_match# = 0:usize
+            if num_files > 0 { quiet_files_match = 1:usize }
+            return Result<SearchReport, string>::Ok(SearchReport(
+                total_files_selected = num_files,
+                files_scanned = 0,
+                file_scan_passes = 0,
+                files_with_match = quiet_files_match,
+                total_matches = num_files,
+                had_error = global_had_error,
+                is_broken_pipe = false,
+                budget_state = cede budget_state,
+                elapsed_nanos = 0:u64
+            ))
+        }
+        auto f_idx# = 0:usize
+        auto dummy_frame# = FileFrameState(target_path = string::from(""), begin_emitted = false)
+        auto is_broken_pipe# = false
+        loop f_idx < num_files {
+            if budget_state.is_truncated { break }
+            auto &path_str = files.borrow(f_idx)
+            auto wire_str# = path_str.clone()
+            wire_str#.push_str("\n")
+            auto batch = OutputBatch(payload_str = cede wire_str, path = path_str.clone(), line_number = 0, is_payload = true)
+            auto outcome = writer.emit_payload(budget_state#, dummy_frame#, batch)
+            match outcome {
+                EmitOutcome::Written => {}
+                EmitOutcome::Truncated => { break }
+                EmitOutcome::BrokenPipe => {
+                    is_broken_pipe = true
+                    break
+                }
+                EmitOutcome::FatalError => {
+                    global_had_error = true
+                    break
+                }
+            }
+            f_idx = f_idx + 1
+        }
+        return Result<SearchReport, string>::Ok(SearchReport(
+            total_files_selected = num_files,
+            files_scanned = f_idx,
+            file_scan_passes = f_idx,
+            files_with_match = f_idx,
+            total_matches = f_idx,
+            had_error = global_had_error,
+            is_broken_pipe = is_broken_pipe,
+            budget_state = cede budget_state,
+            elapsed_nanos = 0:u64
+        ))
+    }
+
+    auto plan_res = SearchPlan::create(opts)
+    if plan_res.is_err() {
+        return Result<SearchReport, string>::Err(plan_res.unwrap_err())
+    }
+    auto plan = plan_res.unwrap()
+
+    if num_files == 0 {
+        return Result<SearchReport, string>::Ok(SearchReport(
+            total_files_selected = 0,
+            files_scanned = 0,
+            file_scan_passes = 0,
+            files_with_match = 0,
+            total_matches = 0,
+            had_error = global_had_error,
+            is_broken_pipe = false,
+            budget_state = cede budget_state,
+            elapsed_nanos = 0:u64
+        ))
+    }
+
+    auto multiple_files = num_files > 1 || opts.paths.len() > 1
+    auto total_matches# = 0:usize
+    auto files_with_match# = 0:usize
+    auto broken_pipe_occurred# = false
+
+    auto file_states# = Vec<FileRunState>::with_capacity(num_files)
+    auto init_idx# = 0:usize
+    loop init_idx < num_files {
+        file_states#.push(FileRunState::new())
+        init_idx = init_idx + 1
+    }
+
+    if opts.def_first {
+        auto i# = 0:usize
+        loop i < num_files {
+            if budget_state.is_truncated {
+                break
+            }
+            auto &target_file = files.borrow(i)
+            auto is_stdin = target_file.as_str() == "-"
+            auto cur_pass# = 1:usize
+            if is_stdin {
+                cur_pass = 0:usize
+            }
+            auto is_bp# = false
+            auto had_err# = false
+            auto has_m# = false
+            auto m_cnt# = 0:usize
+            {
+                auto &f_state# = file_states#.borrow_mut(i)
+                auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, cur_pass, f_state#)
+                is_bp = scan_res.is_broken_pipe
+                had_err = scan_res.had_error
+                has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
+                m_cnt = scan_res.matches_count
+            }
+
+            if had_err {
+                global_had_error = true
+            }
+            if is_bp {
+                broken_pipe_occurred = true
+                break
+            }
+            if has_m {
+                total_matches = total_matches + m_cnt
+                if opts.quiet {
+                    files_with_match = 1
+                    break
+                }
+            }
+
+            i = i + 1
+        }
+
+        if !budget_state.is_truncated && !broken_pipe_occurred && !(opts.quiet && files_with_match > 0) {
+            auto j# = 0:usize
+            loop j < num_files {
+                if budget_state.is_truncated {
+                    break
+                }
+                auto &target_file = files.borrow(j)
+                auto is_stdin = target_file.as_str() == "-"
+                if !is_stdin {
+                    auto is_bp# = false
+                    auto had_err# = false
+                    auto has_m# = false
+                    auto m_cnt# = 0:usize
+                    {
+                        auto &f_state# = file_states#.borrow_mut(j)
+                        auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, 2:usize, f_state#)
+                        is_bp = scan_res.is_broken_pipe
+                        had_err = scan_res.had_error
+                        has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
+                        m_cnt = scan_res.matches_count
+                    }
+
+                    if had_err {
+                        global_had_error = true
+                    }
+                    if is_bp {
+                        broken_pipe_occurred = true
+                        break
+                    }
+                    if has_m {
+                        total_matches = total_matches + m_cnt
+                        if opts.quiet {
+                            files_with_match = 1
+                            break
+                        }
+                    }
+                }
+
+                j = j + 1
+            }
+        }
+    } else {
+        auto i# = 0:usize
+        loop i < num_files {
+            if budget_state.is_truncated {
+                break
+            }
+            auto &target_file = files.borrow(i)
+            auto is_bp# = false
+            auto had_err# = false
+            auto has_m# = false
+            auto m_cnt# = 0:usize
+            {
+                auto &f_state# = file_states#.borrow_mut(i)
+                auto scan_res = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, 0:usize, f_state#)
+                is_bp = scan_res.is_broken_pipe
+                had_err = scan_res.had_error
+                has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
+                m_cnt = scan_res.matches_count
+            }
+
+            if had_err {
+                global_had_error = true
+            }
+            if is_bp {
+                broken_pipe_occurred = true
+                break
+            }
+            if has_m {
+                total_matches = total_matches + m_cnt
+                if opts.quiet {
+                    files_with_match = 1
+                    break
+                }
+            }
+
+            i = i + 1
+        }
+    }
+
+    auto total_passes# = 0:usize
+    if !opts.quiet {
+        files_with_match = 0
+        auto s_idx# = 0:usize
+        loop s_idx < num_files {
+            auto &fs = file_states.borrow(s_idx)
+            total_passes = total_passes + fs.scan_passes
+            if fs.match_observed || fs.match_emitted {
+                files_with_match = files_with_match + 1
+            }
+            s_idx = s_idx + 1
+        }
+    }
+
+    return Result<SearchReport, string>::Ok(SearchReport(
+        total_files_selected = num_files,
+        files_scanned = budget_state.files_scanned,
+        file_scan_passes = total_passes,
+        files_with_match = files_with_match,
+        total_matches = total_matches,
+        had_error = global_had_error,
+        is_broken_pipe = broken_pipe_occurred,
+        budget_state = cede budget_state,
+        elapsed_nanos = 0:u64
+    ))
+}
+
+pub fn finalize_search(
+    opts: CliOptions,
+    writer: OutputBudgetWriter,
+    report: SearchReport
+) -> EmitOutcome {
+    if !opts.json_mode {
+        return EmitOutcome::Written
+    }
+    auto stats = GlobalStats(
+        total_files = report.total_files_selected,
+        files_with_match = report.files_with_match,
+        total_matches = report.total_matches,
+        elapsed_nanos = report.elapsed_nanos
+    )
+    auto sum_str# = string::new()
+    if opts.json_compact {
+        sum_str = format_summary_json_compact(stats, report.budget_state, report.had_error)
+    } else {
+        sum_str = format_summary_json(stats, report.budget_state, report.had_error)
+    }
+    return writer.write_raw(sum_str.as_str())
+}

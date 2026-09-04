@@ -3,7 +3,7 @@ import core/str::{str}
 import core/option::{Option}
 import std/vec::{Vec}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
-import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult, MatchRange, MatchDecision, BudgetState, ScopeFrame}
+import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult, MatchRange, MatchDecision, BudgetState, ScopeFrame, FileRunState}
 import src/file_types::{extract_file_extension}
 import src/matcher::{SearchPlan}
 import src/posix::{posix_ferror}
@@ -29,337 +29,22 @@ import src/printer::{
 
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
 
-pub shape BeforeRing (
-    lines: Vec<LogicalLine>,
-    head: usize,
-    count: usize,
-    capacity: usize,
-    bytes: usize
-)
-
-pub shape ContextState (
-    ring: BeforeRing,
-    pending_after: usize,
-    last_emitted_line_num: usize,
-    had_emitted_group: bool,
-    block_active: bool,
-    block_target_depth: usize,
-    block_target_indent: usize,
-    block_archetype: usize,
-    block_lines_emitted: usize
-)
-
-fn make_context_state(before_cap: usize, archetype: usize) -> ContextState {
-    return ContextState(
-        ring = BeforeRing(
-            lines = Vec<LogicalLine>::with_capacity(before_cap),
-            head = 0:usize,
-            count = 0:usize,
-            capacity = before_cap,
-            bytes = 0:usize
-        ),
-        pending_after = 0:usize,
-        last_emitted_line_num = 0:usize,
-        had_emitted_group = false,
-        block_active = false,
-        block_target_depth = 0:usize,
-        block_target_indent = 0:usize,
-        block_archetype = archetype,
-        block_lines_emitted = 0:usize
-    )
+import src/syntax::{
+    detect_syntax_archetype,
+    compute_line_indent,
+    update_brace_depth,
+    detect_declaration_scope,
+    is_defining_symbol,
+    extract_declared_identifier,
+    utf8_truncate_len,
+    ScopeTracker
 }
-
-pub fn extract_declared_identifier(line: str) -> string {
-    auto trimmed = line.trim()
-    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") {
-        return string::from("")
-    }
-    auto s# = trimmed
-    // Skip visibility & modifiers
-    if s.starts_with("pub ") {
-        s = s.substr(4:usize, s.len - 4:usize).trim()
-    } else if s.starts_with("pub(") {
-        auto close_paren = s.index_of(')' as char)
-        if close_paren.is_some() {
-            auto idx = close_paren.unwrap() + 1:usize
-            s = s.substr(idx, s.len - idx).trim()
-        }
-    }
-    if s.starts_with("export default ") {
-        s = s.substr(15:usize, s.len - 15:usize).trim()
-    } else if s.starts_with("export ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
-    if s.starts_with("async ") {
-        s = s.substr(6:usize, s.len - 6:usize).trim()
-    }
-    if s.starts_with("inline ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
-
-    auto kw_len# = 0:usize
-    auto is_impl# = false
-    if s.starts_with("fn ") { kw_len = 3:usize }
-    else if s.starts_with("def ") { kw_len = 4:usize }
-    else if s.starts_with("func ") { kw_len = 5:usize }
-    else if s.starts_with("function ") { kw_len = 9:usize }
-    else if s.starts_with("class ") { kw_len = 6:usize }
-    else if s.starts_with("struct ") { kw_len = 7:usize }
-    else if s.starts_with("shape ") { kw_len = 6:usize }
-    else if s.starts_with("interface ") { kw_len = 10:usize }
-    else if s.starts_with("type ") { kw_len = 5:usize }
-    else if s.starts_with("enum ") { kw_len = 5:usize }
-    else if s.starts_with("trait ") { kw_len = 6:usize }
-    else if s.starts_with("impl ") { kw_len = 5:usize; is_impl = true }
-    else { return string::from("") }
-
-    auto rem# = s.substr(kw_len, s.len - kw_len).trim()
-
-    // Skip generic parameters right after keyword: e.g. impl<T>, struct Foo<T>
-    if rem.starts_with("<") {
-        auto g_depth# = 0:usize
-        auto g_idx# = 0:usize
-        loop g_idx < rem.len {
-            auto c = rem.byte_at(g_idx)
-            if c == ('<' as char) {
-                g_depth = g_depth + 1
-            } else if c == ('>' as char) {
-                if g_depth > 0 { g_depth = g_depth - 1 }
-                if g_depth == 0 {
-                    g_idx = g_idx + 1
-                    break
-                }
-            }
-            g_idx = g_idx + 1
-        }
-        rem = rem.substr(g_idx, rem.len - g_idx).trim()
-    }
-
-    // For impl blocks: if it's `impl Trait for Target`, extract the target after `for`
-    if is_impl {
-        auto for_opt = rem.index_of_str(" for ")
-        if for_opt.is_some() {
-            auto for_idx = for_opt.unwrap() + 5:usize
-            rem = rem.substr(for_idx, rem.len - for_idx).trim()
-        }
-    }
-
-    // Extract identifier characters (a-z, A-Z, 0-9, _)
-    auto id_end# = 0:usize
-    loop id_end < rem.len {
-        auto c = rem.byte_at(id_end)
-        auto is_valid_char = (c >= ('a' as char) && c <= ('z' as char)) ||
-                             (c >= ('A' as char) && c <= ('Z' as char)) ||
-                             (c >= ('0' as char) && c <= ('9' as char)) ||
-                             c == ('_' as char)
-        if !is_valid_char {
-            break
-        }
-        id_end = id_end + 1
-    }
-    if id_end == 0 {
-        return string::from("")
-    }
-    return string::from(rem.substr(0, id_end))
-}
-
-pub fn is_defining_symbol(line: str, plan: SearchPlan) -> bool {
-    auto id = extract_declared_identifier(line)
-    if id.len() == 0 {
-        return false
-    }
-    return plan.is_match(id.as_str())
-}
-
-pub fn is_definition_line(line: str) -> bool {
-    auto trimmed = line.trim()
-    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") {
-        return false
-    }
-    auto s# = trimmed
-    if s.starts_with("pub ") {
-        s = s.substr(4:usize, s.len - 4:usize).trim()
-    } else if s.starts_with("pub(") {
-        auto close_paren = s.index_of(')' as char)
-        if close_paren.is_some() {
-            auto idx = close_paren.unwrap() + 1:usize
-            s = s.substr(idx, s.len - idx).trim()
-        }
-    }
-    if s.starts_with("async ") {
-        s = s.substr(6:usize, s.len - 6:usize).trim()
-    }
-
-    if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("class ") ||
-       s.starts_with("struct ") || s.starts_with("shape ") || s.starts_with("interface ") ||
-       s.starts_with("type ") || s.starts_with("impl ") || s.starts_with("function ") {
-        return true
-    }
-    return false
-}
-
-pub fn detect_declaration_scope(line: str) -> string {
-    auto trimmed = line.trim()
-    if !is_definition_line(trimmed) {
-        return string::from("")
-    }
-    auto max_len# = trimmed.len
-    auto paren_depth# = 0:usize
-    auto i# = 0:usize
-    loop i < trimmed.len {
-        auto ch = trimmed.byte_at(i)
-        if ch == ('(' as char) {
-            paren_depth = paren_depth + 1
-        } else if ch == (')' as char) {
-            if paren_depth > 0 { paren_depth = paren_depth - 1 }
-        } else if paren_depth == 0 {
-            if ch == ('{' as char) {
-                max_len = i
-                break
-            } else if ch == (':' as char) {
-                max_len = i
-                break
-            }
-        }
-        i = i + 1
-    }
-    auto decl_sub# = trimmed.substr(0, max_len).trim()
-    if decl_sub.len > 60 {
-        decl_sub = decl_sub.substr(0, 60).trim()
-    }
-    return string::from(decl_sub)
-}
-
-pub fn detect_syntax_archetype(path: str) -> usize {
-    auto ext = extract_file_extension(path)
-    if ext == "py" || ext == "pyi" || ext == "yaml" || ext == "yml" || ext == "nim" {
-        return 1:usize
-    }
-    return 0:usize
-}
-
-pub fn compute_line_indent(line: str) -> usize {
-    auto indent# = 0:usize
-    auto i# = 0:usize
-    loop i < line.len {
-        auto ch = line.byte_at(i)
-        if ch == (' ' as char) {
-            indent = indent + 1
-        } else if ch == ('\t' as char) {
-            indent = indent + 4
-        } else {
-            break
-        }
-        i = i + 1
-    }
-    return indent
-}
-
-pub fn update_brace_depth(line: str, depth#: usize) {
-    auto in_str# = false
-    auto str_char# = 0:char
-    auto escape# = false
-    auto i# = 0:usize
-
-    loop i < line.len {
-        auto ch = line.byte_at(i)
-
-        if in_str {
-            if escape {
-                escape = false
-            } else if ch == ('\\' as char) {
-                escape = true
-            } else if ch == str_char {
-                in_str = false
-            }
-            i = i + 1
-            continue
-        }
-
-        if ch == ('"' as char) || ch == ('\'' as char) || ch == ('`' as char) {
-            in_str = true
-            str_char = ch
-            escape = false
-            i = i + 1
-            continue
-        }
-
-        if ch == ('/' as char) && i + 1 < line.len && line.byte_at(i + 1) == ('/' as char) {
-            break
-        }
-        if ch == ('#' as char) {
-            break
-        }
-
-        if ch == ('{' as char) {
-            depth = depth + 1
-        } else if ch == ('}' as char) {
-            if depth > 0 {
-                depth = depth - 1
-            }
-        }
-
-        i = i + 1
-    }
-}
-
-pub shape ScopeTracker (
-    frames: Vec<ScopeFrame>
-)
-
-impl ScopeTracker {
-    pub fn new() -> ScopeTracker {
-        return ScopeTracker(frames = Vec<ScopeFrame>::new())
-    }
-
-    pub fn update(self#, line: str, brace_depth: usize, indent_level: usize, archetype: usize) {
-        loop true {
-            if self.frames.len() == 0 {
-                break
-            }
-            auto top_idx = self.frames.len() - 1:usize
-            auto top_depth = self.frames.borrow(top_idx).depth
-            if archetype == 1 {
-                auto trimmed = line.trim()
-                if trimmed.len > 0 && !trimmed.starts_with("#") {
-                    if indent_level <= top_depth {
-                        self.frames#.pop()
-                        continue
-                    }
-                }
-            } else {
-                if brace_depth < top_depth {
-                    self.frames#.pop()
-                    continue
-                }
-            }
-            break
-        }
-
-        auto scope_decl = detect_declaration_scope(line)
-        if scope_decl.len() > 0 {
-            auto decl_depth# = brace_depth
-            if archetype == 1 {
-                decl_depth = indent_level
-            }
-            self.frames#.push(ScopeFrame(name = cede scope_decl, depth = decl_depth))
-        }
-    }
-
-    pub fn current_scope(self) -> string {
-        if self.frames.len() == 0 {
-            return string::from("")
-        }
-        auto top_idx = self.frames.len() - 1:usize
-        return self.frames.borrow(top_idx).name.clone()
-    }
-}
-
-fn ring_clear(ring#: BeforeRing) {
-    ring.lines#.clear()
-    ring.head = 0:usize
-    ring.count = 0:usize
-    ring.bytes = 0:usize
+import src/context::{
+    BeforeRing,
+    ContextState,
+    make_context_state,
+    ring_clear,
+    calculate_block_context_start
 }
 
 fn log_scanner_err(path: str, msg: str) {
@@ -386,86 +71,6 @@ fn is_binary_chunk(content: str) -> bool {
         i = i + 1
     }
     return false
-}
-
-fn calculate_block_context_start(
-    lines: Vec<LogicalLine>,
-    head: usize,
-    count: usize,
-    capacity: usize,
-    max_block_lines: usize,
-    before_context: usize,
-    archetype: usize,
-    cur_depth: usize,
-    cur_indent: usize,
-    match_is_def: bool,
-    target_depth#: usize,
-    target_indent#: usize
-) -> usize {
-    auto num_ring = count
-    if num_ring == 0 {
-        return 0:usize
-    }
-
-    if match_is_def {
-        auto outer_depth# = cur_depth
-        if archetype == 0 && outer_depth > 0 {
-            outer_depth = outer_depth - 1
-        }
-        target_depth = outer_depth
-        target_indent = cur_indent
-        return num_ring
-    }
-
-    auto found_start# = false
-    auto emit_start_idx# = 0:usize
-    auto s_idx# = num_ring
-    loop s_idx > 0 {
-        s_idx = s_idx - 1
-        auto actual_idx = (head + s_idx) % capacity
-        auto &r_line = lines.borrow(actual_idx)
-        if archetype == 1 {
-            // IndentFamily: find shallower indent line
-            auto trimmed = r_line.text.as_str().trim()
-            if trimmed.len > 0 && !trimmed.starts_with("#") {
-                if r_line.indent_level < cur_indent {
-                    emit_start_idx = s_idx
-                    target_indent = r_line.indent_level
-                    found_start = true
-                    break
-                }
-            }
-        } else {
-            // BraceFamily: find declaration or outer depth
-            if r_line.brace_depth < cur_depth || detect_declaration_scope(r_line.text.as_str()).len() > 0 {
-                emit_start_idx = s_idx
-                auto r_depth = r_line.brace_depth
-                if detect_declaration_scope(r_line.text.as_str()).len() > 0 && r_depth > 0 {
-                    target_depth = r_depth - 1
-                } else {
-                    target_depth = r_depth
-                }
-                found_start = true
-                break
-            }
-        }
-    }
-
-    if !found_start {
-        if num_ring > max_block_lines / 2 {
-            emit_start_idx = num_ring - (max_block_lines / 2)
-        }
-    }
-
-    // Enforce before_context as minimum
-    if before_context > 0 && num_ring > before_context {
-        auto min_start = num_ring - before_context
-        if min_start < emit_start_idx {
-            emit_start_idx = min_start
-        }
-    }
-
-    return emit_start_idx
 }
 
 fn process_logical_line(
@@ -862,7 +467,7 @@ fn scan_and_process_line(
                 max_count_reached = true
             }
 
-            if opts.quiet {
+            if opts.quiet || opts.count {
                 auto is_first_obs = !file_match_observed
                 file_match_observed = true
                 budget_state.matched_lines_observed = budget_state.matched_lines_observed + 1
@@ -945,7 +550,8 @@ pub fn scan_file_stream(
     plan: SearchPlan,
     multiple_files: bool,
     writer: OutputBudgetWriter,
-    budget_state#: BudgetState
+    budget_state#: BudgetState,
+    file_state#: FileRunState
 ) -> ScanResult {
     return scan_file_stream_with_pass(
         target_path,
@@ -954,7 +560,8 @@ pub fn scan_file_stream(
         multiple_files,
         writer,
         budget_state#,
-        0:usize
+        0:usize,
+        file_state#
     )
 }
 
@@ -965,9 +572,14 @@ pub fn scan_file_stream_with_pass(
     multiple_files: bool,
     writer: OutputBudgetWriter,
     budget_state#: BudgetState,
-    pass_mode: usize
+    pass_mode: usize,
+    file_state#: FileRunState
 ) -> ScanResult {
-    budget_state.files_scanned = budget_state.files_scanned + 1
+    file_state.scan_passes = file_state.scan_passes + 1
+    if !file_state.scanned_unique {
+        file_state.scanned_unique = true
+        budget_state.files_scanned = budget_state.files_scanned + 1
+    }
 
     auto is_stdin = target_path.as_str() == "-"
     auto open_path# = target_path.clone()
@@ -1021,8 +633,8 @@ pub fn scan_file_stream_with_pass(
         auto max_count_reached# = opts.max_count_enabled && opts.max_count == 0
 
         auto file_matched_lines_emitted# = 0:usize
-        auto file_match_observed# = false
-        auto file_has_emitted_match# = false
+        auto file_match_observed# = file_state.match_observed
+        auto file_has_emitted_match# = file_state.match_emitted
         auto frame_state# = FileFrameState(
             target_path = target_path.clone(),
             begin_emitted = false
@@ -1244,8 +856,16 @@ pub fn scan_file_stream_with_pass(
         libc_free(*buf)
         libc_fclose(*file)
 
+        if file_match_observed || has_match {
+            file_state.match_observed = true
+        }
+        if file_has_emitted_match {
+            file_state.match_emitted = true
+        }
+        file_state.matched_lines_emitted = file_state.matched_lines_emitted + file_matched_lines_emitted
+
         auto ret_matches# = file_matched_lines_emitted
-        if opts.quiet {
+        if opts.quiet || opts.count {
             ret_matches = matches_count
         }
 

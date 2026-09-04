@@ -1,6 +1,6 @@
 pub const PACKAGE = (
     name = "trg",
-    version = "0.9.1",
+    version = "0.9.2",
     kind = "application",
     license = "Apache-2.0",
     compiler = "1.0.0-rc.11",

@@ -1,5 +1,4 @@
 // Shared shapes and types for trg.
-import core/types::{usize}
 import std/vec::{Vec}
 
 pub shape CaseMode (
@@ -86,6 +85,26 @@ impl BudgetState {
             truncation_reason = string::from(""),
             stopped_path = string::from(""),
             stopped_line_num = 0
+        )
+    }
+
+    pub fn clone(self) -> BudgetState {
+        return BudgetState(
+            limits = self.limits,
+            files_selected = self.files_selected,
+            files_scanned = self.files_scanned,
+            files_with_match_observed = self.files_with_match_observed,
+            files_with_match_emitted = self.files_with_match_emitted,
+            matched_lines_observed = self.matched_lines_observed,
+            matched_lines_emitted = self.matched_lines_emitted,
+            submatches_emitted = self.submatches_emitted,
+            result_payload_bytes_emitted = self.result_payload_bytes_emitted,
+            protocol_bytes_emitted = self.protocol_bytes_emitted,
+            block_contexts_truncated = self.block_contexts_truncated,
+            is_truncated = self.is_truncated,
+            truncation_reason = self.truncation_reason.clone(),
+            stopped_path = self.stopped_path.clone(),
+            stopped_line_num = self.stopped_line_num
         )
     }
 
@@ -223,5 +242,37 @@ pub shape GlobalStats (
     total_files: usize,
     files_with_match: usize,
     total_matches: usize,
+    elapsed_nanos: u64
+)
+
+pub shape FileRunState (
+    scanned_unique#: bool,
+    scan_passes#: usize,
+    match_observed#: bool,
+    match_emitted#: bool,
+    matched_lines_emitted#: usize
+)
+
+impl FileRunState {
+    pub fn new() -> FileRunState {
+        return FileRunState(
+            scanned_unique = false,
+            scan_passes = 0,
+            match_observed = false,
+            match_emitted = false,
+            matched_lines_emitted = 0
+        )
+    }
+}
+
+pub shape SearchReport (
+    total_files_selected: usize,
+    files_scanned: usize,
+    file_scan_passes: usize,
+    files_with_match: usize,
+    total_matches: usize,
+    had_error: bool,
+    is_broken_pipe: bool,
+    budget_state: BudgetState,
     elapsed_nanos: u64
 )

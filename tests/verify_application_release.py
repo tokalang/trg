@@ -118,7 +118,7 @@ def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
     # 4. Assert Version
     r_ver = run_cmd([str(app_bin), "--version"])
     version_out = r_ver.stdout.strip()
-    if version_out != "trg 0.9.1 (Toka)":
+    if version_out != "trg 0.9.2 (Toka)":
         raise RuntimeError(f"Unexpected version output: {version_out}")
 
     # 5. Functional Sanity
@@ -156,7 +156,7 @@ def verify_extracted_build(extracted_root: pathlib.Path, toka_bin: str) -> dict:
     r_off_build = run_cmd([toka_bin, "build"], cwd=extracted_root, env=env_offline)
     
     r_off_ver = run_cmd([str(app_bin), "-V"])
-    if r_off_ver.stdout.strip() != "trg 0.9.1 (Toka)":
+    if r_off_ver.stdout.strip() != "trg 0.9.2 (Toka)":
         raise RuntimeError("Offline binary failed version check")
 
     return {
@@ -221,7 +221,7 @@ def main():
 
         report = {
             "schema": "toka.trg-application-verification-v1",
-            "version": "0.9.1",
+            "version": "0.9.2",
             "result": "PASS",
             "archive": archive_meta,
             "verification": build_meta
