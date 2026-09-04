@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
-STABLE_VERSION = "v0.9.1"
+STABLE_VERSION = "v0.9.2"
 
 
 def fail(message: str) -> None:
@@ -132,7 +132,7 @@ def main() -> None:
         if not installed.is_file() or not os.access(installed, os.X_OK):
             fail("default installation did not create an executable in ~/.local/bin")
         default_bin_out = subprocess.check_output([str(installed)]).decode("utf-8")
-        if "trg 0.9.1" not in default_bin_out:
+        if f"trg {STABLE_VERSION.lstrip('v')}" not in default_bin_out:
             fail(f"default installation installed wrong version: {default_bin_out}")
         if (default_home / "sudo-was-called").exists():
             fail("default installation unexpectedly invoked sudo")
