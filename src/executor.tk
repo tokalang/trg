@@ -256,10 +256,16 @@ pub fn finalize_search(
     if !opts.json_mode {
         return EmitOutcome::Written
     }
+    auto legacy_files# = report.budget_state.files_with_match_emitted
+    auto legacy_matches# = report.budget_state.matched_lines_emitted
+    if opts.quiet || opts.count {
+        legacy_files = report.budget_state.files_with_match_observed
+        legacy_matches = report.budget_state.matched_lines_observed
+    }
     auto stats = GlobalStats(
         total_files = report.budget_state.files_selected,
-        files_with_match = report.budget_state.files_with_match_observed,
-        total_matches = report.budget_state.matched_lines_observed,
+        files_with_match = legacy_files,
+        total_matches = legacy_matches,
         elapsed_nanos = report.elapsed_nanos
     )
     auto sum_str# = string::new()

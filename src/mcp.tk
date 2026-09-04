@@ -78,19 +78,6 @@ fn get_usize_param(map: HashMap<string, JsonNode>, key: str) -> Result<Option<us
                     err#.push_str("' must be a non-negative integer <= 2^53-1")
                     return Result<Option<usize>, McpParamError>::Err(McpParamError(message = cede err))
                 }
-                auto JsonNode::StrNode(&s) => {
-                    auto p_res = parse_usize_strict(s.as_str(), key)
-                    if p_res.is_ok() {
-                        auto val = p_res.unwrap()
-                        if val <= 9007199254740991:usize {
-                            return Result<Option<usize>, McpParamError>::Ok(Option<usize>::Some(val))
-                        }
-                    }
-                    auto err# = string::from("Invalid params: '")
-                    err#.push_str(key)
-                    err#.push_str("' must be a non-negative integer <= 2^53-1")
-                    return Result<Option<usize>, McpParamError>::Err(McpParamError(message = cede err))
-                }
                 _ => {
                     auto err# = string::from("Invalid params: '")
                     err#.push_str(key)
@@ -179,14 +166,42 @@ fn get_string_array_param(map: HashMap<string, JsonNode>, key: str) -> Result<Op
     }
 }
 
-fn check_args_conflict(prop: str, flag: str, args: Vec<string>) -> Option<string> {
-    auto flag_prefix# = string::from(flag)
-    flag_prefix#.push_str("=")
+fn check_property_conflict(prop: str, args: Vec<string>) -> Option<string> {
     auto i# = 0:usize
     loop i < args.len() {
         auto &a = args.borrow(i)
         auto a_str = a.as_str()
-        if a_str == flag || a_str.starts_with(flag_prefix.as_str()) {
+        auto is_conflict# = false
+
+        if prop == "block" {
+            if a_str == "--block" || a_str == "--no-block" || a_str == "--context-block" {
+                is_conflict = true
+            }
+        } else if prop == "scope" {
+            if a_str == "--scope" || a_str == "--no-scope" {
+                is_conflict = true
+            }
+        } else if prop == "def_first" {
+            if a_str == "--def-first" || a_str == "--no-def-first" {
+                is_conflict = true
+            }
+        } else if prop == "max_matches" {
+            if a_str == "--max-total-matches" || a_str.starts_with("--max-total-matches=") {
+                is_conflict = true
+            }
+        } else if prop == "max_bytes" {
+            if a_str == "--max-result-bytes" || a_str.starts_with("--max-result-bytes=") {
+                is_conflict = true
+            }
+        } else if prop == "type" {
+            if a_str == "-t" || a_str == "--type" || a_str.starts_with("--type=") {
+                is_conflict = true
+            } else if a_str.starts_with("-t") && !a_str.starts_with("-T") && a_str != "--type-list" && !a_str.starts_with("--type-not") {
+                is_conflict = true
+            }
+        }
+
+        if is_conflict {
             auto msg# = string::from("Invalid params: typed property '")
             msg#.push_str(prop)
             msg#.push_str("' conflicts with args option '")
@@ -533,42 +548,28 @@ pub fn run_mcp_server() -> i32 {
                                                     auto conflict_msg# = string::new()
 
                                                     if block_opt.is_some() {
-                                                        auto c1 = check_args_conflict("block", "--block", extra_args)
-                                                        auto c2 = check_args_conflict("block", "--context-block", extra_args)
-                                                        auto c3 = check_args_conflict("block", "--no-block", extra_args)
-                                                        if c1.is_some() { conflict_found = true; conflict_msg = c1.unwrap(); }
-                                                        else if c2.is_some() { conflict_found = true; conflict_msg = c2.unwrap(); }
-                                                        else if c3.is_some() { conflict_found = true; conflict_msg = c3.unwrap(); }
+                                                        auto c = check_property_conflict("block", extra_args)
+                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
                                                     }
                                                     if !conflict_found && scope_opt.is_some() {
-                                                        auto c1 = check_args_conflict("scope", "--scope", extra_args)
-                                                        auto c2 = check_args_conflict("scope", "--no-scope", extra_args)
-                                                        if c1.is_some() { conflict_found = true; conflict_msg = c1.unwrap(); }
-                                                        else if c2.is_some() { conflict_found = true; conflict_msg = c2.unwrap(); }
+                                                        auto c = check_property_conflict("scope", extra_args)
+                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
                                                     }
                                                     if !conflict_found && def_first_opt.is_some() {
-                                                        auto c1 = check_args_conflict("def_first", "--def-first", extra_args)
-                                                        auto c2 = check_args_conflict("def_first", "--no-def-first", extra_args)
-                                                        if c1.is_some() { conflict_found = true; conflict_msg = c1.unwrap(); }
-                                                        else if c2.is_some() { conflict_found = true; conflict_msg = c2.unwrap(); }
+                                                        auto c = check_property_conflict("def_first", extra_args)
+                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
                                                     }
                                                     if !conflict_found && max_matches_opt.is_some() {
-                                                        auto c1 = check_args_conflict("max_matches", "-m", extra_args)
-                                                        auto c2 = check_args_conflict("max_matches", "--max-count", extra_args)
-                                                        auto c3 = check_args_conflict("max_matches", "--max-total-matches", extra_args)
-                                                        if c1.is_some() { conflict_found = true; conflict_msg = c1.unwrap(); }
-                                                        else if c2.is_some() { conflict_found = true; conflict_msg = c2.unwrap(); }
-                                                        else if c3.is_some() { conflict_found = true; conflict_msg = c3.unwrap(); }
+                                                        auto c = check_property_conflict("max_matches", extra_args)
+                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
                                                     }
                                                     if !conflict_found && max_bytes_opt.is_some() {
-                                                        auto c1 = check_args_conflict("max_bytes", "--max-result-bytes", extra_args)
-                                                        if c1.is_some() { conflict_found = true; conflict_msg = c1.unwrap(); }
+                                                        auto c = check_property_conflict("max_bytes", extra_args)
+                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
                                                     }
                                                     if !conflict_found && type_opt.is_some() {
-                                                        auto c1 = check_args_conflict("type", "-t", extra_args)
-                                                        auto c2 = check_args_conflict("type", "--type", extra_args)
-                                                        if c1.is_some() { conflict_found = true; conflict_msg = c1.unwrap(); }
-                                                        else if c2.is_some() { conflict_found = true; conflict_msg = c2.unwrap(); }
+                                                        auto c = check_property_conflict("type", extra_args)
+                                                        if c.is_some() { conflict_found = true; conflict_msg = c.unwrap(); }
                                                     }
 
                                                     if conflict_found {

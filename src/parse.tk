@@ -35,6 +35,13 @@ pub fn parse_usize_strict(s: str, option_name: str) -> Result<usize, string> {
     return Result<usize, string>::Ok(val)
 }
 
+fn to_lower_char(c: char) -> char {
+    if c >= ('A' as char) && c <= ('Z' as char) {
+        return ((c as usize) + 32:usize) as char
+    }
+    return c
+}
+
 pub fn parse_size_bytes_strict(s: str, option_name: str) -> Result<usize, string> {
     if s.len == 0 {
         auto err# = string::from("Value for ")
@@ -44,13 +51,45 @@ pub fn parse_size_bytes_strict(s: str, option_name: str) -> Result<usize, string
     }
     auto mult# = 1:usize
     auto num_len# = s.len
-    auto last_ch = s.byte_at(s.len - 1)
-    if last_ch == ('k' as char) || last_ch == ('K' as char) {
-        mult = 1024:usize
-        num_len = s.len - 1
-    } else if last_ch == ('m' as char) || last_ch == ('M' as char) {
-        mult = 1048576:usize
-        num_len = s.len - 1
+    if s.len >= 4 && to_lower_char(s.byte_at(s.len - 1)) == ('b' as char) && to_lower_char(s.byte_at(s.len - 2)) == ('i' as char) {
+        auto unit_ch = to_lower_char(s.byte_at(s.len - 3))
+        if unit_ch == ('k' as char) {
+            mult = 1024:usize
+            num_len = s.len - 3
+        } else if unit_ch == ('m' as char) {
+            mult = 1048576:usize
+            num_len = s.len - 3
+        } else if unit_ch == ('g' as char) {
+            mult = 1073741824:usize
+            num_len = s.len - 3
+        }
+    } else if s.len >= 3 && to_lower_char(s.byte_at(s.len - 1)) == ('b' as char) {
+        auto unit_ch = to_lower_char(s.byte_at(s.len - 2))
+        if unit_ch == ('k' as char) {
+            mult = 1024:usize
+            num_len = s.len - 2
+        } else if unit_ch == ('m' as char) {
+            mult = 1048576:usize
+            num_len = s.len - 2
+        } else if unit_ch == ('g' as char) {
+            mult = 1073741824:usize
+            num_len = s.len - 2
+        }
+    } else if s.len >= 2 {
+        auto unit_ch = to_lower_char(s.byte_at(s.len - 1))
+        if unit_ch == ('k' as char) {
+            mult = 1024:usize
+            num_len = s.len - 1
+        } else if unit_ch == ('m' as char) {
+            mult = 1048576:usize
+            num_len = s.len - 1
+        } else if unit_ch == ('g' as char) {
+            mult = 1073741824:usize
+            num_len = s.len - 1
+        } else if unit_ch == ('b' as char) {
+            mult = 1:usize
+            num_len = s.len - 1
+        }
     }
 
     if num_len == 0 {

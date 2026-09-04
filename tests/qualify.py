@@ -1688,14 +1688,19 @@ def main():
         size_dir.mkdir(parents=True, exist_ok=True)
         (size_dir / "test.txt").write_text("TEST_MATCH\n", encoding="utf-8")
 
-        # Valid sizes
-        for sz_str, expected in [("64K", 65536), ("64k", 65536), ("1M", 1048576), ("1m", 1048576), ("2048", 2048), ("9223372036854775807", 9223372036854775807)]:
+        # Valid sizes (supporting B, K, M, G, KB, MB, GB, KiB, MiB, GiB)
+        for sz_str, expected in [
+            ("64K", 65536), ("64k", 65536), ("1KB", 1024), ("1kb", 1024), ("1KiB", 1024), ("1kib", 1024),
+            ("1M", 1048576), ("1m", 1048576), ("1MB", 1048576), ("1mb", 1048576), ("1MiB", 1048576), ("1mib", 1048576),
+            ("1G", 1073741824), ("1g", 1073741824), ("1GB", 1073741824), ("1gb", 1073741824), ("1GiB", 1073741824), ("1gib", 1073741824),
+            ("2048", 2048), ("9223372036854775807", 9223372036854775807)
+        ]:
             r = run_cmd([trg, "--json", "--max-result-bytes", sz_str, "TEST_MATCH", str(size_dir)])
             assert r.returncode == 0
             assert json.loads(r.stdout.strip().split("\n")[-1])["data"]["limits"]["max_result_bytes"] == expected
 
         # Overflow / invalid sizes (exit 2)
-        for bad_sz in ["", "64G", "1.5M", "-10", "abc", "K", "100MB", "9223372036854775808", "18446744073709551615", "18446744073709551616", "184467440737095516150", "9223372036854775807K", "9223372036854775807M"]:
+        for bad_sz in ["", "1.5M", "-10", "abc", "K", "KB", "KiB", "MB", "GB", "GiB", "100XYZ", "9223372036854775808", "18446744073709551615", "18446744073709551616", "184467440737095516150", "9223372036854775807K", "9223372036854775807M", "9223372036854775807G"]:
             r = run_cmd([trg, "--max-result-bytes", bad_sz, "TEST_MATCH", str(size_dir)], check=False)
             assert r.returncode == 2
 
@@ -2389,9 +2394,39 @@ def main():
         assert json.loads(r_c4.stdout.strip())["error"]["code"] == -32602
         assert "conflicts with positional arg 'dirB'" in json.loads(r_c4.stdout.strip())["error"]["message"]
 
+        # 11e. max_matches and -m are orthogonal and must NOT conflict
+        r_c5 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 217, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "foo", "max_matches": 10, "args": ["-m", "2"]}}
+        }) + "\n")
+        assert "result" in json.loads(r_c5.stdout.strip())
+
+        # 11f. max_matches as string must be rejected with -32602 (integer only in schema)
+        r_c6 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 218, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "foo", "max_matches": "1"}}
+        }) + "\n")
+        assert json.loads(r_c6.stdout.strip())["error"]["code"] == -32602
+        assert "must be an integer" in json.loads(r_c6.stdout.strip())["error"]["message"]
+
+        # 11g. type vs attached short option -trust
+        r_c7 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 219, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "foo", "type": "rust", "args": ["-trust"]}}
+        }) + "\n")
+        assert json.loads(r_c7.stdout.strip())["error"]["code"] == -32602
+        assert "conflicts with args option '-trust'" in json.loads(r_c7.stdout.strip())["error"]["message"]
+
+        # 11h. type vs -T py (exclusion) must NOT conflict
+        r_c8 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 220, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "foo", "type": "rust", "args": ["-T", "py"]}}
+        }) + "\n")
+        assert "result" in json.loads(r_c8.stdout.strip())
+
         # 12. Missing required 'pattern'
         r_nopat = run_cmd([trg, "--mcp"], input_data=json.dumps({
-            "jsonrpc": "2.0", "id": 217, "method": "tools/call",
+            "jsonrpc": "2.0", "id": 221, "method": "tools/call",
             "params": {"name": "trg_search", "arguments": {}}
         }) + "\n")
         assert json.loads(r_nopat.stdout.strip())["error"]["code"] == -32602
@@ -2531,9 +2566,8 @@ def main():
         assert mcp_resp["result"]["_meta"]["summary"]["complete"] is False
         assert mcp_resp["result"]["_meta"]["summary"]["termination_reason"] == "max_total_matches"
 
-        # Byte-for-byte parity of inner JSONL stream
-        mcp_jsonl_clean = "\n".join([line for line in mcp_content.strip().split("\n") if line.strip() and not line.startswith("[trg:")])
-        assert r_cli_p.stdout.strip() == mcp_jsonl_clean.strip(), f"CLI and MCP inner JSONL mismatch:\nCLI:\n{r_cli_p.stdout.strip()}\nMCP:\n{mcp_jsonl_clean.strip()}"
+        # Direct byte-for-byte parity of inner JSONL stream
+        assert r_cli_p.stdout == mcp_content, f"CLI and MCP inner JSONL mismatch:\nCLI:\n{r_cli_p.stdout}\nMCP:\n{mcp_content}"
     finally:
         if parity_dir.exists():
             shutil.rmtree(parity_dir)
@@ -2546,8 +2580,68 @@ def main():
     assert "no such file or directory" not in r_ff.stderr.lower(), f"Filesystem walk ran before regex compilation! stderr: {r_ff.stderr}"
     log("Regex fail-fast verified.")
 
+    # Test 101: Full JSON stats.matches Mode-Aware Legacy Compatibility Gate
+    log("Test 101: Full JSON stats.matches Mode-Aware Legacy Compatibility Gate")
+    compat_dir = fixtures_dir / "test_legacy_stats_compat"
+    try:
+        compat_dir.mkdir(exist_ok=True)
+        (compat_dir / "f1.txt").write_text("match_alpha line 1\nother\nmatch_alpha line 2\n", encoding="utf-8")
+        (compat_dir / "f2.txt").write_text("match_alpha line 3\nother\nmatch_alpha line 4\n", encoding="utf-8")
+
+        # 1. Ordinary search (no budget truncation): matches == matched_lines_emitted == matched_lines_observed
+        r_ord = run_cmd([trg, "--json", "--sort", "path", "match_alpha", str(compat_dir)])
+        assert r_ord.returncode == 0
+        ev_ord = [json.loads(l) for l in r_ord.stdout.strip().split("\n") if l.strip()]
+        sum_ord = next(e for e in ev_ord if e.get("type") == "summary")["data"]["stats"]
+        assert sum_ord["matches"] == 4
+        assert sum_ord["matched_lines_emitted"] == 4
+        assert sum_ord["matched_lines_observed"] == 4
+        assert sum_ord["searches_with_match"] == 2
+        assert sum_ord["files_with_match_emitted"] == 2
+        assert sum_ord["files_with_match_observed"] == 2
+
+        # 2. Budget truncated search: matches == matched_lines_emitted (2) != matched_lines_observed (4)
+        r_tr = run_cmd([trg, "--json", "--sort", "path", "--max-total-matches=2", "match_alpha", str(compat_dir)])
+        assert r_tr.returncode == 0
+        ev_tr = [json.loads(l) for l in r_tr.stdout.strip().split("\n") if l.strip()]
+        sum_tr = next(e for e in ev_tr if e.get("type") == "summary")["data"]["stats"]
+        end_tr_matches = sum(e["data"]["stats"]["matches"] for e in ev_tr if e.get("type") == "end")
+        assert sum_tr["matches"] == 2
+        assert sum_tr["matched_lines_emitted"] == 2
+        assert end_tr_matches == 2, f"end.stats.matches sum must equal emitted matches: {end_tr_matches}"
+        assert sum_tr["matches"] == end_tr_matches, "summary.stats.matches must match end.stats.matches in truncated mode"
+        assert sum_tr["matched_lines_observed"] > 2
+        assert sum_tr["searches_with_match"] == 1
+        assert sum_tr["files_with_match_emitted"] == 1
+        assert sum_tr["files_with_match_observed"] >= 1
+
+        # 3. Quiet mode (-q --json): no match events emitted, matches reports observed matches
+        r_q = run_cmd([trg, "-q", "--json", "match_alpha", str(compat_dir)])
+        assert r_q.returncode == 0
+        ev_q = [json.loads(l) for l in r_q.stdout.strip().split("\n") if l.strip()]
+        sum_q = next(e for e in ev_q if e.get("type") == "summary")["data"]["stats"]
+        assert sum_q["matched_lines_emitted"] == 0
+        assert sum_q["matches"] == sum_q["matched_lines_observed"] == 1
+        assert sum_q["searches_with_match"] == sum_q["files_with_match_observed"] == 1
+        assert sum_q["files_with_match_emitted"] == 0
+
+        # 4. Count mode (-c): verify count output and exit code contract
+        r_c = run_cmd([trg, "-c", "--sort", "path", "match_alpha", str(compat_dir)])
+        assert r_c.returncode == 0
+        lines_c = [l.strip() for l in r_c.stdout.strip().split("\n") if l.strip()]
+        assert len(lines_c) == 2
+        assert lines_c[0].endswith(":2")
+        assert lines_c[1].endswith(":2")
+
+        # Zero-match count returns exit code 1
+        r_c_zero = run_cmd([trg, "-c", "nonexistent_pattern_12345", str(compat_dir)], check=False)
+        assert r_c_zero.returncode == 1
+    finally:
+        if compat_dir.exists():
+            shutil.rmtree(compat_dir)
+
     log("=" * 60)
-    log("ALL 100 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.2)!")
+    log("ALL 101 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.2)!")
     log("=" * 60)
 
 if __name__ == "__main__":
