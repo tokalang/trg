@@ -1,15 +1,9 @@
 // Syntax and lexical analysis for trg: definitions, scopes, and delimiters.
 import core/str::{str}
 import std/vec::{Vec}
-import src/types::{ScopeFrame}
+import src/types::{ScopeFrame, SyntaxFamily}
 import src/matcher::{SearchPlan}
 import src/file_types::{extract_file_extension}
-
-pub shape SyntaxFamily (
-    Plain = 0 |
-    Brace = 1 |
-    Indent = 2
-)
 
 pub fn utf8_truncate_len(s: str, max_bytes: usize) -> usize {
     if s.len <= max_bytes {
@@ -22,12 +16,12 @@ pub fn utf8_truncate_len(s: str, max_bytes: usize) -> usize {
     return cut
 }
 
-pub fn detect_syntax_archetype(path: str) -> usize {
+pub fn detect_syntax_family(path: str) -> SyntaxFamily {
     auto ext = extract_file_extension(path)
     if ext == "py" || ext == "pyi" || ext == "yaml" || ext == "yml" || ext == "nim" {
-        return 1:usize
+        return SyntaxFamily::Indent
     }
-    return 0:usize
+    return SyntaxFamily::Brace
 }
 
 pub fn compute_line_indent(line: str) -> usize {
@@ -262,25 +256,28 @@ impl ScopeTracker {
         return ScopeTracker(frames = Vec<ScopeFrame>::new())
     }
 
-    pub fn update(self#, line: str, brace_depth: usize, indent_level: usize, archetype: usize) {
+    pub fn update(self#, line: str, brace_depth: usize, indent_level: usize, family: SyntaxFamily) {
         loop true {
             if self.frames.len() == 0 {
                 break
             }
             auto top_idx = self.frames.len() - 1:usize
             auto top_depth = self.frames.borrow(top_idx).depth
-            if archetype == 1 {
-                auto trimmed = line.trim()
-                if trimmed.len > 0 && !trimmed.starts_with("#") {
-                    if indent_level <= top_depth {
+            match family {
+                auto SyntaxFamily::Indent => {
+                    auto trimmed = line.trim()
+                    if trimmed.len > 0 && !trimmed.starts_with("#") {
+                        if indent_level <= top_depth {
+                            self.frames#.pop()
+                            continue
+                        }
+                    }
+                }
+                auto SyntaxFamily::Brace => {
+                    if brace_depth < top_depth {
                         self.frames#.pop()
                         continue
                     }
-                }
-            } else {
-                if brace_depth < top_depth {
-                    self.frames#.pop()
-                    continue
                 }
             }
             break
@@ -289,8 +286,11 @@ impl ScopeTracker {
         auto scope_decl = detect_declaration_scope(line)
         if scope_decl.len() > 0 {
             auto decl_depth# = brace_depth
-            if archetype == 1 {
-                decl_depth = indent_level
+            match family {
+                auto SyntaxFamily::Indent => {
+                    decl_depth = indent_level
+                }
+                auto SyntaxFamily::Brace => {}
             }
             self.frames#.push(ScopeFrame(name = cede scope_decl, depth = decl_depth))
         }

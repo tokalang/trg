@@ -1,4 +1,4 @@
-// Application entrypoint and exit code orchestrator for trg (SearchPlan delegated to src/executor).
+import src/types::{OutputFormat}
 import src/posix::{posix_init_signals, print_err}
 import src/cli::{parse_cli_args}
 import src/mcp::{run_mcp_server}
@@ -37,7 +37,8 @@ fn main() -> i32 {
         return 0
     }
 
-    auto writer = OutputBudgetWriter::new(opts.json_mode, opts.json_compact, opts.budget_limits.is_budget_active())
+    auto format = OutputFormat::from_cli_options(opts)
+    auto writer = OutputBudgetWriter::new(format)
     auto search_res = execute_search(opts, writer)
     if search_res.is_err() {
         print_err(search_res.unwrap_err().as_str())
@@ -65,7 +66,7 @@ fn main() -> i32 {
     }
 
     if opts.quiet {
-        if report.files_with_match > 0 {
+        if report.found_result {
             return 0
         }
         if report.had_error {
@@ -78,7 +79,7 @@ fn main() -> i32 {
         return 2
     }
 
-    if report.total_matches > 0 || report.files_with_match > 0 || report.budget_state.files_with_match_emitted > 0 || report.budget_state.is_truncated {
+    if report.found_result || report.budget_state.files_with_match_emitted > 0 || report.budget_state.is_truncated {
         return 0
     }
 

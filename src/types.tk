@@ -49,10 +49,33 @@ impl BudgetLimits {
     }
 }
 
+pub shape ScanPass (
+    All = 0 |
+    DefinitionsOnly = 1 |
+    UsagesOnly = 2
+)
+
+pub shape SyntaxFamily (
+    Brace = 0 |
+    Indent = 1
+)
+
+pub shape OutputFormat (
+    Human = 0 |
+    JsonFull = 1 |
+    JsonCompact = 2
+)
+
+pub shape OutputSink (
+    Stdout = 0 |
+    Memory = 1
+)
+
 pub shape BudgetState (
     limits: BudgetLimits,
     files_selected#: usize,
     files_scanned#: usize,
+    file_scan_passes#: usize,
     files_with_match_observed#: usize,
     files_with_match_emitted#: usize,
     matched_lines_observed#: usize,
@@ -73,6 +96,7 @@ impl BudgetState {
             limits = limits,
             files_selected = 0,
             files_scanned = 0,
+            file_scan_passes = 0,
             files_with_match_observed = 0,
             files_with_match_emitted = 0,
             matched_lines_observed = 0,
@@ -93,6 +117,7 @@ impl BudgetState {
             limits = self.limits,
             files_selected = self.files_selected,
             files_scanned = self.files_scanned,
+            file_scan_passes = self.file_scan_passes,
             files_with_match_observed = self.files_with_match_observed,
             files_with_match_emitted = self.files_with_match_emitted,
             matched_lines_observed = self.matched_lines_observed,
@@ -108,12 +133,15 @@ impl BudgetState {
         )
     }
 
-    pub fn reserve_match(self#, path: str, line_num: usize, is_first_observed_for_file: bool) -> bool {
-        if self.is_truncated { return false }
+    pub fn observe_match(self#, is_first_observed_for_file: bool) {
         self.matched_lines_observed = self.matched_lines_observed + 1
         if is_first_observed_for_file {
             self.files_with_match_observed = self.files_with_match_observed + 1
         }
+    }
+
+    pub fn reserve_match(self#, path: str, line_num: usize, is_first_for_file: bool) -> bool {
+        if self.is_truncated { return false }
 
         // Priority 1: max_total_matches
         if self.limits.max_total_matches_enabled && self.matched_lines_emitted >= self.limits.max_total_matches {
@@ -124,7 +152,7 @@ impl BudgetState {
             return false
         }
         // Priority 2: max_files_with_matches
-        if self.limits.max_files_with_matches_enabled && is_first_observed_for_file && self.files_with_match_emitted >= self.limits.max_files_with_matches {
+        if self.limits.max_files_with_matches_enabled && is_first_for_file && self.files_with_match_emitted >= self.limits.max_files_with_matches {
             self.is_truncated = true
             self.truncation_reason = string::from("max_files_with_matches")
             self.stopped_path = string::from(path)
@@ -247,32 +275,35 @@ pub shape GlobalStats (
 
 pub shape FileRunState (
     scanned_unique#: bool,
-    scan_passes#: usize,
     match_observed#: bool,
-    match_emitted#: bool,
-    matched_lines_emitted#: usize
+    match_emitted#: bool
 )
 
 impl FileRunState {
     pub fn new() -> FileRunState {
         return FileRunState(
             scanned_unique = false,
-            scan_passes = 0,
             match_observed = false,
-            match_emitted = false,
-            matched_lines_emitted = 0
+            match_emitted = false
         )
     }
 }
 
 pub shape SearchReport (
-    total_files_selected: usize,
-    files_scanned: usize,
-    file_scan_passes: usize,
-    files_with_match: usize,
-    total_matches: usize,
+    found_result: bool,
     had_error: bool,
     is_broken_pipe: bool,
     budget_state: BudgetState,
     elapsed_nanos: u64
 )
+
+impl OutputFormat {
+    pub fn from_cli_options(opts: CliOptions) -> OutputFormat {
+        if opts.json_compact {
+            return OutputFormat::JsonCompact
+        } else if opts.json_mode {
+            return OutputFormat::JsonFull
+        }
+        return OutputFormat::Human
+    }
+}

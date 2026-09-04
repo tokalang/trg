@@ -1,10 +1,22 @@
 // True incremental 64KB chunk-buffered streaming scanner with O(1) circular BeforeRing, OpeningMatchBatch atomic preflight, and lazy JSON framing.
 import core/str::{str}
-import core/option::{Option}
 import std/vec::{Vec}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
-import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult, MatchRange, MatchDecision, BudgetState, ScopeFrame, FileRunState}
-import src/file_types::{extract_file_extension}
+import src/types::{
+    CliOptions,
+    MatchEvent,
+    SubMatch,
+    LogicalLine,
+    LineProcessOutcome,
+    ScanResult,
+    MatchRange,
+    MatchDecision,
+    BudgetState,
+    ScopeFrame,
+    FileRunState,
+    ScanPass,
+    SyntaxFamily
+}
 import src/matcher::{SearchPlan}
 import src/posix::{posix_ferror}
 import src/printer::{
@@ -30,7 +42,7 @@ import src/printer::{
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
 
 import src/syntax::{
-    detect_syntax_archetype,
+    detect_syntax_family,
     compute_line_indent,
     update_brace_depth,
     detect_declaration_scope,
@@ -90,9 +102,8 @@ fn process_logical_line(
     scope_name: str
 ) -> LineProcessOutcome {
     if line_matches {
-        auto is_first_obs = !file_match_observed
-        file_match_observed = true
-        auto res_ok = budget_state#.reserve_match(target_path, line.line_number, is_first_obs)
+        auto is_first_for_file = !file_has_emitted_match
+        auto res_ok = budget_state#.reserve_match(target_path, line.line_number, is_first_for_file)
         if !res_ok {
             return LineProcessOutcome::Continue
         }
@@ -253,17 +264,22 @@ fn process_logical_line(
             terminate_block = true
             is_block_truncated = true
             budget_state.block_contexts_truncated = budget_state.block_contexts_truncated + 1
-        } else if state.block_archetype == 1 {
-            auto trimmed = line.text.as_str().trim()
-            if trimmed.len > 0 && !trimmed.starts_with("#") {
-                if line.indent_level <= state.block_target_indent {
-                    state.block_active = false
-                    return LineProcessOutcome::Continue
-                }
-            }
         } else {
-            if line.brace_depth <= state.block_target_depth && line.text.as_str().index_of('}' as char).is_some() {
-                terminate_block = true
+            match state.block_archetype {
+                auto SyntaxFamily::Indent => {
+                    auto trimmed = line.text.as_str().trim()
+                    if trimmed.len > 0 && !trimmed.starts_with("#") {
+                        if line.indent_level <= state.block_target_indent {
+                            state.block_active = false
+                            return LineProcessOutcome::Continue
+                        }
+                    }
+                }
+                auto SyntaxFamily::Brace => {
+                    if line.brace_depth <= state.block_target_depth && line.text.as_str().index_of('}' as char).is_some() {
+                        terminate_block = true
+                    }
+                }
             }
         }
 
@@ -418,7 +434,7 @@ fn scan_and_process_line(
     line_brace_depth: usize,
     line_indent: usize,
     scope_tracker: ScopeTracker,
-    pass_mode: usize,
+    pass_mode: ScanPass,
     matches_count#: usize,
     has_match#: bool,
     max_count_reached#: bool,
@@ -453,10 +469,18 @@ fn scan_and_process_line(
         // Two-pass filter for --def-first
         if line_matches {
             auto is_def = is_defining_symbol(line_text, plan)
-            if pass_mode == 1 && !is_def {
-                line_matches = false
-            } else if pass_mode == 2 && is_def {
-                line_matches = false
+            match pass_mode {
+                auto ScanPass::DefinitionsOnly => {
+                    if !is_def {
+                        line_matches = false
+                    }
+                }
+                auto ScanPass::UsagesOnly => {
+                    if is_def {
+                        line_matches = false
+                    }
+                }
+                auto ScanPass::All => {}
             }
         }
 
@@ -467,13 +491,11 @@ fn scan_and_process_line(
                 max_count_reached = true
             }
 
+            auto is_first_obs = !file_match_observed
+            file_match_observed = true
+            budget_state#.observe_match(is_first_obs)
+
             if opts.quiet || opts.count {
-                auto is_first_obs = !file_match_observed
-                file_match_observed = true
-                budget_state.matched_lines_observed = budget_state.matched_lines_observed + 1
-                if is_first_obs {
-                    budget_state.files_with_match_observed = budget_state.files_with_match_observed + 1
-                }
                 return LineProcessOutcome::Continue
             }
 
@@ -560,7 +582,7 @@ pub fn scan_file_stream(
         multiple_files,
         writer,
         budget_state#,
-        0:usize,
+        ScanPass::All,
         file_state#
     )
 }
@@ -572,10 +594,10 @@ pub fn scan_file_stream_with_pass(
     multiple_files: bool,
     writer: OutputBudgetWriter,
     budget_state#: BudgetState,
-    pass_mode: usize,
+    pass_mode: ScanPass,
     file_state#: FileRunState
 ) -> ScanResult {
-    file_state.scan_passes = file_state.scan_passes + 1
+    budget_state.file_scan_passes = budget_state.file_scan_passes + 1
     if !file_state.scanned_unique {
         file_state.scanned_unique = true
         budget_state.files_scanned = budget_state.files_scanned + 1
@@ -649,12 +671,12 @@ pub fn scan_file_stream_with_pass(
             budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + format_json_begin(target_path.as_str()).len()
         }
 
-        auto archetype = detect_syntax_archetype(target_path.as_str())
+        auto family = detect_syntax_family(target_path.as_str())
         auto before_cap# = opts.before_context
         if opts.context_block && opts.max_block_lines > before_cap {
             before_cap = opts.max_block_lines
         }
-        auto context_state# = make_context_state(before_cap, archetype)
+        auto context_state# = make_context_state(before_cap, family)
         auto scope_tracker# = ScopeTracker::new()
         auto cur_brace_depth# = 0:usize
         auto line_num# = 1:usize
@@ -711,7 +733,7 @@ pub fn scan_file_stream_with_pass(
                         auto line_indent = compute_line_indent(line_text)
                         update_brace_depth(line_text, cur_brace_depth#)
                         auto line_brace_depth = cur_brace_depth
-                        scope_tracker#.update(line_text, line_brace_depth, line_indent, archetype)
+                        scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                         outcome = scan_and_process_line(
                             plan, opts, context_state#, target_path.as_str(), multiple_files,
@@ -737,7 +759,7 @@ pub fn scan_file_stream_with_pass(
                             auto line_indent = compute_line_indent(line_text)
                             update_brace_depth(line_text, cur_brace_depth#)
                             auto line_brace_depth = cur_brace_depth
-                            scope_tracker#.update(line_text, line_brace_depth, line_indent, archetype)
+                            scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                             outcome = scan_and_process_line(
                                 plan, opts, context_state#, target_path.as_str(), multiple_files,
@@ -804,7 +826,7 @@ pub fn scan_file_stream_with_pass(
                     auto line_indent = compute_line_indent(line_text)
                     update_brace_depth(line_text, cur_brace_depth#)
                     auto line_brace_depth = cur_brace_depth
-                    scope_tracker#.update(line_text, line_brace_depth, line_indent, archetype)
+                    scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                     outcome = scan_and_process_line(
                         plan, opts, context_state#, target_path.as_str(), multiple_files,
@@ -862,7 +884,6 @@ pub fn scan_file_stream_with_pass(
         if file_has_emitted_match {
             file_state.match_emitted = true
         }
-        file_state.matched_lines_emitted = file_state.matched_lines_emitted + file_matched_lines_emitted
 
         auto ret_matches# = file_matched_lines_emitted
         if opts.quiet || opts.count {

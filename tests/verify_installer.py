@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
-VERSION = "v0.6.0"
+STABLE_VERSION = "v0.9.1"
 
 
 def fail(message: str) -> None:
@@ -33,13 +33,14 @@ def target_name() -> str:
     return f"{os_name}-{arch_name}"
 
 
-def make_release(release_dir: pathlib.Path) -> pathlib.Path:
+def make_release(release_dir: pathlib.Path, version: str = STABLE_VERSION) -> pathlib.Path:
     target = target_name()
-    archive_name = f"trg-{VERSION}-{target}.tar.gz"
-    payload_root = release_dir / f"trg-{VERSION}-{target}"
-    payload_root.mkdir(parents=True)
+    archive_name = f"trg-{version}-{target}.tar.gz"
+    payload_root = release_dir / f"trg-{version}-{target}"
+    payload_root.mkdir(parents=True, exist_ok=True)
     binary = payload_root / "trg"
-    binary.write_text("#!/bin/sh\necho 'trg 0.6.0 (installer fixture)'\n", encoding="utf-8")
+    ver_clean = version.lstrip("v")
+    binary.write_text(f"#!/bin/sh\necho 'trg {ver_clean} (installer fixture)'\n", encoding="utf-8")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     archive = release_dir / archive_name
@@ -47,26 +48,29 @@ def make_release(release_dir: pathlib.Path) -> pathlib.Path:
         tar.add(payload_root, arcname=payload_root.name)
 
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (release_dir / "SHA256SUMS").write_text(
-        f"{digest}  {archive_name}\n", encoding="utf-8"
+    sums_file = release_dir / "SHA256SUMS"
+    existing_sums = sums_file.read_text(encoding="utf-8") if sums_file.exists() else ""
+    sums_file.write_text(
+        f"{existing_sums}{digest}  {archive_name}\n", encoding="utf-8"
     )
     return archive
 
 
-def base_env(home: pathlib.Path, release_dir: pathlib.Path, fake_bin: pathlib.Path) -> dict:
+def base_env(home: pathlib.Path, release_dir: pathlib.Path, fake_bin: pathlib.Path, version: str = None) -> dict:
     env = os.environ.copy()
-    for key in ("INSTALL_DIR", "TRG_SYSTEM_INSTALL_DIR"):
+    for key in ("INSTALL_DIR", "TRG_SYSTEM_INSTALL_DIR", "VERSION"):
         env.pop(key, None)
     env.update(
         {
             "HOME": str(home),
             "SHELL": "/bin/zsh",
-            "VERSION": VERSION,
             "TRG_RELEASE_BASE_URL": release_dir.as_uri(),
             "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             "TRG_SUDO_LOG": str(home / "sudo-was-called"),
         }
     )
+    if version is not None:
+        env["VERSION"] = version
     return env
 
 
@@ -127,6 +131,9 @@ def main() -> None:
         installed = default_home / ".local" / "bin" / "trg"
         if not installed.is_file() or not os.access(installed, os.X_OK):
             fail("default installation did not create an executable in ~/.local/bin")
+        default_bin_out = subprocess.check_output([str(installed)]).decode("utf-8")
+        if "trg 0.9.1" not in default_bin_out:
+            fail(f"default installation installed wrong version: {default_bin_out}")
         if (default_home / "sudo-was-called").exists():
             fail("default installation unexpectedly invoked sudo")
         for profile_name in (".zprofile", ".zshrc"):
@@ -138,6 +145,19 @@ def main() -> None:
             fail("installer did not explain current-process PATH limitations")
         if "restart GUI applications such as Codex" not in first.stdout:
             fail("installer did not explain GUI application restart requirements")
+
+        # Explicit VERSION override downloads the requested version
+        override_version = "v0.9.0"
+        make_release(release_dir, override_version)
+        override_home = tmp / "override-home"
+        override_home.mkdir()
+        override_env = base_env(override_home, release_dir, fake_bin, version=override_version)
+        override_run = run_installer(override_env)
+        assert_success(override_run, "version override installation")
+        override_installed = override_home / ".local" / "bin" / "trg"
+        override_output = subprocess.check_output([str(override_installed)]).decode("utf-8")
+        if "trg 0.9.0" not in override_output:
+            fail(f"version override failed, expected trg 0.9.0, got: {override_output}")
 
         # Reinstallation is idempotent: no duplicate managed PATH blocks.
         second = run_installer(env)

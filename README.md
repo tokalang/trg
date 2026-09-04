@@ -27,6 +27,8 @@
   - Zero external runtimes (no Node.js or Python needed).
   - Strictly isolated memory buffers guarantee stdout is never polluted by raw search text.
   - Exposes typed `trg_search` tool (`pattern`, `path`, `block`, `scope`, `def_first`, `max_matches`, `max_bytes`, `type`, `args`).
+  - **Explicit ID Profile**: Accepts string, null, and safe-integer JSON-RPC `id`s ($[-2^{53}+1, 2^{53}-1]$, preserving negative integers like `-7`). Fractional, boolean, or non-primitive `id`s are rejected as `-32600 Invalid Request` with `id: null`.
+  - **Typed Parameter Validation & Conflict Prevention**: Validates parameter types strictly. Conflicts between typed properties and raw CLI options in `args` (e.g. `block` alongside `--block`/`--no-block`, `max_matches` alongside `-m`/`--max-total-matches`, or `path` alongside positional arguments) are rejected with `-32602 Invalid params`.
   - Strict MCP SDK specification compliance: puts structured summary in `result._meta.summary` and appends human-readable status footer `[trg: complete=..., truncated=..., reason=..., matches=..., scanned=...]` to `content[0].text`.
 - **Token-Efficient Compact JSON Mode (`--json=compact` / `--json-compact`)**:
   - Eliminates per-file `begin` and `end` framing events.

@@ -1,6 +1,6 @@
 // Context ring buffer and syntactic block context calculation for trg.
 import std/vec::{Vec}
-import src/types::{LogicalLine}
+import src/types::{LogicalLine, SyntaxFamily}
 import src/syntax::{detect_declaration_scope}
 
 pub shape BeforeRing (
@@ -19,11 +19,11 @@ pub shape ContextState (
     block_active: bool,
     block_target_depth: usize,
     block_target_indent: usize,
-    block_archetype: usize,
+    block_archetype: SyntaxFamily,
     block_lines_emitted: usize
 )
 
-pub fn make_context_state(before_cap: usize, archetype: usize) -> ContextState {
+pub fn make_context_state(before_cap: usize, archetype: SyntaxFamily) -> ContextState {
     return ContextState(
         ring = BeforeRing(
             lines = Vec<LogicalLine>::with_capacity(before_cap),
@@ -57,7 +57,7 @@ pub fn calculate_block_context_start(
     capacity: usize,
     max_block_lines: usize,
     before_context: usize,
-    archetype: usize,
+    archetype: SyntaxFamily,
     cur_depth: usize,
     cur_indent: usize,
     match_is_def: bool,
@@ -71,8 +71,13 @@ pub fn calculate_block_context_start(
 
     if match_is_def {
         auto outer_depth# = cur_depth
-        if archetype == 0 && outer_depth > 0 {
-            outer_depth = outer_depth - 1
+        match archetype {
+            auto SyntaxFamily::Brace => {
+                if outer_depth > 0 {
+                    outer_depth = outer_depth - 1
+                }
+            }
+            auto SyntaxFamily::Indent => {}
         }
         target_depth = outer_depth
         target_indent = cur_indent
@@ -86,29 +91,32 @@ pub fn calculate_block_context_start(
         s_idx = s_idx - 1
         auto actual_idx = (head + s_idx) % capacity
         auto &r_line = lines.borrow(actual_idx)
-        if archetype == 1 {
-            // IndentFamily: find shallower indent line
-            auto trimmed = r_line.text.as_str().trim()
-            if trimmed.len > 0 && !trimmed.starts_with("#") {
-                if r_line.indent_level < cur_indent {
+        match archetype {
+            auto SyntaxFamily::Indent => {
+                // IndentFamily: find shallower indent line
+                auto trimmed = r_line.text.as_str().trim()
+                if trimmed.len > 0 && !trimmed.starts_with("#") {
+                    if r_line.indent_level < cur_indent {
+                        emit_start_idx = s_idx
+                        target_indent = r_line.indent_level
+                        found_start = true
+                        break
+                    }
+                }
+            }
+            auto SyntaxFamily::Brace => {
+                // BraceFamily: find declaration or outer depth
+                if r_line.brace_depth < cur_depth || detect_declaration_scope(r_line.text.as_str()).len() > 0 {
                     emit_start_idx = s_idx
-                    target_indent = r_line.indent_level
+                    auto r_depth = r_line.brace_depth
+                    if detect_declaration_scope(r_line.text.as_str()).len() > 0 && r_depth > 0 {
+                        target_depth = r_depth - 1
+                    } else {
+                        target_depth = r_depth
+                    }
                     found_start = true
                     break
                 }
-            }
-        } else {
-            // BraceFamily: find declaration or outer depth
-            if r_line.brace_depth < cur_depth || detect_declaration_scope(r_line.text.as_str()).len() > 0 {
-                emit_start_idx = s_idx
-                auto r_depth = r_line.brace_depth
-                if detect_declaration_scope(r_line.text.as_str()).len() > 0 && r_depth > 0 {
-                    target_depth = r_depth - 1
-                } else {
-                    target_depth = r_depth
-                }
-                found_start = true
-                break
             }
         }
     }

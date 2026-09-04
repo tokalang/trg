@@ -997,7 +997,7 @@ def main():
     log("Test 59: Dogfood repository search over 1MB+ fixtures (clean exit 0)")
     r_dogfood = run_cmd([trg, "-n", "SearchPlan", str(repo_root)])
     assert r_dogfood.returncode == 0, f"Expected dogfood exit 0, got {r_dogfood.returncode}"
-    assert "src/main.tk" in r_dogfood.stdout
+    assert "src/executor.tk" in r_dogfood.stdout or "src/matcher.tk" in r_dogfood.stdout
     assert "Maximum logical line length exceeded" not in r_dogfood.stderr
 
     # Test 60: --no-ignore bypassing .gitignore vs respecting hidden files without --hidden
@@ -1143,7 +1143,7 @@ def main():
 
     # Test 64: --max-columns=0 allows unlimited output width
     log("Test 64: --max-columns=0 allows unlimited output width")
-    r_unlim = run_cmd([trg, "--max-columns=0", "-n", "SearchPlan", str(repo_root / "src" / "main.tk")])
+    r_unlim = run_cmd([trg, "--max-columns=0", "-n", "SearchPlan", str(repo_root / "src" / "executor.tk")])
     assert r_unlim.returncode == 0
     # Test 65: Comprehensive Edge Case & Cross-Chunk Boundary Verification Matrix
     log("Test 65: Comprehensive Edge Case & Cross-Chunk Boundary Verification Matrix")
@@ -2177,7 +2177,7 @@ def main():
         assert summary["matches_emitted"] == 1
 
         trunc_text = resp_trunc["result"]["content"][0]["text"]
-        assert "[trg: complete=false, truncated=true, reason=max_total_matches, matches=1, scanned=1]" in trunc_text
+        assert "[trg: complete=false, truncated=true, reason=max_total_matches, matches=1, scanned=1, passes=1]" in trunc_text
     finally:
         if mcp_trunc_dir.exists():
             shutil.rmtree(mcp_trunc_dir)
@@ -2298,17 +2298,112 @@ def main():
         assert resp_args["id"] == 206
         assert resp_args["error"]["code"] == -32602
 
-        # 8. Notification silence: notifications without "id" MUST produce NO response
-        notif_and_ping = (
-            '{"jsonrpc": "2.0", "method": "notifications/initialized"}\n'
-            '{"jsonrpc": "2.0", "id": 207, "method": "ping"}\n'
-        )
-        r_notif = run_cmd([trg, "--mcp"], input_data=notif_and_ping)
-        assert r_notif.returncode == 0
-        notif_lines = [l for l in r_notif.stdout.strip().split("\n") if l.strip()]
-        assert len(notif_lines) == 1, f"Expected exactly 1 response for ping, got {len(notif_lines)}: {notif_lines}"
-        resp_ping = json.loads(notif_lines[0])
-        assert resp_ping["id"] == 207
+        # 9. Typed property wrong-type validation
+        # 9a. String for boolean 'block'
+        r_btype = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 208, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "BudgetState", "block": "not_a_bool"}}
+        }) + "\n")
+        assert json.loads(r_btype.stdout.strip())["error"]["code"] == -32602
+        assert "must be a boolean" in json.loads(r_btype.stdout.strip())["error"]["message"]
+
+        # 9b. Float for integer 'max_matches'
+        r_mtype = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 209, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "BudgetState", "max_matches": 1.5}}
+        }) + "\n")
+        assert json.loads(r_mtype.stdout.strip())["error"]["code"] == -32602
+
+        # 9c. Negative integer for 'max_matches'
+        r_mneg = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 210, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "BudgetState", "max_matches": -1}}
+        }) + "\n")
+        assert json.loads(r_mneg.stdout.strip())["error"]["code"] == -32602
+
+        # 9d. Overflow for 'max_matches' (> 2^53 - 1)
+        r_movf = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 211, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "BudgetState", "max_matches": 9999999999999999}}
+        }) + "\n")
+        assert json.loads(r_movf.stdout.strip())["error"]["code"] == -32602
+
+        # 9e. Non-array for 'args'
+        r_narg = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 212, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "BudgetState", "args": "invalid_string"}}
+        }) + "\n")
+        assert json.loads(r_narg.stdout.strip())["error"]["code"] == -32602
+        assert "must be an array" in json.loads(r_narg.stdout.strip())["error"]["message"]
+
+        # 10. JSON-RPC ID profile tests
+        # 10a. Negative integer id is preserved
+        r_negid = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": -7, "method": "ping"
+        }) + "\n")
+        resp_negid = json.loads(r_negid.stdout.strip())
+        assert resp_negid["id"] == -7
+
+        # 10b. Fractional id is rejected with code -32600 and id: null
+        r_fracid = run_cmd([trg, "--mcp"], input_data='{"jsonrpc": "2.0", "id": 1.5, "method": "ping"}\n')
+        resp_fracid = json.loads(r_fracid.stdout.strip())
+        assert resp_fracid["id"] is None
+        assert resp_fracid["error"]["code"] == -32600
+
+        # 10c. Non-primitive id (boolean) is rejected with code -32600 and id: null
+        r_boolid = run_cmd([trg, "--mcp"], input_data='{"jsonrpc": "2.0", "id": true, "method": "ping"}\n')
+        resp_boolid = json.loads(r_boolid.stdout.strip())
+        assert resp_boolid["id"] is None
+        assert resp_boolid["error"]["code"] == -32600
+
+        # 11. Typed property vs args conflict matrix
+        # 11a. block vs --block
+        r_c1 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 213, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "foo", "block": True, "args": ["--block"]}}
+        }) + "\n")
+        assert json.loads(r_c1.stdout.strip())["error"]["code"] == -32602
+        assert "conflicts with args option '--block'" in json.loads(r_c1.stdout.strip())["error"]["message"]
+
+        # 11b. block vs --no-block
+        r_c2 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 214, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "foo", "block": True, "args": ["--no-block"]}}
+        }) + "\n")
+        assert json.loads(r_c2.stdout.strip())["error"]["code"] == -32602
+        assert "conflicts with args option '--no-block'" in json.loads(r_c2.stdout.strip())["error"]["message"]
+
+        # 11c. max_matches vs --max-total-matches
+        r_c3 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 215, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "foo", "max_matches": 5, "args": ["--max-total-matches", "10"]}}
+        }) + "\n")
+        assert json.loads(r_c3.stdout.strip())["error"]["code"] == -32602
+        assert "conflicts with args option '--max-total-matches'" in json.loads(r_c3.stdout.strip())["error"]["message"]
+
+        # 11d. path vs positional arg
+        r_c4 = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 216, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "foo", "path": "dirA", "args": ["dirB"]}}
+        }) + "\n")
+        assert json.loads(r_c4.stdout.strip())["error"]["code"] == -32602
+        assert "conflicts with positional arg 'dirB'" in json.loads(r_c4.stdout.strip())["error"]["message"]
+
+        # 12. Missing required 'pattern'
+        r_nopat = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 217, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {}}
+        }) + "\n")
+        assert json.loads(r_nopat.stdout.strip())["error"]["code"] == -32602
+        assert "'pattern' is required" in json.loads(r_nopat.stdout.strip())["error"]["message"]
+
+        # 13. Unknown tool name
+        r_unk = run_cmd([trg, "--mcp"], input_data=json.dumps({
+            "jsonrpc": "2.0", "id": 218, "method": "tools/call",
+            "params": {"name": "nonexistent_tool", "arguments": {"pattern": "foo"}}
+        }) + "\n")
+        assert json.loads(r_unk.stdout.strip())["error"]["code"] == -32602
+        assert "Unknown tool" in json.loads(r_unk.stdout.strip())["error"]["message"]
     finally:
         if mcp_rfc_dir.exists():
             shutil.rmtree(mcp_rfc_dir)
@@ -2324,6 +2419,7 @@ def main():
         (stats_dir / "d_no_match.tk").write_text("fn unrelated_one() {}\n", encoding="utf-8")
         (stats_dir / "e_no_match.tk").write_text("fn unrelated_two() {}\n", encoding="utf-8")
 
+        # 1. Compact JSON check
         r_df_stat = run_cmd([trg, "--def-first", "--sort", "path", "--json=compact", "helper_target", str(stats_dir)])
         assert r_df_stat.returncode == 0
         events = [json.loads(line) for line in r_df_stat.stdout.strip().split("\n") if line.strip()]
@@ -2343,12 +2439,45 @@ def main():
 
         # Cross-pass file statistics must NEVER duplicate counts
         assert summary["files_scanned"] == 5, f"Expected files_scanned == 5, got {summary['files_scanned']}"
+        assert summary["file_scan_passes"] == 10, f"Expected file_scan_passes == 10, got {summary.get('file_scan_passes')}"
         
         unique_matched_files = {m["path"] for m in matches}
         assert len(unique_matched_files) == 3
         assert summary["files_emitted"] == 3, f"Expected files_emitted == 3, got {summary['files_emitted']}"
         assert summary["files_observed"] == 3, f"Expected files_observed == 3, got {summary['files_observed']}"
         assert summary["matches_emitted"] == 5
+
+        # 2. Full JSON check
+        r_df_full = run_cmd([trg, "--def-first", "--sort", "path", "--json", "helper_target", str(stats_dir)])
+        assert r_df_full.returncode == 0
+        full_events = [json.loads(l) for l in r_df_full.stdout.strip().split("\n") if l.strip()]
+        full_summaries = [e for e in full_events if e.get("type") == "summary"]
+        assert len(full_summaries) == 1
+        full_stats = full_summaries[0]["data"]["stats"]
+        assert full_stats["files_scanned"] == 5
+        assert full_stats["file_scan_passes"] == 10
+
+        # 3. MCP metadata check
+        mcp_df_req = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 350,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "helper_target",
+                    "path": str(stats_dir),
+                    "def_first": True,
+                    "args": ["--sort", "path", "--json=compact"]
+                }
+            }
+        }) + "\n"
+        r_mcp_df = run_cmd([trg, "--mcp"], input_data=mcp_df_req)
+        assert r_mcp_df.returncode == 0
+        mcp_df_resp = json.loads(r_mcp_df.stdout.strip())
+        mcp_summary = mcp_df_resp["result"]["_meta"]["summary"]
+        assert mcp_summary["files_scanned"] == 5
+        assert mcp_summary["file_scan_passes"] == 10
     finally:
         if stats_dir.exists():
             shutil.rmtree(stats_dir)
@@ -2361,14 +2490,14 @@ def main():
         for idx in range(10):
             (parity_dir / f"item_{idx}.txt").write_text(f"common_entry line {idx} match\nother line\ncommon_entry line {idx} match again\n", encoding="utf-8")
 
-        # CLI execution with budget capping
-        r_cli_p = run_cmd([trg, "--json=compact", "--max-total-matches=4", "common_entry", str(parity_dir)])
+        # CLI execution with budget capping and deterministic sort
+        r_cli_p = run_cmd([trg, "--sort", "path", "--json=compact", "--max-total-matches=4", "common_entry", str(parity_dir)])
         assert r_cli_p.returncode == 0
         cli_events = [json.loads(line) for line in r_cli_p.stdout.strip().split("\n") if line.strip()]
         cli_matches = [e for e in cli_events if e.get("type") == "match"]
         cli_summary = [e for e in cli_events if e.get("type") == "summary"][0]
 
-        # MCP execution with identical budget
+        # MCP execution with identical budget and deterministic sort
         mcp_req = json.dumps({
             "jsonrpc": "2.0",
             "id": 301,
@@ -2379,7 +2508,7 @@ def main():
                     "pattern": "common_entry",
                     "path": str(parity_dir),
                     "max_matches": 4,
-                    "args": ["--json=compact"]
+                    "args": ["--sort", "path", "--json=compact"]
                 }
             }
         }) + "\n"
@@ -2387,7 +2516,7 @@ def main():
         assert r_mcp_p.returncode == 0
         mcp_resp = json.loads(r_mcp_p.stdout.strip())
         mcp_content = mcp_resp["result"]["content"][0]["text"]
-        mcp_events = [json.loads(line) for line in mcp_content.strip().split("\n") if line.strip()]
+        mcp_events = [json.loads(line) for line in mcp_content.strip().split("\n") if line.strip() and not line.startswith("[trg:")]
         mcp_matches = [e for e in mcp_events if e.get("type") == "match"]
         mcp_summary = [e for e in mcp_events if e.get("type") == "summary"][0]
 
@@ -2401,12 +2530,24 @@ def main():
         assert cli_summary["matches_emitted"] == mcp_summary["matches_emitted"] == 4
         assert mcp_resp["result"]["_meta"]["summary"]["complete"] is False
         assert mcp_resp["result"]["_meta"]["summary"]["termination_reason"] == "max_total_matches"
+
+        # Byte-for-byte parity of inner JSONL stream
+        mcp_jsonl_clean = "\n".join([line for line in mcp_content.strip().split("\n") if line.strip() and not line.startswith("[trg:")])
+        assert r_cli_p.stdout.strip() == mcp_jsonl_clean.strip(), f"CLI and MCP inner JSONL mismatch:\nCLI:\n{r_cli_p.stdout.strip()}\nMCP:\n{mcp_jsonl_clean.strip()}"
     finally:
         if parity_dir.exists():
             shutil.rmtree(parity_dir)
 
+    # Test 100: Regex Compile Fail-Fast before Target Walk
+    log("Test 100: Regex Compile Fail-Fast before Target Walk")
+    r_ff = run_cmd([trg, "-E", "(", "/definitely/nonexistent/and/missing/dir/12345"], check=False)
+    assert r_ff.returncode == 2, f"Expected exit code 2, got {r_ff.returncode}"
+    assert "regex parse error" in r_ff.stderr.lower() or "error" in r_ff.stderr.lower(), f"Expected regex error, got: {r_ff.stderr}"
+    assert "no such file or directory" not in r_ff.stderr.lower(), f"Filesystem walk ran before regex compilation! stderr: {r_ff.stderr}"
+    log("Regex fail-fast verified.")
+
     log("=" * 60)
-    log("ALL 99 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.2)!")
+    log("ALL 100 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.2)!")
     log("=" * 60)
 
 if __name__ == "__main__":

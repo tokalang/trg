@@ -2,7 +2,16 @@
 import core/types::{usize, char}
 import core/str::{str}
 import std/vec::{Vec}
-import src/types::{CliOptions, MatchEvent, SubMatch, GlobalStats, BudgetState, BudgetLimits}
+import src/types::{
+    CliOptions,
+    MatchEvent,
+    SubMatch,
+    GlobalStats,
+    BudgetState,
+    BudgetLimits,
+    OutputFormat,
+    OutputSink
+}
 import src/posix::{posix_write_stdout, print_err}
 
 pub shape EmitOutcome (
@@ -25,32 +34,30 @@ pub shape OutputBatch (
 )
 
 pub shape OutputBudgetWriter (
-    is_json_mode: bool,
-    is_json_compact: bool,
-    is_budget_active: bool,
-    is_memory_sink: bool,
-    memory_buffer#: Vec<string>
+    format: OutputFormat,
+    sink: OutputSink,
+    memory_str#: string
 )
 
 impl OutputBudgetWriter {
-    pub fn new(is_json_mode: bool, is_json_compact: bool, is_budget_active: bool) -> OutputBudgetWriter {
+    pub fn new(format: OutputFormat) -> OutputBudgetWriter {
         return OutputBudgetWriter(
-            is_json_mode = is_json_mode,
-            is_json_compact = is_json_compact,
-            is_budget_active = is_budget_active,
-            is_memory_sink = false,
-            memory_buffer = Vec<string>::new()
+            format = format,
+            sink = OutputSink::Stdout,
+            memory_str = string::new()
         )
     }
 
-    pub fn new_memory(is_json_mode: bool, is_json_compact: bool, is_budget_active: bool) -> OutputBudgetWriter {
+    pub fn new_memory(format: OutputFormat) -> OutputBudgetWriter {
         return OutputBudgetWriter(
-            is_json_mode = is_json_mode,
-            is_json_compact = is_json_compact,
-            is_budget_active = is_budget_active,
-            is_memory_sink = true,
-            memory_buffer = Vec<string>::new()
+            format = format,
+            sink = OutputSink::Memory,
+            memory_str = string::new()
         )
+    }
+
+    pub fn take_output(self) -> string {
+        return self.memory_str.clone()
     }
 
     pub fn emit_payload(
@@ -78,26 +85,37 @@ impl OutputBudgetWriter {
         }
 
         // Lazy JSON begin framing: write begin first, and on success immediately set begin_emitted = true
-        if self.is_json_mode && !self.is_json_compact && !frame_state.begin_emitted {
-            auto b_str = format_json_begin(frame_state.target_path.as_str())
-            if self.is_memory_sink {
-                self.memory_buffer#.push(b_str.clone())
-            } else {
-                auto b_res = posix_write_stdout(b_str.as_str())
-                if b_res == 1 { return EmitOutcome::BrokenPipe }
-                else if b_res == 2 { return EmitOutcome::FatalError }
+        match self.format {
+            auto OutputFormat::JsonFull => {
+                if !frame_state.begin_emitted {
+                    auto b_str = format_json_begin(frame_state.target_path.as_str())
+                    match self.sink {
+                        auto OutputSink::Memory => {
+                            self.memory_str#.push_str(b_str.as_str())
+                        }
+                        auto OutputSink::Stdout => {
+                            auto b_res = posix_write_stdout(b_str.as_str())
+                            if b_res == 1 { return EmitOutcome::BrokenPipe }
+                            else if b_res == 2 { return EmitOutcome::FatalError }
+                        }
+                    }
+                    frame_state.begin_emitted = true
+                    budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + b_str.len()
+                }
             }
-            frame_state.begin_emitted = true
-            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + b_str.len()
+            _ => {}
         }
 
         // Write wire payload
-        if self.is_memory_sink {
-            self.memory_buffer#.push(batch.payload_str.clone())
-        } else {
-            auto w_res = posix_write_stdout(batch.payload_str.as_str())
-            if w_res == 1 { return EmitOutcome::BrokenPipe }
-            else if w_res == 2 { return EmitOutcome::FatalError }
+        match self.sink {
+            auto OutputSink::Memory => {
+                self.memory_str#.push_str(batch.payload_str.as_str())
+            }
+            auto OutputSink::Stdout => {
+                auto w_res = posix_write_stdout(batch.payload_str.as_str())
+                if w_res == 1 { return EmitOutcome::BrokenPipe }
+                else if w_res == 2 { return EmitOutcome::FatalError }
+            }
         }
 
         if batch.is_payload {
@@ -110,14 +128,17 @@ impl OutputBudgetWriter {
     }
 
     pub fn write_raw(self, s: str) -> EmitOutcome {
-        if self.is_memory_sink {
-            self.memory_buffer#.push(string::from(s))
-            return EmitOutcome::Written
-        } else {
-            auto res = posix_write_stdout(s)
-            if res == 1 { return EmitOutcome::BrokenPipe }
-            else if res == 2 { return EmitOutcome::FatalError }
-            return EmitOutcome::Written
+        match self.sink {
+            auto OutputSink::Memory => {
+                self.memory_str#.push_str(s)
+                return EmitOutcome::Written
+            }
+            auto OutputSink::Stdout => {
+                auto res = posix_write_stdout(s)
+                if res == 1 { return EmitOutcome::BrokenPipe }
+                else if res == 2 { return EmitOutcome::FatalError }
+                return EmitOutcome::Written
+            }
         }
     }
 
@@ -126,16 +147,20 @@ impl OutputBudgetWriter {
         budget_state#: BudgetState,
         frame_str: str
     ) -> EmitOutcome {
-        if self.is_memory_sink {
-            self.memory_buffer#.push(string::from(frame_str))
-            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + frame_str.len
-            return EmitOutcome::Written
+        match self.sink {
+            auto OutputSink::Memory => {
+                self.memory_str#.push_str(frame_str)
+                budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + frame_str.len
+                return EmitOutcome::Written
+            }
+            auto OutputSink::Stdout => {
+                auto w_res = posix_write_stdout(frame_str)
+                if w_res == 1 { return EmitOutcome::BrokenPipe }
+                else if w_res == 2 { return EmitOutcome::FatalError }
+                budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + frame_str.len
+                return EmitOutcome::Written
+            }
         }
-        auto w_res = posix_write_stdout(frame_str)
-        if w_res == 1 { return EmitOutcome::BrokenPipe }
-        else if w_res == 2 { return EmitOutcome::FatalError }
-        budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + frame_str.len
-        return EmitOutcome::Written
     }
 }
 
@@ -166,6 +191,20 @@ pub fn u64_to_string(val: u64) -> string {
         out#.push_char(digits[i])
     }
     return cede out
+}
+
+pub fn i64_to_string(val: i64) -> string {
+    if val == 0:i64 {
+        return string::from("0")
+    }
+    if val < 0:i64 {
+        auto u_val = (0:i64 - val) as u64
+        auto u_str = u64_to_string(u_val)
+        auto res# = string::from("-")
+        res#.push_str(u_str.as_str())
+        return cede res
+    }
+    return u64_to_string(val as u64)
 }
 
 pub fn json_escape(s: str) -> string {
@@ -498,6 +537,8 @@ fn format_summary_json_raw(
     s#.push_str(u64_to_string(budget_state.files_selected as u64).as_str())
     s#.push_str(",\"files_scanned\":")
     s#.push_str(u64_to_string(budget_state.files_scanned as u64).as_str())
+    s#.push_str(",\"file_scan_passes\":")
+    s#.push_str(u64_to_string(budget_state.file_scan_passes as u64).as_str())
     s#.push_str(",\"files_with_match_observed\":")
     s#.push_str(u64_to_string(budget_state.files_with_match_observed as u64).as_str())
     s#.push_str(",\"files_with_match_emitted\":")
@@ -566,6 +607,8 @@ pub fn format_summary_json_compact(
     s#.push_str(u64_to_string(budget_state.files_with_match_observed as u64).as_str())
     s#.push_str(",\"files_scanned\":")
     s#.push_str(u64_to_string(budget_state.files_scanned as u64).as_str())
+    s#.push_str(",\"file_scan_passes\":")
+    s#.push_str(u64_to_string(budget_state.file_scan_passes as u64).as_str())
     s#.push_str(",\"block_truncated\":")
     if budget_state.block_contexts_truncated > 0 { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str("}\n")
