@@ -130,6 +130,9 @@
 - **Bounded `.gitignore` Evaluation (`trg-ignore-profile-v1`)**: Supports nested `.gitignore` stacks with directory subtree pruning and intra-directory negation.
 - **Order-Preserving Glob Filtering (`-g`)**: Order-preserving, last-match-wins glob inclusion and exclusion rules.
 - **Standard Flag Precedence Matrix**: Full support for `--files`, `-n` (line numbers), `-l` (files with matches), `-c` (matching line counts), `-v` (invert match), and `-i` (ASCII case-insensitivity).
+- **Target Deduplication Contract (`--deduplicate-targets`, `--no-deduplicate-targets`)**:
+  - `CLI`: Defaults to `--no-deduplicate-targets` (`deduplicate_targets = false`) to maintain 1:1 ripgrep compatibility (scanning duplicate positional path operands scans each predictably).
+  - `MCP`: Defaults to `deduplicate_targets = true` to collapse aliased paths and eliminate redundant token consumption for AI Agents. Explicit `--no-deduplicate-targets` can be passed via `args` if desired.
 - **Structured JSONL Output (`--json`, `trg-json-v2`)**:
   - Streams `trg-json-v2` events (`begin`, `match`, `context`, `end`, `summary`).
   - `begin` carries `"schema": "trg-json-v2"`.

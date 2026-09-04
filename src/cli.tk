@@ -73,6 +73,8 @@ pub fn print_help() {
     println("      --heading              Print path headings above match groups")
     println("      --no-heading           Print path on each match line (flat format)")
     println("      --path-style <STYLE>   Path style: as-given, workspace-relative, absolute")
+    println("      --deduplicate-targets  Deduplicate input file/directory paths by canonical identity")
+    println("      --no-deduplicate-targets Do not deduplicate input paths (default in CLI, opposite in MCP)")
     println("      --                     Treat all remaining arguments as paths/positionals")
     println("  -V, --version              Print version information")
     println("  -h, --help                 Print this help message")
@@ -299,6 +301,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     auto path_style# = PathStyle::AsGiven
     auto text_layout# = TextLayout::Auto
     auto with_filename# = Option<bool>::None
+    auto deduplicate_targets_explicit# = Option<bool>::None
     auto globs# = Vec<GlobRule>::new()
     auto include_type_exts# = Vec<string>::new()
     auto exclude_type_exts# = Vec<string>::new()
@@ -1196,6 +1199,18 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             continue
         }
 
+        if view == "--deduplicate-targets" {
+            deduplicate_targets_explicit = Option<bool>::Some(true)
+            i = i + 1
+            continue
+        }
+
+        if view == "--no-deduplicate-targets" {
+            deduplicate_targets_explicit = Option<bool>::Some(false)
+            i = i + 1
+            continue
+        }
+
         // Handle short flag clustering e.g. -nF, -iE, -lc, -q, -o, -N
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
@@ -1309,7 +1324,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             mcp_mode = false,
             path_style = PathStyle::AsGiven,
             text_layout = TextLayout::Auto,
-            with_filename = Option<bool>::None
+            with_filename = Option<bool>::None,
+            deduplicate_targets = false
         ))
     }
 
@@ -1376,6 +1392,20 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         paths#.push(string::from("."))
     }
 
+    auto deduplicate_targets# = false
+    match deduplicate_targets_explicit {
+        auto Option<bool>::Some(val) => {
+            deduplicate_targets = val
+        }
+        _ => {
+            if mcp_mode {
+                deduplicate_targets = true
+            } else {
+                deduplicate_targets = false
+            }
+        }
+    }
+
     return Result<CliOptions, string>::Ok(CliOptions(
         patterns = cede patterns,
         paths = cede paths,
@@ -1418,6 +1448,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         mcp_mode = mcp_mode,
         path_style = path_style,
         text_layout = text_layout,
-        with_filename = with_filename
+        with_filename = with_filename,
+        deduplicate_targets = deduplicate_targets
     ))
 }

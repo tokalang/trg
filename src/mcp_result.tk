@@ -118,6 +118,8 @@ pub fn format_effective_query(opts: CliOptions) -> string {
     if eq.scope { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str(",\"def_first\":")
     if eq.def_first { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"deduplicate_targets\":")
+    if eq.deduplicate_targets { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str("}")
     return cede s
 }

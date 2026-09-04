@@ -39,7 +39,8 @@ pub shape OptionFamily (
     LineNumber = 23 |       // -n, -N, --line-number, --no-line-number
     MaxBlockLines = 24 |    // --max-block-lines, --max-block-lines=*
     Heading = 25 |          // --heading, --no-heading
-    PathStyle = 26          // --path-style, --path-style=*
+    PathStyle = 26 |        // --path-style, --path-style=*
+    DeduplicateTargets = 27 // --deduplicate-targets, --no-deduplicate-targets
 )
 
 pub shape OptionToken (
@@ -245,6 +246,11 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
             // Zero-argument long options
             if view == "--heading" || view == "--no-heading" {
                 families#.push(OptionToken(family = OptionFamily::Heading, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--deduplicate-targets" || view == "--no-deduplicate-targets" {
+                families#.push(OptionToken(family = OptionFamily::DeduplicateTargets, token = string::from(view)))
                 i = i + 1
                 continue
             }
@@ -506,6 +512,9 @@ pub fn find_family_token(tokens: Vec<OptionToken>, target: OptionFamily) -> Opti
             }
             auto OptionFamily::PathStyle => {
                 match target { auto OptionFamily::PathStyle => { matched = true } _ => {} }
+            }
+            auto OptionFamily::DeduplicateTargets => {
+                match target { auto OptionFamily::DeduplicateTargets => { matched = true } _ => {} }
             }
         }
         if matched {

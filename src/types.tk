@@ -277,7 +277,8 @@ pub shape CliOptions (
     mcp_mode: bool,
     path_style: PathStyle,
     text_layout: TextLayout,
-    with_filename: Option<bool>
+    with_filename: Option<bool>,
+    deduplicate_targets: bool
 )
 
 pub shape ScopeFrame (
@@ -473,7 +474,8 @@ pub shape EffectiveQuery (
     block: bool,
     max_block_lines: Option<usize>,
     scope: bool,
-    def_first: bool
+    def_first: bool,
+    deduplicate_targets: bool
 )
 
 impl EffectiveQuery {
@@ -598,7 +600,8 @@ impl EffectiveQuery {
             block = opts.context_block,
             max_block_lines = mbl_opt,
             scope = opts.scope,
-            def_first = opts.def_first
+            def_first = opts.def_first,
+            deduplicate_targets = opts.deduplicate_targets
         )
     }
 }

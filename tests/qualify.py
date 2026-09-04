@@ -3468,6 +3468,7 @@ def main():
         assert eq["max_block_lines"] == 80
         assert eq["scope"] is True
         assert isinstance(eq["def_first"], bool)
+        assert eq["deduplicate_targets"] is True
 
         # 3. projection validation
         proj = sc["projection"]
@@ -3812,6 +3813,21 @@ print(json.dumps({{"rss_mb": rss_mb, "stdout": call_out}}))
             for r in seg["records"]:
                 assert "path" not in r
                 assert r["kind"] == "match"
+
+        # In MCP mode, effective_query has deduplicate_targets: True
+        assert sc_v2["effective_query"]["deduplicate_targets"] is True
+
+        # In CLI mode, deduplicate_targets is False by default (matching rg: scanning duplicate paths scans twice)
+        r_cli_dup = run_cmd([trg, "-N", "ALPHA_SYM", "doc1.txt", "./doc1.txt"], cwd=str(t118_dir))
+        assert r_cli_dup.returncode == 0
+        cli_dup_lines = [l for l in r_cli_dup.stdout.strip().split("\n") if l]
+        assert len(cli_dup_lines) == 4, f"Expected 4 matches for duplicate paths in CLI mode, got: {cli_dup_lines}"
+
+        # In CLI mode with --deduplicate-targets, only 2 matches emitted
+        r_cli_dedup = run_cmd([trg, "--deduplicate-targets", "-N", "ALPHA_SYM", "doc1.txt", "./doc1.txt"], cwd=str(t118_dir))
+        assert r_cli_dedup.returncode == 0
+        cli_dedup_lines = [l for l in r_cli_dedup.stdout.strip().split("\n") if l]
+        assert len(cli_dedup_lines) == 2, f"Expected 2 matches with --deduplicate-targets, got: {cli_dedup_lines}"
     finally:
         if t118_dir.exists():
             shutil.rmtree(t118_dir)
