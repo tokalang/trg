@@ -26,14 +26,27 @@ pub shape OutputBatch (
 
 pub shape OutputBudgetWriter (
     is_json_mode: bool,
-    is_budget_active: bool
+    is_budget_active: bool,
+    is_memory_sink: bool,
+    memory_buffer#: Vec<string>
 )
 
 impl OutputBudgetWriter {
     pub fn new(is_json_mode: bool, is_budget_active: bool) -> OutputBudgetWriter {
         return OutputBudgetWriter(
             is_json_mode = is_json_mode,
-            is_budget_active = is_budget_active
+            is_budget_active = is_budget_active,
+            is_memory_sink = false,
+            memory_buffer = Vec<string>::new()
+        )
+    }
+
+    pub fn new_memory(is_json_mode: bool, is_budget_active: bool) -> OutputBudgetWriter {
+        return OutputBudgetWriter(
+            is_json_mode = is_json_mode,
+            is_budget_active = is_budget_active,
+            is_memory_sink = true,
+            memory_buffer = Vec<string>::new()
         )
     }
 
@@ -64,17 +77,25 @@ impl OutputBudgetWriter {
         // Lazy JSON begin framing: write begin first, and on success immediately set begin_emitted = true
         if self.is_json_mode && !frame_state.begin_emitted {
             auto b_str = format_json_begin(frame_state.target_path.as_str())
-            auto b_res = posix_write_stdout(b_str.as_str())
-            if b_res == 1 { return EmitOutcome::BrokenPipe }
-            else if b_res == 2 { return EmitOutcome::FatalError }
+            if self.is_memory_sink {
+                self.memory_buffer#.push(b_str.clone())
+            } else {
+                auto b_res = posix_write_stdout(b_str.as_str())
+                if b_res == 1 { return EmitOutcome::BrokenPipe }
+                else if b_res == 2 { return EmitOutcome::FatalError }
+            }
             frame_state.begin_emitted = true
             budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + b_str.len()
         }
 
         // Write wire payload
-        auto w_res = posix_write_stdout(batch.payload_str.as_str())
-        if w_res == 1 { return EmitOutcome::BrokenPipe }
-        else if w_res == 2 { return EmitOutcome::FatalError }
+        if self.is_memory_sink {
+            self.memory_buffer#.push(batch.payload_str.clone())
+        } else {
+            auto w_res = posix_write_stdout(batch.payload_str.as_str())
+            if w_res == 1 { return EmitOutcome::BrokenPipe }
+            else if w_res == 2 { return EmitOutcome::FatalError }
+        }
 
         if batch.is_payload {
             budget_state.result_payload_bytes_emitted = budget_state.result_payload_bytes_emitted + payload_len
@@ -90,6 +111,11 @@ impl OutputBudgetWriter {
         budget_state#: BudgetState,
         frame_str: str
     ) -> EmitOutcome {
+        if self.is_memory_sink {
+            self.memory_buffer#.push(string::from(frame_str))
+            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + frame_str.len
+            return EmitOutcome::Written
+        }
         auto w_res = posix_write_stdout(frame_str)
         if w_res == 1 { return EmitOutcome::BrokenPipe }
         else if w_res == 2 { return EmitOutcome::FatalError }
@@ -210,7 +236,14 @@ pub fn format_json_match(ev: MatchEvent) -> string {
         s_idx = s_idx + 1
     }
 
-    match_json#.push_str("]}}\n")
+    if ev.scope_name.len() > 0 {
+        match_json#.push_str("],\"scope\":{\"text\":\"")
+        auto esc_scope = json_escape(ev.scope_name.as_str())
+        match_json#.push_str(esc_scope.as_str())
+        match_json#.push_str("\"}}}\n")
+    } else {
+        match_json#.push_str("]}}\n")
+    }
     return cede match_json
 }
 
@@ -297,6 +330,12 @@ pub fn format_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool
         auto lnum_str = u64_to_string(ev.line_number as u64)
         out#.push_str(lnum_str.as_str())
         out#.push_str(":")
+    }
+
+    if opts.scope && ev.scope_name.len() > 0 {
+        out#.push_str("[")
+        out#.push_str(ev.scope_name.as_str())
+        out#.push_str("] ")
     }
 
     if opts.max_columns > 0 && ev.line_text.len() > opts.max_columns {

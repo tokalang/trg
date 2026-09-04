@@ -4,6 +4,26 @@
 
 ## Features & Guarantees
 
+- **Syntactic Block Context Expansion (`--context-block` / `--block`, `--max-block-lines`)**:
+  - Automatically expands surrounding context to enclose complete syntactic code blocks (functions, methods, classes) without AST or tree-sitter overhead.
+  - **Dual-Family Heuristic Engine**:
+    - **BraceFamily** (C, C++, Rust, Toka, Go, Java, JS, TS): Forward curly brace balance tracking with quote/comment awareness.
+    - **IndentFamily** (Python, YAML): Indentation level analysis with empty-line neutrality protection.
+  - **Inner-Match Traceback**: Automatically tracks backward from matches inside function bodies to the enclosing declaration header.
+  - `--max-block-lines <NUM>`: Guardrail bounding block expansion depth (default: 80).
+  - Fully decoupled: `-l`, `-c`, `-q`, and `-o` short-circuit block expansion and ring buffer allocation.
+- **Enclosing Symbol Scope Breadcrumbs (`--scope`)**:
+  - Extracts and displays parent symbol declaration scope (functions, classes, structs, interfaces).
+  - Terminal human mode formats as `path:line:[scope_name] line_text`.
+  - Machine mode (`trg-json-v2`) provides structured `"scope": {"text": "scope_name"}` metadata.
+- **Two-Pass Definition Prioritization (`--def-first`)**:
+  - Two-pass streaming search prioritizing symbol declarations/definitions before usages when running under output budgets (`--max-total-matches`, `--max-result-bytes`).
+  - Maintains strict $O(1)$ memory streaming per file.
+- **Native Stdio MCP Server (`--mcp`)**:
+  - Run natively as a Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio for LLMs and agent harnesses (Claude Desktop, Cursor, etc.).
+  - Zero external runtimes (no Node.js or Python needed).
+  - Strictly isolated memory buffers guarantee stdout is never polluted by raw search text.
+  - Exposes `trg_search` tool (`pattern`, `path`, `type`, `block`, `scope`, `def_first`, `max_matches`).
 - **Agent Protection & Output Budgets (`--max-total-matches`, `--max-result-bytes`, `--max-files-with-matches`, `--no-truncation-notice`)**:
   - `--max-total-matches <NUM>`: Stop searching globally after NUM matching lines across all files. Explicit `0` is supported (zero results emitted, exit code 0).
   - `--max-result-bytes <SIZE>`: Hard result payload budget supporting strict suffix notation (`K`, `M`, or raw bytes, e.g. `64K`, `1M`, `1048576`). Prevents context explosion while bounding protocol overhead. Also applies to `--files`.
@@ -151,12 +171,12 @@ You can also download standalone archives directly from [GitHub Releases](https:
 
 - **macOS (Apple Silicon / arm64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.7.0/trg-v0.7.0-macos-arm64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.8.0/trg-v0.8.0-macos-arm64.tar.gz
   ```
 
 - **Linux (x86_64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.7.0/trg-v0.7.0-linux-x64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.8.0/trg-v0.8.0-linux-x64.tar.gz
   ```
 
 Download `SHA256SUMS` from the same release and verify the archive before
@@ -243,11 +263,23 @@ trg --max-result-bytes 64K "error" src/
 # Stop after discovering matches in 3 files
 trg --max-files-with-matches 3 "impl" src/
 
+# Expand context to enclose syntactic code blocks (--block / --context-block)
+trg --block "calculate_hash" src/
+
+# Show enclosing symbol scope breadcrumbs (--scope)
+trg --scope "return" src/
+
+# Two-pass definition prioritization under match budgets (--def-first)
+trg --def-first --max-total-matches 5 "Token" src/
+
+# Run as a native Model Context Protocol (MCP) stdio server
+trg --mcp
+
 # Agent JSONL streaming with hard payload limit and silent stderr
 trg --json --max-result-bytes 1M --no-truncation-notice "fn" src/
 
-# Output structured JSONL stream (trg-json-v2)
-trg --json -E -C 1 "fn\\s+[a-z_]+" src
+# Output structured JSONL stream with scope metadata (trg-json-v2)
+trg --json --scope -E -C 1 "fn\\s+[a-z_]+" src
 ```
 
 ---

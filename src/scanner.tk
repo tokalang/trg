@@ -1,10 +1,10 @@
 // True incremental 64KB chunk-buffered streaming scanner with O(1) circular BeforeRing, OpeningMatchBatch atomic preflight, and lazy JSON framing.
-import core/types::{usize, char, Addr}
 import core/str::{str}
 import core/option::{Option}
 import std/vec::{Vec}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
-import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult, MatchRange, MatchDecision, BudgetState}
+import src/types::{CliOptions, MatchEvent, SubMatch, LogicalLine, LineProcessOutcome, ScanResult, MatchRange, MatchDecision, BudgetState, ScopeFrame}
+import src/file_types::{extract_file_extension}
 import src/matcher::{SearchPlan}
 import src/posix::{posix_ferror}
 import src/printer::{
@@ -39,10 +39,15 @@ pub shape ContextState (
     ring: BeforeRing,
     pending_after: usize,
     last_emitted_line_num: usize,
-    had_emitted_group: bool
+    had_emitted_group: bool,
+    block_active: bool,
+    block_target_depth: usize,
+    block_target_indent: usize,
+    block_archetype: usize,
+    block_lines_emitted: usize
 )
 
-fn make_context_state(before_cap: usize) -> ContextState {
+fn make_context_state(before_cap: usize, archetype: usize) -> ContextState {
     return ContextState(
         ring = BeforeRing(
             lines = Vec<LogicalLine>::with_capacity(before_cap),
@@ -53,8 +58,197 @@ fn make_context_state(before_cap: usize) -> ContextState {
         ),
         pending_after = 0:usize,
         last_emitted_line_num = 0:usize,
-        had_emitted_group = false
+        had_emitted_group = false,
+        block_active = false,
+        block_target_depth = 0:usize,
+        block_target_indent = 0:usize,
+        block_archetype = archetype,
+        block_lines_emitted = 0:usize
     )
+}
+
+pub fn is_definition_line(line: str) -> bool {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") {
+        return false
+    }
+    auto s# = trimmed
+    if s.starts_with("pub ") {
+        s = s.substr(4:usize, s.len - 4:usize).trim()
+    } else if s.starts_with("pub(") {
+        auto close_paren = s.index_of(')' as char)
+        if close_paren.is_some() {
+            auto idx = close_paren.unwrap() + 1:usize
+            s = s.substr(idx, s.len - idx).trim()
+        }
+    }
+    if s.starts_with("async ") {
+        s = s.substr(6:usize, s.len - 6:usize).trim()
+    }
+
+    if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("class ") ||
+       s.starts_with("struct ") || s.starts_with("shape ") || s.starts_with("interface ") ||
+       s.starts_with("type ") || s.starts_with("impl ") || s.starts_with("function ") {
+        return true
+    }
+    return false
+}
+
+pub fn detect_declaration_scope(line: str) -> string {
+    auto trimmed = line.trim()
+    if !is_definition_line(trimmed) {
+        return string::from("")
+    }
+    auto max_len# = trimmed.len
+    auto paren_depth# = 0:usize
+    auto i# = 0:usize
+    loop i < trimmed.len {
+        auto ch = trimmed.byte_at(i)
+        if ch == ('(' as char) {
+            paren_depth = paren_depth + 1
+        } else if ch == (')' as char) {
+            if paren_depth > 0 { paren_depth = paren_depth - 1 }
+        } else if paren_depth == 0 {
+            if ch == ('{' as char) {
+                max_len = i
+                break
+            } else if ch == (':' as char) {
+                max_len = i
+                break
+            }
+        }
+        i = i + 1
+    }
+    auto decl_sub# = trimmed.substr(0, max_len).trim()
+    if decl_sub.len > 60 {
+        decl_sub = decl_sub.substr(0, 60).trim()
+    }
+    return string::from(decl_sub)
+}
+
+pub fn detect_syntax_archetype(path: str) -> usize {
+    auto ext = extract_file_extension(path)
+    if ext == "py" || ext == "pyi" || ext == "yaml" || ext == "yml" || ext == "nim" {
+        return 1:usize
+    }
+    return 0:usize
+}
+
+pub fn compute_line_indent(line: str) -> usize {
+    auto indent# = 0:usize
+    auto i# = 0:usize
+    loop i < line.len {
+        auto ch = line.byte_at(i)
+        if ch == (' ' as char) {
+            indent = indent + 1
+        } else if ch == ('\t' as char) {
+            indent = indent + 4
+        } else {
+            break
+        }
+        i = i + 1
+    }
+    return indent
+}
+
+pub fn update_brace_depth(line: str, depth#: usize) {
+    auto in_str# = false
+    auto str_char# = 0:char
+    auto escape# = false
+    auto i# = 0:usize
+
+    loop i < line.len {
+        auto ch = line.byte_at(i)
+
+        if in_str {
+            if escape {
+                escape = false
+            } else if ch == ('\\' as char) {
+                escape = true
+            } else if ch == str_char {
+                in_str = false
+            }
+            i = i + 1
+            continue
+        }
+
+        if ch == ('"' as char) || ch == ('\'' as char) || ch == ('`' as char) {
+            in_str = true
+            str_char = ch
+            escape = false
+            i = i + 1
+            continue
+        }
+
+        if ch == ('/' as char) && i + 1 < line.len && line.byte_at(i + 1) == ('/' as char) {
+            break
+        }
+        if ch == ('#' as char) {
+            break
+        }
+
+        if ch == ('{' as char) {
+            depth = depth + 1
+        } else if ch == ('}' as char) {
+            if depth > 0 {
+                depth = depth - 1
+            }
+        }
+
+        i = i + 1
+    }
+}
+
+pub shape ScopeTracker (
+    frames: Vec<ScopeFrame>
+)
+
+impl ScopeTracker {
+    pub fn new() -> ScopeTracker {
+        return ScopeTracker(frames = Vec<ScopeFrame>::new())
+    }
+
+    pub fn update(self#, line: str, brace_depth: usize, indent_level: usize, archetype: usize) {
+        loop true {
+            if self.frames.len() == 0 {
+                break
+            }
+            auto top_idx = self.frames.len() - 1:usize
+            auto top_depth = self.frames.borrow(top_idx).depth
+            if archetype == 1 {
+                auto trimmed = line.trim()
+                if trimmed.len > 0 && !trimmed.starts_with("#") {
+                    if indent_level <= top_depth {
+                        self.frames#.pop()
+                        continue
+                    }
+                }
+            } else {
+                if brace_depth < top_depth {
+                    self.frames#.pop()
+                    continue
+                }
+            }
+            break
+        }
+
+        auto scope_decl = detect_declaration_scope(line)
+        if scope_decl.len() > 0 {
+            auto decl_depth# = brace_depth
+            if archetype == 1 {
+                decl_depth = indent_level
+            }
+            self.frames#.push(ScopeFrame(name = cede scope_decl, depth = decl_depth))
+        }
+    }
+
+    pub fn current_scope(self) -> string {
+        if self.frames.len() == 0 {
+            return string::from("")
+        }
+        auto top_idx = self.frames.len() - 1:usize
+        return self.frames.borrow(top_idx).name.clone()
+    }
 }
 
 fn ring_clear(ring#: BeforeRing) {
@@ -90,6 +284,86 @@ fn is_binary_chunk(content: str) -> bool {
     return false
 }
 
+fn calculate_block_context_start(
+    lines: Vec<LogicalLine>,
+    head: usize,
+    count: usize,
+    capacity: usize,
+    max_block_lines: usize,
+    before_context: usize,
+    archetype: usize,
+    cur_depth: usize,
+    cur_indent: usize,
+    match_is_def: bool,
+    target_depth#: usize,
+    target_indent#: usize
+) -> usize {
+    auto num_ring = count
+    if num_ring == 0 {
+        return 0:usize
+    }
+
+    if match_is_def {
+        auto outer_depth# = cur_depth
+        if archetype == 0 && outer_depth > 0 {
+            outer_depth = outer_depth - 1
+        }
+        target_depth = outer_depth
+        target_indent = cur_indent
+        return num_ring
+    }
+
+    auto found_start# = false
+    auto emit_start_idx# = 0:usize
+    auto s_idx# = num_ring
+    loop s_idx > 0 {
+        s_idx = s_idx - 1
+        auto actual_idx = (head + s_idx) % capacity
+        auto &r_line = lines.borrow(actual_idx)
+        if archetype == 1 {
+            // IndentFamily: find shallower indent line
+            auto trimmed = r_line.text.as_str().trim()
+            if trimmed.len > 0 && !trimmed.starts_with("#") {
+                if r_line.indent_level < cur_indent {
+                    emit_start_idx = s_idx
+                    target_indent = r_line.indent_level
+                    found_start = true
+                    break
+                }
+            }
+        } else {
+            // BraceFamily: find declaration or outer depth
+            if r_line.brace_depth < cur_depth || detect_declaration_scope(r_line.text.as_str()).len() > 0 {
+                emit_start_idx = s_idx
+                auto r_depth = r_line.brace_depth
+                if detect_declaration_scope(r_line.text.as_str()).len() > 0 && r_depth > 0 {
+                    target_depth = r_depth - 1
+                } else {
+                    target_depth = r_depth
+                }
+                found_start = true
+                break
+            }
+        }
+    }
+
+    if !found_start {
+        if num_ring > max_block_lines / 2 {
+            emit_start_idx = num_ring - (max_block_lines / 2)
+        }
+    }
+
+    // Enforce before_context as minimum
+    if before_context > 0 && num_ring > before_context {
+        auto min_start = num_ring - before_context
+        if min_start < emit_start_idx {
+            emit_start_idx = min_start
+        }
+    }
+
+    return emit_start_idx
+}
+
 fn process_logical_line(
     cede line: LogicalLine,
     line_matches: bool,
@@ -103,7 +377,8 @@ fn process_logical_line(
     frame_state#: FileFrameState,
     file_matched_lines_emitted#: usize,
     file_has_emitted_match#: bool,
-    file_match_observed#: bool
+    file_match_observed#: bool,
+    scope_name: str
 ) -> LineProcessOutcome {
     if line_matches {
         auto is_first_obs = !file_match_observed
@@ -115,13 +390,13 @@ fn process_logical_line(
 
         auto batch_payload# = string::new()
         // 1. Group separator
-        auto has_context = opts.before_context > 0 || opts.after_context > 0
+        auto has_context = opts.before_context > 0 || opts.after_context > 0 || opts.context_block
         if has_context && state.last_emitted_line_num > 0 && state.had_emitted_group {
             auto first_to_emit# = line.line_number
             if state.ring.count > 0 {
-                auto &first_ring = state.ring.lines.borrow(state.ring.head)
-                if first_ring.line_number > state.last_emitted_line_num {
-                    first_to_emit = first_ring.line_number
+                auto first_ring_line_num = state.ring.lines.borrow(state.ring.head).line_number
+                if first_ring_line_num > state.last_emitted_line_num {
+                    first_to_emit = first_ring_line_num
                 }
             }
             if first_to_emit > state.last_emitted_line_num + 1 {
@@ -133,24 +408,51 @@ fn process_logical_line(
 
         // 2. Before-context lines
         auto num_ring = state.ring.count
-        auto r_idx# = 0:usize
+        auto emit_start_idx# = 0:usize
+
+        if opts.context_block && num_ring > 0 {
+            auto target_depth# = 0:usize
+            auto target_indent# = 0:usize
+            auto is_def = detect_declaration_scope(line.text.as_str()).len() > 0
+            emit_start_idx = calculate_block_context_start(
+                state.ring.lines,
+                state.ring.head,
+                state.ring.count,
+                state.ring.capacity,
+                opts.max_block_lines,
+                opts.before_context,
+                state.block_archetype,
+                line.brace_depth,
+                line.indent_level,
+                is_def,
+                target_depth#,
+                target_indent#
+            )
+            state.block_target_depth = target_depth
+            state.block_target_indent = target_indent
+            state.block_active = true
+            state.block_lines_emitted = num_ring - emit_start_idx + 1
+        }
+
+        auto r_idx# = emit_start_idx
         loop r_idx < num_ring {
             auto actual_idx = (state.ring.head + r_idx) % state.ring.capacity
-            auto &r_line = state.ring.lines.borrow(actual_idx)
-            if r_line.line_number > state.last_emitted_line_num {
+            auto r_line_num = state.ring.lines.borrow(actual_idx).line_number
+            if r_line_num > state.last_emitted_line_num {
                 auto ev = MatchEvent(
                     path = string::from(target_path),
-                    line_text = r_line.text.clone(),
-                    line_number = r_line.line_number,
-                    absolute_offset = r_line.absolute_offset,
-                    submatches = Vec<SubMatch>::new()
+                    line_text = state.ring.lines.borrow(actual_idx).text.clone(),
+                    line_number = r_line_num,
+                    absolute_offset = state.ring.lines.borrow(actual_idx).absolute_offset,
+                    submatches = Vec<SubMatch>::new(),
+                    scope_name = string::from("")
                 )
                 if opts.json_mode {
                     batch_payload#.push_str(format_json_context(ev).as_str())
                 } else {
                     batch_payload#.push_str(format_human_context(ev, opts, multiple_files).as_str())
                 }
-                state.last_emitted_line_num = r_line.line_number
+                state.last_emitted_line_num = r_line_num
             }
             r_idx = r_idx + 1
         }
@@ -182,7 +484,8 @@ fn process_logical_line(
             line_text = line.text.clone(),
             line_number = line.line_number,
             absolute_offset = line.absolute_offset,
-            submatches = cede submatches
+            submatches = cede submatches,
+            scope_name = string::from(scope_name)
         )
         if opts.json_mode {
             batch_payload#.push_str(format_json_match(ev).as_str())
@@ -221,7 +524,77 @@ fn process_logical_line(
         }
     }
 
-    // Non-matching line
+    // Non-matching line in block context
+    if state.block_active {
+        state.block_lines_emitted = state.block_lines_emitted + 1
+        auto terminate_block# = false
+
+        if state.block_lines_emitted >= opts.max_block_lines {
+            terminate_block = true
+        } else if state.block_archetype == 1 {
+            auto trimmed = line.text.as_str().trim()
+            if trimmed.len > 0 && !trimmed.starts_with("#") {
+                if line.indent_level <= state.block_target_indent {
+                    state.block_active = false
+                    return LineProcessOutcome::Continue
+                }
+            }
+        } else {
+            if line.brace_depth <= state.block_target_depth && line.text.as_str().index_of('}' as char).is_some() {
+                terminate_block = true
+            }
+        }
+
+        if line.line_number > state.last_emitted_line_num {
+            auto ev = MatchEvent(
+                path = string::from(target_path),
+                line_text = line.text.clone(),
+                line_number = line.line_number,
+                absolute_offset = line.absolute_offset,
+                submatches = Vec<SubMatch>::new(),
+                scope_name = string::from("")
+            )
+            auto ctx_payload# = string::new()
+            if opts.json_mode {
+                ctx_payload = format_json_context(ev)
+            } else {
+                ctx_payload = format_human_context(ev, opts, multiple_files)
+            }
+            if ctx_payload.len() > 0 {
+                auto batch = OutputBatch(
+                    payload_str = cede ctx_payload,
+                    path = string::from(target_path),
+                    line_number = line.line_number,
+                    is_payload = true
+                )
+                auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
+                match outcome {
+                    EmitOutcome::Written => {
+                        state.last_emitted_line_num = line.line_number
+                    }
+                    EmitOutcome::Truncated => {
+                        return LineProcessOutcome::Continue
+                    }
+                    EmitOutcome::BrokenPipe => {
+                        return LineProcessOutcome::BrokenPipe
+                    }
+                    EmitOutcome::FatalError => {
+                        return LineProcessOutcome::FatalError
+                    }
+                }
+            }
+        }
+
+        if terminate_block && state.pending_after == 0 {
+            state.block_active = false
+        }
+        if state.pending_after > 0 {
+            state.pending_after = state.pending_after - 1
+        }
+        return LineProcessOutcome::Continue
+    }
+
+    // Normal pending after-context line
     if state.pending_after > 0 {
         if line.line_number > state.last_emitted_line_num {
             auto ev = MatchEvent(
@@ -229,7 +602,8 @@ fn process_logical_line(
                 line_text = line.text.clone(),
                 line_number = line.line_number,
                 absolute_offset = line.absolute_offset,
-                submatches = Vec<SubMatch>::new()
+                submatches = Vec<SubMatch>::new(),
+                scope_name = string::from("")
             )
             auto ctx_payload# = string::new()
             if opts.json_mode {
@@ -266,7 +640,8 @@ fn process_logical_line(
     }
 
     // Push non-matching line to O(1) circular before_ring
-    if opts.before_context > 0 && state.ring.capacity > 0 {
+    auto ring_needed = opts.before_context > 0 || opts.context_block
+    if ring_needed && state.ring.capacity > 0 {
         if state.ring.count >= state.ring.capacity {
             auto old_len = state.ring.lines.borrow(state.ring.head).text.len()
             auto next_bytes = state.ring.bytes - old_len + line.text.len()
@@ -303,6 +678,10 @@ fn scan_and_process_line(
     line_num: usize,
     abs_offset: usize,
     delim_len: usize,
+    line_brace_depth: usize,
+    line_indent: usize,
+    scope_tracker: ScopeTracker,
+    pass_mode: usize,
     matches_count#: usize,
     has_match#: bool,
     max_count_reached#: bool,
@@ -331,6 +710,15 @@ fn scan_and_process_line(
                 line_matches = matched
             } else {
                 line_matches = !matched
+            }
+        }
+
+        // Two-pass filter for --def-first
+        if line_matches {
+            if pass_mode == 1 && !is_definition_line(line_text) {
+                line_matches = false
+            } else if pass_mode == 2 && is_definition_line(line_text) {
+                line_matches = false
             }
         }
 
@@ -392,8 +780,11 @@ fn scan_and_process_line(
             text = string::from(line_text),
             line_number = line_num,
             absolute_offset = abs_offset,
-            delim_len = delim_len
+            delim_len = delim_len,
+            brace_depth = line_brace_depth,
+            indent_level = line_indent
         )
+        auto cur_scope = scope_tracker.current_scope()
         return process_logical_line(
             cede l_record,
             line_matches,
@@ -407,7 +798,8 @@ fn scan_and_process_line(
             frame_state#,
             file_matched_lines_emitted#,
             file_has_emitted_match#,
-            file_match_observed#
+            file_match_observed#,
+            cur_scope.as_str()
         )
     }
 
@@ -421,6 +813,26 @@ pub fn scan_file_stream(
     multiple_files: bool,
     writer: OutputBudgetWriter,
     budget_state#: BudgetState
+) -> ScanResult {
+    return scan_file_stream_with_pass(
+        target_path,
+        opts,
+        plan,
+        multiple_files,
+        writer,
+        budget_state#,
+        0:usize
+    )
+}
+
+pub fn scan_file_stream_with_pass(
+    target_path: string,
+    opts: CliOptions,
+    plan: SearchPlan,
+    multiple_files: bool,
+    writer: OutputBudgetWriter,
+    budget_state#: BudgetState,
+    pass_mode: usize
 ) -> ScanResult {
     budget_state.files_scanned = budget_state.files_scanned + 1
 
@@ -492,7 +904,14 @@ pub fn scan_file_stream(
             budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + format_json_begin(target_path.as_str()).len()
         }
 
-        auto context_state# = make_context_state(opts.before_context)
+        auto archetype = detect_syntax_archetype(target_path.as_str())
+        auto before_cap# = opts.before_context
+        if opts.context_block && opts.max_block_lines > before_cap {
+            before_cap = opts.max_block_lines
+        }
+        auto context_state# = make_context_state(before_cap, archetype)
+        auto scope_tracker# = ScopeTracker::new()
+        auto cur_brace_depth# = 0:usize
         auto line_num# = 1:usize
         auto abs_offset# = 0:usize
         auto line_buf# = string::new()
@@ -543,9 +962,16 @@ pub fn scan_file_stream(
                             delim_len = 2:usize
                         }
                         advance_len = nl_idx + 1:usize
+
+                        auto line_indent = compute_line_indent(line_text)
+                        update_brace_depth(line_text, cur_brace_depth#)
+                        auto line_brace_depth = cur_brace_depth
+                        scope_tracker#.update(line_text, line_brace_depth, line_indent, archetype)
+
                         outcome = scan_and_process_line(
                             plan, opts, context_state#, target_path.as_str(), multiple_files,
                             line_text, line_num, abs_offset, delim_len,
+                            line_brace_depth, line_indent, scope_tracker, pass_mode,
                             matches_count#, has_match#, max_count_reached#,
                             writer, budget_state#, frame_state#,
                             file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
@@ -562,9 +988,16 @@ pub fn scan_file_stream(
                                 line_text = line_text.substr(0, line_text.len - 1)
                                 delim_len = 2:usize
                             }
+
+                            auto line_indent = compute_line_indent(line_text)
+                            update_brace_depth(line_text, cur_brace_depth#)
+                            auto line_brace_depth = cur_brace_depth
+                            scope_tracker#.update(line_text, line_brace_depth, line_indent, archetype)
+
                             outcome = scan_and_process_line(
                                 plan, opts, context_state#, target_path.as_str(), multiple_files,
                                 line_text, line_num, abs_offset, delim_len,
+                                line_brace_depth, line_indent, scope_tracker, pass_mode,
                                 matches_count#, has_match#, max_count_reached#,
                                 writer, budget_state#, frame_state#,
                                 file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
@@ -591,7 +1024,7 @@ pub fn scan_file_stream(
                     if has_match && (opts.files_with_matches || opts.quiet) {
                         break
                     }
-                    if max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0) {
+                    if max_count_reached && (opts.count || opts.files_with_matches || (context_state.pending_after == 0 && !context_state.block_active)) {
                         break
                     }
                 }
@@ -603,14 +1036,14 @@ pub fn scan_file_stream(
             if has_match && (opts.files_with_matches || opts.quiet) {
                 break
             }
-            if max_count_reached && (opts.count || context_state.pending_after == 0) {
+            if max_count_reached && (opts.count || (context_state.pending_after == 0 && !context_state.block_active)) {
                 break
             }
         }
 
         // Transition 4: Process leftover final line at EOF
         if !is_binary && !had_error && !is_broken_pipe && !budget_state.is_truncated && line_buf.len() > 0 && !(has_match && (opts.files_with_matches || opts.quiet)) {
-            if !(max_count_reached && (opts.count || opts.files_with_matches || context_state.pending_after == 0)) {
+            if !(max_count_reached && (opts.count || opts.files_with_matches || (context_state.pending_after == 0 && !context_state.block_active))) {
                 auto advance_len# = 0:usize
                 auto outcome# = LineProcessOutcome::Continue
                 {
@@ -622,9 +1055,16 @@ pub fn scan_file_stream(
                         delim_len = 1:usize
                     }
                     advance_len = line_text.len + delim_len
+
+                    auto line_indent = compute_line_indent(line_text)
+                    update_brace_depth(line_text, cur_brace_depth#)
+                    auto line_brace_depth = cur_brace_depth
+                    scope_tracker#.update(line_text, line_brace_depth, line_indent, archetype)
+
                     outcome = scan_and_process_line(
                         plan, opts, context_state#, target_path.as_str(), multiple_files,
                         line_text, line_num, abs_offset, delim_len,
+                        line_brace_depth, line_indent, scope_tracker, pass_mode,
                         matches_count#, has_match#, max_count_reached#,
                         writer, budget_state#, frame_state#,
                         file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#

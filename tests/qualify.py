@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.7.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.8.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -97,7 +97,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined, f"toka build did not report trg v0.3.1: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.8.0" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.7.0 identity on both binaries
+    # Validate exact 0.8.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.7.0 (Toka)", f"Expected 'trg 0.7.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.8.0 (Toka)", f"Expected 'trg 0.8.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.7.0 (Toka)", f"Expected 'trg 0.7.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.8.0 (Toka)", f"Expected 'trg 0.8.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.7.0
-    log("Test 1: Help & Version flags (exact 0.7.0 release identity)")
+    # Test 1: Help & Version exact 0.8.0
+    log("Test 1: Help & Version flags (exact 0.8.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.7.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.8.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.7.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.8.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -692,7 +692,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.7.0" in r_re_ctx.stdout
+    assert "trg 0.8.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1792,8 +1792,214 @@ def main():
         if bench_dir.exists():
             shutil.rmtree(bench_dir)
 
+    # Test 86: Syntactic block expansion (--block / --context-block)
+    log("Test 86: Syntactic block expansion (--block / --context-block)")
+    block_dir = fixtures_dir / "test_block_tree"
+    try:
+        block_dir.mkdir(parents=True, exist_ok=True)
+        c_code = (
+            "// header\n"
+            "fn unused() {\n"
+            "    return;\n"
+            "}\n"
+            "\n"
+            "fn target_fn(x: int) -> int {\n"
+            "    let a = 1;\n"
+            "    let b = 2;\n"
+            "    let target_var = a + b;\n"
+            "    return target_var;\n"
+            "}\n"
+            "\n"
+            "fn another_fn() {\n"
+            "    let c = 3;\n"
+            "}\n"
+        )
+        (block_dir / "test.c").write_text(c_code, encoding="utf-8")
+        # Match on inner statement with --block
+        r_blk = run_cmd([trg, "--block", "target_var", str(block_dir / "test.c")])
+        assert r_blk.returncode == 0
+        blk_lines = r_blk.stdout.strip().split("\n")
+        assert any("fn target_fn" in l for l in blk_lines)
+        assert any("return target_var;" in l for l in blk_lines)
+        assert not any("fn unused" in l for l in blk_lines)
+        assert not any("fn another_fn" in l for l in blk_lines)
+
+        # Match on declaration itself with --context-block
+        r_decl = run_cmd([trg, "--context-block", "fn target_fn", str(block_dir / "test.c")])
+        assert r_decl.returncode == 0
+        decl_lines = r_decl.stdout.strip().split("\n")
+        assert "fn target_fn" in decl_lines[0]
+        assert decl_lines[-1].strip().endswith("}")
+        assert not any("fn unused" in l for l in decl_lines)
+
+        # Python IndentFamily block expansion with comments/blanks
+        py_code = (
+            "# Top comment\n"
+            "def outer_func():\n"
+            "    val = 10\n"
+            "    # comment inside\n"
+            "\n"
+            "    inner_target = val * 2\n"
+            "    return inner_target\n"
+            "\n"
+            "def next_func():\n"
+            "    pass\n"
+        )
+        (block_dir / "test.py").write_text(py_code, encoding="utf-8")
+        r_py = run_cmd([trg, "--block", "inner_target", str(block_dir / "test.py")])
+        assert r_py.returncode == 0
+        py_lines = r_py.stdout.strip().split("\n")
+        assert any("def outer_func():" in l for l in py_lines)
+        assert any("return inner_target" in l for l in py_lines)
+        assert not any("def next_func():" in l for l in py_lines)
+    finally:
+        if block_dir.exists():
+            shutil.rmtree(block_dir)
+
+    # Test 87: Enclosing symbol scope breadcrumbs (--scope)
+    log("Test 87: Enclosing symbol scope breadcrumbs (--scope)")
+    scope_dir = fixtures_dir / "test_scope_tree"
+    try:
+        scope_dir.mkdir(parents=True, exist_ok=True)
+        code = (
+            "class MyService {\n"
+            "    fn compute(x: int) {\n"
+            "        let target = x * 2;\n"
+            "        return target;\n"
+            "    }\n"
+            "}\n"
+        )
+        (scope_dir / "service.tk").write_text(code, encoding="utf-8")
+        # Human output
+        r_sc = run_cmd([trg, "--scope", "target", str(scope_dir / "service.tk")])
+        assert r_sc.returncode == 0
+        assert "[fn compute(x: int)" in r_sc.stdout
+
+        # JSON output
+        r_sc_j = run_cmd([trg, "--scope", "--json", "target", str(scope_dir / "service.tk")])
+        assert r_sc_j.returncode == 0
+        j_lines = [json.loads(l) for l in r_sc_j.stdout.strip().split("\n") if l]
+        match_evs = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(match_evs) == 2
+        assert "scope" in match_evs[0]["data"]
+        assert "fn compute" in match_evs[0]["data"]["scope"]["text"]
+    finally:
+        if scope_dir.exists():
+            shutil.rmtree(scope_dir)
+
+    # Test 88: Definition prioritization (--def-first)
+    log("Test 88: Definition prioritization (--def-first)")
+    def_dir = fixtures_dir / "test_def_tree"
+    try:
+        def_dir.mkdir(parents=True, exist_ok=True)
+        (def_dir / "a_calls.tk").write_text("fn call_it() {\n    magic_symbol()\n}\n", encoding="utf-8")
+        (def_dir / "b_defs.tk").write_text("fn magic_symbol() -> bool {\n    return true\n}\n", encoding="utf-8")
+
+        # Without --def-first, alphabetical sort hits a_calls.tk first
+        r_no_def = run_cmd([trg, "--sort", "path", "--max-total-matches", "1", "magic_symbol", str(def_dir)])
+        assert "a_calls.tk" in r_no_def.stdout
+        assert "b_defs.tk" not in r_no_def.stdout
+
+        # With --def-first, definitions are prioritized across files
+        r_def = run_cmd([trg, "--sort", "path", "--def-first", "--max-total-matches", "1", "magic_symbol", str(def_dir)])
+        assert "b_defs.tk" in r_def.stdout
+        assert "a_calls.tk" not in r_def.stdout
+
+        # Stdin degradation: works without crashing or erroring
+        r_stdin = run_cmd([trg, "--def-first", "hello"], input_data="hello world\nfn hello() {}\n")
+        assert r_stdin.returncode == 0
+        assert "hello world" in r_stdin.stdout
+        assert "fn hello" in r_stdin.stdout
+    finally:
+        if def_dir.exists():
+            shutil.rmtree(def_dir)
+
+    # Test 89: Native Model Context Protocol server (--mcp)
+    log("Test 89: Native Model Context Protocol server (--mcp)")
+    mcp_dir = fixtures_dir / "test_mcp_tree"
+    try:
+        mcp_dir.mkdir(parents=True, exist_ok=True)
+        (mcp_dir / "target.py").write_text("def hello():\n    return 'world'\n", encoding="utf-8")
+
+        # 1. initialize
+        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n"
+        r_init = run_cmd([trg, "--mcp"], input_data=init_req)
+        assert r_init.returncode == 0
+        resp1 = json.loads(r_init.stdout.strip())
+        assert resp1["id"] == 1
+        assert resp1["result"]["serverInfo"]["name"] == "trg"
+        assert resp1["result"]["serverInfo"]["version"] == "0.8.0"
+
+        # 2. ping & tools/list
+        ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
+        list_req = json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}) + "\n"
+        r_tools = run_cmd([trg, "--mcp"], input_data=ping_req + list_req)
+        resps = [json.loads(l) for l in r_tools.stdout.strip().split("\n") if l]
+        assert len(resps) == 2
+        assert resps[0]["id"] == 2
+        assert resps[1]["id"] == 3
+        tools = resps[1]["result"]["tools"]
+        assert any(t["name"] == "trg_search" for t in tools)
+
+        # 3. tools/call with --block
+        call_req = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "return 'world'",
+                    "path": str(mcp_dir / "target.py"),
+                    "args": ["--block"]
+                }
+            }
+        }) + "\n"
+        r_call = run_cmd([trg, "--mcp"], input_data=call_req)
+        resp_call = json.loads(r_call.stdout.strip())
+        assert resp_call["id"] == 4
+        text_res = resp_call["result"]["content"][0]["text"]
+        assert "def hello():" in text_res
+        assert "return 'world'" in text_res
+
+        # 4. Unknown method error handling
+        bad_req = json.dumps({"jsonrpc": "2.0", "id": 99, "method": "unknown/method"}) + "\n"
+        r_bad = run_cmd([trg, "--mcp"], input_data=bad_req)
+        resp_bad = json.loads(r_bad.stdout.strip())
+        assert resp_bad["id"] == 99
+        assert resp_bad["error"]["code"] == -32601
+    finally:
+        if mcp_dir.exists():
+            shutil.rmtree(mcp_dir)
+
+    # Test 90: Flag decoupling (-l, -c, -q, -o with --block)
+    log("Test 90: Flag decoupling (-l, -c, -q, -o with --block)")
+    decouple_dir = fixtures_dir / "test_decouple_tree"
+    try:
+        decouple_dir.mkdir(parents=True, exist_ok=True)
+        (decouple_dir / "test.tk").write_text("fn test() {\n    let x = 42;\n}\n", encoding="utf-8")
+        # -l with --block should zero context and print only path
+        r_l = run_cmd([trg, "-l", "--block", "let x", str(decouple_dir)])
+        assert r_l.stdout.strip() == str(decouple_dir / "test.tk")
+
+        # -c with --block should zero context and print count
+        r_c = run_cmd([trg, "-c", "--block", "let x", str(decouple_dir / "test.tk")])
+        assert r_c.stdout.strip() == "1"
+
+        # -q with --block should exit 0 without printing matches
+        r_q = run_cmd([trg, "-q", "--block", "let x", str(decouple_dir / "test.tk")])
+        assert r_q.returncode == 0
+        assert r_q.stdout == ""
+
+        # -o with --block should print only matching text (zero context)
+        r_o = run_cmd([trg, "-o", "-N", "--block", "let x", str(decouple_dir / "test.tk")])
+        assert r_o.stdout.strip() == "let x"
+    finally:
+        if decouple_dir.exists():
+            shutil.rmtree(decouple_dir)
+
     log("=" * 60)
-    log("ALL 85 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.7.0)!")
+    log("ALL 90 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.8.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

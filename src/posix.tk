@@ -16,6 +16,7 @@ import sys/os/abi::{
 }
 
 extern fn isatty(fd: i32) -> i32
+extern fn read(fd: i32, *buf: void, count: usize) -> isize
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
 extern fn signal(sig: i32, handler: usize) -> usize
 extern fn readlink(*path: char, *buf: char, bufsiz: usize) -> isize
@@ -195,3 +196,29 @@ pub fn print_err(msg: str) {
     posix_write_stderr(msg)
     posix_write_stderr("\n")
 }
+
+pub fn posix_read_stdin_line() -> Option<string> {
+    auto line# = string::new()
+    auto buf = [0:char; 1]
+    unsafe {
+        auto *ptr = &buf[0] as *void
+        loop true {
+            auto n = read(0:i32, *ptr, 1:usize)
+            if n <= 0 {
+                if line.len() > 0 {
+                    return Option<string>::Some(cede line)
+                }
+                return Option<string>::None
+            }
+            auto ch = buf[0]
+            if ch == ('\n' as char) {
+                return Option<string>::Some(cede line)
+            }
+            if ch != ('\r' as char) {
+                line#.push_char(ch)
+            }
+        }
+    }
+    return Option<string>::None
+}
+

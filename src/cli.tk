@@ -12,7 +12,7 @@ import src/file_types::{lookup_type_extensions}
 import src/posix::{posix_ferror}
 
 pub fn print_help() {
-    println("trg 0.7.0 - Fast, agent-friendly code search tool")
+    println("trg 0.8.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -21,6 +21,7 @@ pub fn print_help() {
     println("  trg -E [OPTIONS] <PATTERN> [PATH...]")
     println("  trg --files [OPTIONS] [PATH...]")
     println("  trg --type-list")
+    println("  trg --mcp")
     println("")
     println("Options:")
     println("  -e, --regexp <PATTERN>     Specify a pattern (can be used multiple times)")
@@ -55,6 +56,12 @@ pub fn print_help() {
     println("  -A, --after-context <NUM>  Show NUM lines after each match (max 1000)")
     println("  -B, --before-context <NUM> Show NUM lines before each match (max 1000)")
     println("  -C, --context <NUM>        Show NUM lines before and after each match (max 1000)")
+    println("      --block                Expand context to enclose syntactic code block (alias: --context-block)")
+    println("      --context-block        Expand context to enclose syntactic code block")
+    println("      --max-block-lines <NUM> Maximum lines for syntactic block context (default: 80)")
+    println("      --scope                Show enclosing symbol scope (human: [scope], JSON: scope field)")
+    println("      --def-first            Prioritize definition matches before usages under budgets")
+    println("      --mcp                  Run as a native Model Context Protocol (MCP) stdio server")
     println("  -g, --glob <GLOB>          Include or exclude files matching GLOB (last match wins)")
     println("      --files                Print the files that would be searched")
     println("      --json                 Output newline-delimited JSONL search events (trg-json-v2)")
@@ -65,7 +72,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.7.0 (Toka)")
+    println("trg 0.8.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
@@ -334,7 +341,10 @@ fn load_patterns_from_file(file_path: str) -> Result<Vec<string>, string> {
 }
 
 pub fn parse_cli_args() -> Result<CliOptions, string> {
-    auto args = env::args()
+    return parse_cli_args_from_vec(env::args())
+}
+
+pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> {
     auto num_args = args.len()
 
     auto fixed_strings# = false
@@ -369,6 +379,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     auto before_context# = 0:usize
     auto after_context# = 0:usize
     auto context_set_explicitly# = false
+    auto context_block# = false
+    auto max_block_lines# = 80:usize
+    auto scope# = false
+    auto def_first# = false
+    auto mcp_mode# = false
     auto globs# = Vec<GlobRule>::new()
     auto include_type_exts# = Vec<string>::new()
     auto exclude_type_exts# = Vec<string>::new()
@@ -1118,6 +1133,59 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             continue
         }
 
+        if view == "--context-block" || view == "--block" {
+            context_block = true
+            context_set_explicitly = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--max-block-lines" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag --max-block-lines requires an argument"))
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto parse_res = parse_context_num(val_arg.as_str())
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_block_lines = parse_res.unwrap()
+            if max_block_lines == 0 {
+                return Result<CliOptions, string>::Err(string::from("Flag --max-block-lines must be greater than 0"))
+            }
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--max-block-lines=") {
+            auto val_str = view.substr(18:usize, view.len - 18:usize)
+            auto parse_res = parse_context_num(val_str)
+            if parse_res.is_err() { return Result<CliOptions, string>::Err(parse_res.unwrap_err()) }
+            max_block_lines = parse_res.unwrap()
+            if max_block_lines == 0 {
+                return Result<CliOptions, string>::Err(string::from("Flag --max-block-lines must be greater than 0"))
+            }
+            i = i + 1
+            continue
+        }
+
+        if view == "--scope" {
+            scope = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--def-first" {
+            def_first = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--mcp" {
+            mcp_mode = true
+            i = i + 1
+            continue
+        }
+
         // Handle short flag clustering e.g. -nF, -iE, -lc, -q, -o, -N
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
@@ -1218,7 +1286,12 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             budget_limits = budget_limits,
             globs = Vec<GlobRule>::new(),
             include_type_exts = Vec<string>::new(),
-            exclude_type_exts = Vec<string>::new()
+            exclude_type_exts = Vec<string>::new(),
+            context_block = false,
+            max_block_lines = 80,
+            scope = false,
+            def_first = false,
+            mcp_mode = false
         ))
     }
 
@@ -1230,7 +1303,9 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
             p_idx = p_idx + 1
         }
     } else {
-        if !files_mode {
+        if mcp_mode {
+            // In MCP mode, no search pattern is required from CLI
+        } else if !files_mode {
             if raw_positionals.len() > 0 {
                 patterns#.push(raw_positionals.borrow(0).clone())
                 pattern_source_given = true
@@ -1261,9 +1336,9 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         return Result<CliOptions, string>::Err(string::from("Flag --json cannot be combined with -l (--files-with-matches), -c (--count), or --files"))
     }
 
-    // Flag conflict validation: --files cannot be combined with -A, -B, -C
-    if files_mode && context_set_explicitly {
-        return Result<CliOptions, string>::Err(string::from("Flag --files cannot be combined with context options (-A, -B, -C)"))
+    // Flag conflict validation: --files cannot be combined with context options (-A, -B, -C, --context-block)
+    if files_mode && (context_set_explicitly || context_block) {
+        return Result<CliOptions, string>::Err(string::from("Flag --files cannot be combined with context options (-A, -B, -C, --context-block)"))
     }
 
     // Flag conflict validation: -o cannot be combined with --files or -c
@@ -1275,6 +1350,7 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
     if files_with_matches || count || quiet || only_matching {
         before_context = 0
         after_context = 0
+        context_block = false
     }
 
     // If no paths specified, default to current directory "."
@@ -1313,6 +1389,11 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
         budget_limits = budget_limits,
         globs = cede globs,
         include_type_exts = cede include_type_exts,
-        exclude_type_exts = cede exclude_type_exts
+        exclude_type_exts = cede exclude_type_exts,
+        context_block = context_block,
+        max_block_lines = max_block_lines,
+        scope = scope,
+        def_first = def_first,
+        mcp_mode = mcp_mode
     ))
 }

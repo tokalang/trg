@@ -3,7 +3,7 @@ import build::{Executable, run_build}
 fn main() -> i32 {
     auto app# = Executable(
         *name = c"trg",
-        *version = c"0.7.0",
+        *version = c"0.8.0",
         *src = c"src/main.tk",
         deps = string::from(""),
         ..

@@ -153,7 +153,17 @@ pub shape CliOptions (
     budget_limits: BudgetLimits,
     globs: Vec<GlobRule>,
     include_type_exts: Vec<string>,
-    exclude_type_exts: Vec<string>
+    exclude_type_exts: Vec<string>,
+    context_block: bool,
+    max_block_lines: usize,
+    scope: bool,
+    def_first: bool,
+    mcp_mode: bool
+)
+
+pub shape ScopeFrame (
+    name: string,
+    depth: usize
 )
 
 pub shape MatchRange (
@@ -177,14 +187,17 @@ pub shape MatchEvent (
     line_text: string,
     line_number: usize,
     absolute_offset: usize,
-    submatches: Vec<SubMatch>
+    submatches: Vec<SubMatch>,
+    scope_name: string
 )
 
 pub shape LogicalLine (
     text: string,
     line_number: usize,
     absolute_offset: usize,
-    delim_len: usize
+    delim_len: usize,
+    brace_depth: usize,
+    indent_level: usize
 )
 
 pub shape LineProcessOutcome (
