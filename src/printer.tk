@@ -1,7 +1,8 @@
 // Output formatting module supporting Human, -l, -c, --files, context lines, trg-json-v2 JSONL streaming, and OutputBudgetWriter.
-import core/types::{usize, char}
 import core/str::{str}
+import core/option::{Option}
 import std/vec::{Vec}
+import std/hashmap::{HashMap}
 import src/types::{
     CliOptions,
     MatchEvent,
@@ -10,7 +11,17 @@ import src/types::{
     BudgetState,
     BudgetLimits,
     OutputFormat,
-    OutputSink
+    OutputSink,
+    OutputMode,
+    PathStyle,
+    TextLayout,
+    PathKind,
+    ResolvedPath,
+    InternedRecord,
+    PathBase,
+    FileEntry,
+    ResultSegment,
+    ProjectionConfig
 }
 import src/posix::{posix_write_stdout, print_err}
 
@@ -23,192 +34,776 @@ pub shape EmitOutcome (
 
 pub shape FileFrameState (
     target_path: string,
-    begin_emitted#: bool
+    begin_emitted#: bool,
+    file_changed#: bool
 )
 
-pub shape OutputBatch (
-    payload_str: string,
-    path: string,
-    line_number: usize,
-    is_payload: bool,
-    structured_records: Vec<string>
+pub shape FormatConfig (
+    line_number: bool,
+    only_matching: bool,
+    max_columns: usize,
+    scope: bool,
+    with_filename: bool,
+    max_block_lines: usize
 )
 
-impl OutputBatch {
-    pub fn new_payload(cede payload_str: string, cede path: string, line_number: usize) -> OutputBatch {
-        return OutputBatch(
-            payload_str = cede payload_str,
-            path = cede path,
-            line_number = line_number,
-            is_payload = true,
-            structured_records = Vec<string>::new()
+impl FormatConfig {
+    pub fn new() -> FormatConfig {
+        return FormatConfig(
+            line_number = true,
+            only_matching = false,
+            max_columns = 0:usize,
+            scope = false,
+            with_filename = true,
+            max_block_lines = 80:usize
         )
     }
 
-    pub fn new_mcp_batch(
-        cede payload_str: string,
-        cede path: string,
-        line_number: usize,
-        cede structured_records: Vec<string>
-    ) -> OutputBatch {
-        return OutputBatch(
-            payload_str = cede payload_str,
-            path = cede path,
-            line_number = line_number,
-            is_payload = true,
-            structured_records = cede structured_records
+    pub fn from_options(opts: CliOptions) -> FormatConfig {
+        auto wf# = true
+        match opts.with_filename {
+            auto Option<bool>::Some(val) => {
+                wf = val
+            }
+            _ => {
+                wf = true
+            }
+        }
+        return FormatConfig(
+            line_number = opts.line_number,
+            only_matching = opts.only_matching,
+            max_columns = opts.max_columns,
+            scope = opts.scope,
+            with_filename = wf,
+            max_block_lines = opts.max_block_lines
         )
     }
 }
 
+pub shape OutputBatch (
+    records: Vec<InternedRecord>,
+    separator_needed: bool,
+    is_payload: bool
+)
+
+impl OutputBatch {
+    pub fn new(cede records: Vec<InternedRecord>, separator_needed: bool) -> OutputBatch {
+        return OutputBatch(
+            records = cede records,
+            separator_needed = separator_needed,
+            is_payload = true
+        )
+    }
+}
+
+pub fn format_file_entry_json(id: usize, path: str, path_kind: PathKind) -> string {
+    auto s# = string::from("{\"id\":")
+    s#.push_str(u64_to_string(id as u64).as_str())
+    s#.push_str(",\"path\":\"")
+    s#.push_str(json_escape(path).as_str())
+    s#.push_str("\",\"kind\":\"")
+    match path_kind {
+        auto PathKind::Relative => { s#.push_str("workspace_relative") }
+        auto PathKind::Absolute => { s#.push_str("absolute") }
+    }
+    s#.push_str("\"}")
+    return cede s
+}
+
+pub fn format_interned_record_json(rec: InternedRecord) -> string {
+    auto s# = string::from("{\"kind\":\"")
+    s#.push_str(rec.kind.as_str())
+    s#.push_str("\",\"group_id\":")
+    s#.push_str(u64_to_string(rec.group_id as u64).as_str())
+    s#.push_str(",\"line_number\":")
+    s#.push_str(u64_to_string(rec.line_number as u64).as_str())
+    s#.push_str(",\"absolute_offset\":")
+    s#.push_str(u64_to_string(rec.absolute_offset as u64).as_str())
+    s#.push_str(",\"text\":\"")
+    s#.push_str(json_escape(rec.text.as_str()).as_str())
+    s#.push_str("\"")
+
+    if rec.kind == "match" {
+        s#.push_str(",\"submatches\":[")
+        auto si# = 0:usize
+        loop si < rec.submatches.len() {
+            if si > 0 { s#.push_str(",") }
+            auto &sm = rec.submatches.borrow(si)
+            s#.push_str("{\"match_text\":\"")
+            s#.push_str(json_escape(sm.match_text.as_str()).as_str())
+            s#.push_str("\",\"start\":")
+            s#.push_str(u64_to_string(sm.start as u64).as_str())
+            s#.push_str(",\"end\":")
+            s#.push_str(u64_to_string(sm.end as u64).as_str())
+            s#.push_str("}")
+            si = si + 1
+        }
+        s#.push_str("],\"scope\":")
+        match rec.scope {
+            auto Option<string>::Some(&sc) => {
+                s#.push_str("\"")
+                s#.push_str(json_escape(sc.as_str()).as_str())
+                s#.push_str("\"")
+            }
+            _ => {
+                s#.push_str("null")
+            }
+        }
+        s#.push_str(",\"block_truncated\":")
+        if rec.block_truncated { s#.push_str("true") } else { s#.push_str("false") }
+    } else {
+        s#.push_str(",\"block_truncated\":")
+        if rec.block_truncated { s#.push_str("true") } else { s#.push_str("false") }
+    }
+    s#.push_str("}")
+    return cede s
+}
+
+pub fn format_json_match_interned(path: str, rec: InternedRecord) -> string {
+    auto esc_path = json_escape(path)
+    auto match_json# = string::from("{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"")
+    match_json#.push_str(esc_path.as_str())
+    match_json#.push_str("\"},\"lines\":{\"text\":\"")
+    auto esc_line = json_escape(rec.text.as_str())
+    match_json#.push_str(esc_line.as_str())
+    match_json#.push_str("\\n\"},\"line_number\":")
+    auto lnum_str = u64_to_string(rec.line_number as u64)
+    match_json#.push_str(lnum_str.as_str())
+    match_json#.push_str(",\"absolute_offset\":")
+    auto abs_str = u64_to_string(rec.absolute_offset as u64)
+    match_json#.push_str(abs_str.as_str())
+    match_json#.push_str(",\"submatches\":[")
+
+    auto num_sub = rec.submatches.len()
+    auto s_idx# = 0:usize
+    loop s_idx < num_sub {
+        auto &sm = rec.submatches.borrow(s_idx)
+        if s_idx > 0 {
+            match_json#.push_str(",")
+        }
+        match_json#.push_str("{\"match\":{\"text\":\"")
+        auto esc_sm = json_escape(sm.match_text.as_str())
+        match_json#.push_str(esc_sm.as_str())
+        match_json#.push_str("\"},\"start\":")
+        auto start_str = u64_to_string(sm.start as u64)
+        match_json#.push_str(start_str.as_str())
+        match_json#.push_str(",\"end\":")
+        auto end_str = u64_to_string(sm.end as u64)
+        match_json#.push_str(end_str.as_str())
+        match_json#.push_str("}")
+        s_idx = s_idx + 1
+    }
+
+    match rec.scope {
+        auto Option<string>::Some(&sc) => {
+            match_json#.push_str("],\"scope\":{\"text\":\"")
+            auto esc_scope = json_escape(sc.as_str())
+            match_json#.push_str(esc_scope.as_str())
+            match_json#.push_str("\"}}}\n")
+        }
+        _ => {
+            match_json#.push_str("]}}\n")
+        }
+    }
+    return cede match_json
+}
+
+pub fn format_json_context_interned(path: str, rec: InternedRecord) -> string {
+    auto esc_path = json_escape(path)
+    auto ctx_json# = string::from("{\"type\":\"context\",\"data\":{\"path\":{\"text\":\"")
+    ctx_json#.push_str(esc_path.as_str())
+    ctx_json#.push_str("\"},\"lines\":{\"text\":\"")
+    auto esc_line = json_escape(rec.text.as_str())
+    ctx_json#.push_str(esc_line.as_str())
+    ctx_json#.push_str("\\n\"},\"line_number\":")
+    auto lnum_str = u64_to_string(rec.line_number as u64)
+    ctx_json#.push_str(lnum_str.as_str())
+    ctx_json#.push_str(",\"absolute_offset\":")
+    auto abs_str = u64_to_string(rec.absolute_offset as u64)
+    ctx_json#.push_str(abs_str.as_str())
+    if rec.block_truncated {
+        ctx_json#.push_str(",\"submatches\":[],\"block_truncated\":true}}\n")
+    } else {
+        ctx_json#.push_str(",\"submatches\":[]}}\n")
+    }
+    return cede ctx_json
+}
+
+pub fn format_json_match_compact_interned(path: str, rec: InternedRecord) -> string {
+    auto esc_path = json_escape(path)
+    auto res# = string::from("{\"type\":\"match\",\"path\":\"")
+    res#.push_str(esc_path.as_str())
+    res#.push_str("\",\"line\":")
+    auto lnum_str = u64_to_string(rec.line_number as u64)
+    res#.push_str(lnum_str.as_str())
+    res#.push_str(",\"text\":\"")
+    auto esc_line = json_escape(rec.text.as_str())
+    res#.push_str(esc_line.as_str())
+    res#.push_str("\\n\"")
+    match rec.scope {
+        auto Option<string>::Some(&sc) => {
+            res#.push_str(",\"scope\":\"")
+            auto esc_scope = json_escape(sc.as_str())
+            res#.push_str(esc_scope.as_str())
+            res#.push_str("\"")
+        }
+        _ => {}
+    }
+    res#.push_str("}\n")
+    return cede res
+}
+
+pub fn format_json_context_compact_interned(path: str, rec: InternedRecord) -> string {
+    auto esc_path = json_escape(path)
+    auto res# = string::from("{\"type\":\"context\",\"path\":\"")
+    res#.push_str(esc_path.as_str())
+    res#.push_str("\",\"line\":")
+    auto lnum_str = u64_to_string(rec.line_number as u64)
+    res#.push_str(lnum_str.as_str())
+    res#.push_str(",\"text\":\"")
+    auto esc_line = json_escape(rec.text.as_str())
+    res#.push_str(esc_line.as_str())
+    res#.push_str("\\n\"")
+    if rec.block_truncated {
+        res#.push_str(",\"block_truncated\":true")
+    }
+    res#.push_str("}\n")
+    return cede res
+}
+
+fn render_batch_text(
+    format: OutputFormat,
+    layout: TextLayout,
+    fmt_cfg: FormatConfig,
+    resolved_path: ResolvedPath,
+    records: Vec<InternedRecord>,
+    separator_needed: bool,
+    needs_heading: bool,
+    has_emitted_heading: bool
+) -> string {
+    auto out# = string::new()
+    match format {
+        auto OutputFormat::Human => {
+            if layout == TextLayout::Grouped {
+                auto show_heading = fmt_cfg.with_filename && needs_heading && resolved_path.display_path.len() > 0
+                if show_heading {
+                    if has_emitted_heading {
+                        out#.push_str("\n")
+                    }
+                    out#.push_str(resolved_path.display_path.as_str())
+                    out#.push_str("\n")
+                }
+                if separator_needed {
+                    out#.push_str("--\n")
+                }
+                auto ri# = 0:usize
+                loop ri < records.len() {
+                    auto &rec = records.borrow(ri)
+                    if rec.kind == "match" {
+                        if fmt_cfg.only_matching {
+                            auto si# = 0:usize
+                            loop si < rec.submatches.len() {
+                                auto &sm = rec.submatches.borrow(si)
+                                if fmt_cfg.line_number {
+                                    out#.push_str(u64_to_string(rec.line_number as u64).as_str())
+                                    out#.push_str(":")
+                                }
+                                out#.push_str(sm.match_text.as_str())
+                                out#.push_str("\n")
+                                si = si + 1
+                            }
+                        } else {
+                            if fmt_cfg.line_number {
+                                out#.push_str(u64_to_string(rec.line_number as u64).as_str())
+                                out#.push_str(":")
+                            }
+                            if fmt_cfg.scope {
+                                match rec.scope {
+                                    auto Option<string>::Some(&sc) => {
+                                        out#.push_str("[")
+                                        out#.push_str(sc.as_str())
+                                        out#.push_str("] ")
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
+                                out#.push_str("[Omitted long matching line]\n")
+                            } else {
+                                out#.push_str(rec.text.as_str())
+                                out#.push_str("\n")
+                            }
+                        }
+                    } else {
+                        if !fmt_cfg.only_matching {
+                            if fmt_cfg.line_number {
+                                out#.push_str(u64_to_string(rec.line_number as u64).as_str())
+                                out#.push_str("-")
+                            }
+                            if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
+                                out#.push_str("[Omitted long context line]\n")
+                            } else {
+                                out#.push_str(rec.text.as_str())
+                                out#.push_str("\n")
+                            }
+                            if rec.block_truncated {
+                                out#.push_str("[block context truncated by --max-block-lines ")
+                                out#.push_str(u64_to_string(fmt_cfg.max_block_lines as u64).as_str())
+                                out#.push_str("]\n")
+                            }
+                        }
+                    }
+                    ri = ri + 1
+                }
+            } else {
+                if separator_needed {
+                    out#.push_str("--\n")
+                }
+                auto ri# = 0:usize
+                loop ri < records.len() {
+                    auto &rec = records.borrow(ri)
+                    if rec.kind == "match" {
+                        if fmt_cfg.only_matching {
+                            auto si# = 0:usize
+                            loop si < rec.submatches.len() {
+                                auto &sm = rec.submatches.borrow(si)
+                                if fmt_cfg.with_filename && resolved_path.display_path.len() > 0 {
+                                    out#.push_str(resolved_path.display_path.as_str())
+                                    out#.push_str(":")
+                                }
+                                if fmt_cfg.line_number {
+                                    out#.push_str(u64_to_string(rec.line_number as u64).as_str())
+                                    out#.push_str(":")
+                                }
+                                out#.push_str(sm.match_text.as_str())
+                                out#.push_str("\n")
+                                si = si + 1
+                            }
+                        } else {
+                            if fmt_cfg.with_filename && resolved_path.display_path.len() > 0 {
+                                out#.push_str(resolved_path.display_path.as_str())
+                                out#.push_str(":")
+                            }
+                            if fmt_cfg.line_number {
+                                out#.push_str(u64_to_string(rec.line_number as u64).as_str())
+                                out#.push_str(":")
+                            }
+                            if fmt_cfg.scope {
+                                match rec.scope {
+                                    auto Option<string>::Some(&sc) => {
+                                        out#.push_str("[")
+                                        out#.push_str(sc.as_str())
+                                        out#.push_str("] ")
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
+                                out#.push_str("[Omitted long matching line]\n")
+                            } else {
+                                out#.push_str(rec.text.as_str())
+                                out#.push_str("\n")
+                            }
+                        }
+                    } else {
+                        if !fmt_cfg.only_matching {
+                            if fmt_cfg.with_filename && resolved_path.display_path.len() > 0 {
+                                out#.push_str(resolved_path.display_path.as_str())
+                                out#.push_str("-")
+                            }
+                            if fmt_cfg.line_number {
+                                out#.push_str(u64_to_string(rec.line_number as u64).as_str())
+                                out#.push_str("-")
+                            }
+                            if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
+                                out#.push_str("[Omitted long context line]\n")
+                            } else {
+                                out#.push_str(rec.text.as_str())
+                                out#.push_str("\n")
+                            }
+                            if rec.block_truncated {
+                                out#.push_str("[block context truncated by --max-block-lines ")
+                                out#.push_str(u64_to_string(fmt_cfg.max_block_lines as u64).as_str())
+                                out#.push_str("]\n")
+                            }
+                        }
+                    }
+                    ri = ri + 1
+                }
+            }
+        }
+        auto OutputFormat::JsonFull => {
+            auto ri# = 0:usize
+            loop ri < records.len() {
+                auto &rec = records.borrow(ri)
+                if rec.kind == "match" {
+                    out#.push_str(format_json_match_interned(resolved_path.display_path.as_str(), rec).as_str())
+                } else {
+                    out#.push_str(format_json_context_interned(resolved_path.display_path.as_str(), rec).as_str())
+                }
+                ri = ri + 1
+            }
+        }
+        auto OutputFormat::JsonCompact => {
+            auto ri# = 0:usize
+            loop ri < records.len() {
+                auto &rec = records.borrow(ri)
+                if rec.kind == "match" {
+                    out#.push_str(format_json_match_compact_interned(resolved_path.display_path.as_str(), rec).as_str())
+                } else {
+                    out#.push_str(format_json_context_compact_interned(resolved_path.display_path.as_str(), rec).as_str())
+                }
+                ri = ri + 1
+            }
+        }
+    }
+    return cede out
+}
+
 pub shape OutputBudgetWriter (
+    mode: OutputMode,
     format: OutputFormat,
     sink: OutputSink,
     memory_str#: string,
-    structured_records#: Vec<string>,
-    text_record_bytes#: usize,
-    structured_record_bytes#: usize,
+    path_base: PathBase,
+    files#: Vec<FileEntry>,
+    file_lookup#: HashMap<string, usize>,
+    segments#: Vec<ResultSegment>,
+    active_segment_file_id#: Option<usize>,
+    last_emitted_file_key#: string,
+    projection#: ProjectionConfig,
+    has_emitted_heading#: bool,
     canonical_record_bytes#: usize,
+    text_record_bytes#: usize,
     records_emitted#: usize,
-    mcp_mode: bool
+    fmt_cfg: FormatConfig
 )
 
 impl OutputBudgetWriter {
-    pub fn new(format: OutputFormat) -> OutputBudgetWriter {
+    pub fn new_cli(
+        format: OutputFormat,
+        sink: OutputSink,
+        layout: TextLayout,
+        style: PathStyle,
+        fmt_cfg: FormatConfig
+    ) -> OutputBudgetWriter {
         return OutputBudgetWriter(
+            mode = OutputMode::CliStreaming,
             format = format,
-            sink = OutputSink::Stdout,
+            sink = sink,
             memory_str = string::new(),
-            structured_records = Vec<string>::new(),
-            text_record_bytes = 0,
-            structured_record_bytes = 0,
-            canonical_record_bytes = 0,
-            records_emitted = 0,
-            mcp_mode = false
+            path_base = PathBase(kind = string::from("cwd"), path = string::new()),
+            files = Vec<FileEntry>::new(),
+            file_lookup = HashMap<string, usize>::new(),
+            segments = Vec<ResultSegment>::new(),
+            active_segment_file_id = Option<usize>::None,
+            last_emitted_file_key = string::new(),
+            projection = ProjectionConfig(path_style = style, text_layout = layout),
+            has_emitted_heading = false,
+            canonical_record_bytes = 0:usize,
+            text_record_bytes = 0:usize,
+            records_emitted = 0:usize,
+            fmt_cfg = fmt_cfg
         )
     }
 
-    pub fn new_memory(format: OutputFormat) -> OutputBudgetWriter {
+    pub fn new_mcp(
+        cede startup_cwd: string,
+        layout: TextLayout,
+        style: PathStyle,
+        fmt_cfg: FormatConfig
+    ) -> OutputBudgetWriter {
         return OutputBudgetWriter(
-            format = format,
-            sink = OutputSink::Memory,
-            memory_str = string::new(),
-            structured_records = Vec<string>::new(),
-            text_record_bytes = 0,
-            structured_record_bytes = 0,
-            canonical_record_bytes = 0,
-            records_emitted = 0,
-            mcp_mode = false
-        )
-    }
-
-    pub fn new_mcp() -> OutputBudgetWriter {
-        return OutputBudgetWriter(
+            mode = OutputMode::McpCollecting,
             format = OutputFormat::Human,
             sink = OutputSink::Memory,
             memory_str = string::new(),
-            structured_records = Vec<string>::new(),
-            text_record_bytes = 0,
-            structured_record_bytes = 0,
-            canonical_record_bytes = 0,
-            records_emitted = 0,
-            mcp_mode = true
+            path_base = PathBase(kind = string::from("cwd"), path = cede startup_cwd),
+            files = Vec<FileEntry>::new(),
+            file_lookup = HashMap<string, usize>::new(),
+            segments = Vec<ResultSegment>::new(),
+            active_segment_file_id = Option<usize>::None,
+            last_emitted_file_key = string::new(),
+            projection = ProjectionConfig(path_style = style, text_layout = layout),
+            has_emitted_heading = false,
+            canonical_record_bytes = 0:usize,
+            text_record_bytes = 0:usize,
+            records_emitted = 0:usize,
+            fmt_cfg = fmt_cfg
         )
+    }
+
+    pub fn reset_active_segment(self#) {
+        self.active_segment_file_id = Option<usize>::None
+        self.last_emitted_file_key = string::new()
+    }
+
+    pub fn set_effective_projection(self#, layout: TextLayout, style: PathStyle, with_filename: bool) {
+        self.projection.text_layout = layout
+        self.projection.path_style = style
+        self.fmt_cfg.with_filename = with_filename
     }
 
     pub fn take_output(self) -> string {
         return self.memory_str.clone()
     }
 
-    pub fn emit_payload(
-        self,
+    pub fn emit_files_mode_path(self#, budget_state#: BudgetState, path: str) -> EmitOutcome {
+        if budget_state.is_truncated { return EmitOutcome::Truncated }
+        auto s# = string::from(path)
+        s#.push_str("\n")
+        auto delta = s.len()
+        if budget_state.limits.max_result_bytes_enabled {
+            if budget_state.result_payload_bytes_emitted >= budget_state.limits.max_result_bytes ||
+               delta > budget_state.limits.max_result_bytes - budget_state.result_payload_bytes_emitted {
+                budget_state.is_truncated = true
+                budget_state.truncation_reason = string::from("max_result_bytes")
+                budget_state.stopped_path = string::from(path)
+                budget_state.stopped_line_num = 0:usize
+                return EmitOutcome::Truncated
+            }
+        }
+        match self.sink {
+            auto OutputSink::Memory => { self.memory_str#.push_str(s.as_str()) }
+            auto OutputSink::Stdout => {
+                auto res = posix_write_stdout(s.as_str())
+                if res == 1 { return EmitOutcome::BrokenPipe }
+                else if res == 2 { return EmitOutcome::FatalError }
+            }
+        }
+        budget_state.result_payload_bytes_emitted = budget_state.result_payload_bytes_emitted + delta
+        return EmitOutcome::Written
+    }
+
+    pub fn try_commit_batch(
+        self#,
         budget_state#: BudgetState,
         frame_state#: FileFrameState,
+        resolved_path: ResolvedPath,
         batch: OutputBatch
     ) -> EmitOutcome {
         if budget_state.is_truncated {
             return EmitOutcome::Truncated
         }
 
-        auto budget_delta# = batch.payload_str.len()
-        if self.mcp_mode {
-            auto rec_bytes# = 0:usize
-            auto r_idx# = 0:usize
-            loop r_idx < batch.structured_records.len() {
-                rec_bytes = rec_bytes + batch.structured_records.get(r_idx).len()
-                r_idx = r_idx + 1:usize
-            }
-            budget_delta = rec_bytes
-        }
+        match self.mode {
+            auto OutputMode::CliStreaming => {
+                auto needs_heading = (self.projection.text_layout == TextLayout::Grouped) &&
+                                     self.fmt_cfg.with_filename &&
+                                     (self.last_emitted_file_key != resolved_path.identity_key)
 
-        // Preflight byte budget
-        if budget_state.limits.max_result_bytes_enabled {
-            if budget_state.result_payload_bytes_emitted >= budget_state.limits.max_result_bytes ||
-               budget_delta > budget_state.limits.max_result_bytes - budget_state.result_payload_bytes_emitted {
-                budget_state.is_truncated = true
-                budget_state.truncation_reason = string::from("max_result_bytes")
-                budget_state.stopped_path = batch.path.clone()
-                budget_state.stopped_line_num = batch.line_number
-                return EmitOutcome::Truncated
-            }
-        }
+                auto text = render_batch_text(
+                    self.format,
+                    self.projection.text_layout,
+                    self.fmt_cfg,
+                    resolved_path,
+                    batch.records,
+                    batch.separator_needed,
+                    needs_heading,
+                    self.has_emitted_heading
+                )
 
-        // Lazy JSON begin framing: write begin first, and on success immediately set begin_emitted = true
-        match self.format {
-            auto OutputFormat::JsonFull => {
-                if !frame_state.begin_emitted {
-                    auto b_str = format_json_begin(frame_state.target_path.as_str())
-                    match self.sink {
-                        auto OutputSink::Memory => {
-                            self.memory_str#.push_str(b_str.as_str())
+                auto delta = text.len()
+
+                // Preflight text bytes
+                if budget_state.limits.max_result_bytes_enabled {
+                    if budget_state.result_payload_bytes_emitted >= budget_state.limits.max_result_bytes ||
+                       delta > budget_state.limits.max_result_bytes - budget_state.result_payload_bytes_emitted {
+                        budget_state.is_truncated = true
+                        budget_state.truncation_reason = string::from("max_result_bytes")
+                        budget_state.stopped_path = resolved_path.display_path.clone()
+                        if batch.records.len() > 0 {
+                            budget_state.stopped_line_num = batch.records.borrow(0).line_number
+                        } else {
+                            budget_state.stopped_line_num = 0:usize
                         }
-                        auto OutputSink::Stdout => {
-                            auto b_res = posix_write_stdout(b_str.as_str())
-                            if b_res == 1 { return EmitOutcome::BrokenPipe }
-                            else if b_res == 2 { return EmitOutcome::FatalError }
+                        return EmitOutcome::Truncated
+                    }
+                }
+
+                // Lazy JSON begin frame
+                match self.format {
+                    auto OutputFormat::JsonFull => {
+                        if !frame_state.begin_emitted {
+                            auto b_str = format_json_begin(resolved_path.display_path.as_str())
+                            match self.sink {
+                                auto OutputSink::Memory => { self.memory_str#.push_str(b_str.as_str()) }
+                                auto OutputSink::Stdout => {
+                                    auto b_res = posix_write_stdout(b_str.as_str())
+                                    if b_res == 1 { return EmitOutcome::BrokenPipe }
+                                    else if b_res == 2 { return EmitOutcome::FatalError }
+                                }
+                            }
+                            frame_state.begin_emitted = true
+                            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + b_str.len()
                         }
                     }
-                    frame_state.begin_emitted = true
-                    budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + b_str.len()
+                    _ => {}
                 }
-            }
-            _ => {}
-        }
 
-        // Write wire payload
-        match self.sink {
-            auto OutputSink::Memory => {
-                self.memory_str#.push_str(batch.payload_str.as_str())
+                // Emit wire text
+                match self.sink {
+                    auto OutputSink::Memory => {
+                        self.memory_str#.push_str(text.as_str())
+                    }
+                    auto OutputSink::Stdout => {
+                        auto w_res = posix_write_stdout(text.as_str())
+                        if w_res == 1 { return EmitOutcome::BrokenPipe }
+                        else if w_res == 2 { return EmitOutcome::FatalError }
+                    }
+                }
+
+                if needs_heading {
+                    self.has_emitted_heading = true
+                    self.last_emitted_file_key = resolved_path.identity_key.clone()
+                }
+
+                if batch.is_payload {
+                    budget_state.result_payload_bytes_emitted = budget_state.result_payload_bytes_emitted + delta
+                } else {
+                    budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + delta
+                }
+
+                return EmitOutcome::Written
             }
-            auto OutputSink::Stdout => {
-                auto w_res = posix_write_stdout(batch.payload_str.as_str())
-                if w_res == 1 { return EmitOutcome::BrokenPipe }
-                else if w_res == 2 { return EmitOutcome::FatalError }
+
+            auto OutputMode::McpCollecting => {
+                // Preflight exact canonical structural JSON bytes
+                auto prospective_delta# = 0:usize
+                auto is_new_file# = false
+                auto target_file_id# = 0:usize
+
+                auto lookup_opt = self.file_lookup.get(resolved_path.identity_key.clone())
+                match lookup_opt {
+                    auto Option<usize>::Some(fid) => {
+                        target_file_id = fid
+                        is_new_file = false
+                    }
+                    _ => {
+                        target_file_id = self.files.len()
+                        is_new_file = true
+                        if self.files.len() > 0 {
+                            prospective_delta = prospective_delta + 1:usize
+                        }
+                        auto fe_str = format_file_entry_json(target_file_id, resolved_path.display_path.as_str(), resolved_path.path_kind)
+                        prospective_delta = prospective_delta + fe_str.len()
+                    }
+                }
+
+                auto is_new_segment# = false
+                match self.active_segment_file_id {
+                    auto Option<usize>::Some(cur_fid) => {
+                        if cur_fid == target_file_id {
+                            is_new_segment = false
+                        } else {
+                            is_new_segment = true
+                        }
+                    }
+                    _ => {
+                        is_new_segment = true
+                    }
+                }
+
+                if is_new_segment {
+                    if self.segments.len() > 0 {
+                        prospective_delta = prospective_delta + 1:usize
+                    }
+                    auto fid_str = u64_to_string(target_file_id as u64)
+                    prospective_delta = prospective_delta + 11:usize + fid_str.len() + 12:usize
+                    prospective_delta = prospective_delta + 2:usize // reserved closing ]}
+                }
+
+                auto ri# = 0:usize
+                loop ri < batch.records.len() {
+                    auto &rec = batch.records.borrow(ri)
+                    if !is_new_segment && self.segments.len() > 0 {
+                        auto &seg = self.segments.borrow(self.segments.len() - 1:usize)
+                        if seg.records.len() + ri > 0 {
+                            prospective_delta = prospective_delta + 1:usize
+                        }
+                    } else if ri > 0 {
+                        prospective_delta = prospective_delta + 1:usize
+                    }
+                    auto rec_json = format_interned_record_json(rec)
+                    prospective_delta = prospective_delta + rec_json.len()
+                    ri = ri + 1
+                }
+
+                // Preflight canonical structural bytes
+                if budget_state.limits.max_result_bytes_enabled {
+                    if self.canonical_record_bytes >= budget_state.limits.max_result_bytes ||
+                       prospective_delta > budget_state.limits.max_result_bytes - self.canonical_record_bytes {
+                        budget_state.is_truncated = true
+                        budget_state.truncation_reason = string::from("max_result_bytes")
+                        budget_state.stopped_path = resolved_path.display_path.clone()
+                        if batch.records.len() > 0 {
+                            budget_state.stopped_line_num = batch.records.borrow(0).line_number
+                        } else {
+                            budget_state.stopped_line_num = 0:usize
+                        }
+                        return EmitOutcome::Truncated
+                    }
+                }
+
+                // Commit canonical records
+                if is_new_file {
+                    self.file_lookup#.insert(resolved_path.identity_key.clone(), target_file_id)
+                    self.files#.push(FileEntry(
+                        id = target_file_id,
+                        path = resolved_path.display_path.clone(),
+                        path_kind = resolved_path.path_kind
+                    ))
+                }
+
+                if is_new_segment {
+                    self.segments#.push(ResultSegment(
+                        file_id = target_file_id,
+                        records = Vec<InternedRecord>::new()
+                    ))
+                    self.active_segment_file_id = Option<usize>::Some(target_file_id)
+                }
+
+                auto cur_seg_idx = self.segments.len() - 1:usize
+                auto &seg# = self.segments#.borrow_mut(cur_seg_idx)
+                auto r_add# = 0:usize
+                loop r_add < batch.records.len() {
+                    seg#.add_record(batch.records.borrow(r_add).clone())
+                    r_add = r_add + 1
+                }
+
+                self.canonical_record_bytes = self.canonical_record_bytes + prospective_delta
+                self.records_emitted = self.records_emitted + batch.records.len()
+                budget_state.result_payload_bytes_emitted = self.canonical_record_bytes
+
+                // Render presentation projection into memory_str
+                auto needs_heading = (self.projection.text_layout == TextLayout::Grouped) &&
+                                     (self.last_emitted_file_key != resolved_path.identity_key)
+
+                auto text = render_batch_text(
+                    OutputFormat::Human,
+                    self.projection.text_layout,
+                    self.fmt_cfg,
+                    resolved_path,
+                    batch.records,
+                    batch.separator_needed,
+                    needs_heading,
+                    self.has_emitted_heading
+                )
+
+                if needs_heading {
+                    self.has_emitted_heading = true
+                    self.last_emitted_file_key = resolved_path.identity_key.clone()
+                }
+
+                self.memory_str#.push_str(text.as_str())
+                self.text_record_bytes = self.text_record_bytes + text.len()
+
+                return EmitOutcome::Written
             }
         }
-
-        if self.mcp_mode {
-            auto r_idx# = 0:usize
-            loop r_idx < batch.structured_records.len() {
-                self.structured_records#.push(batch.structured_records.borrow(r_idx).clone())
-                r_idx = r_idx + 1
-            }
-            self.text_record_bytes = self.text_record_bytes + batch.payload_str.len()
-            self.structured_record_bytes = self.structured_record_bytes + budget_delta
-            self.canonical_record_bytes = self.canonical_record_bytes + budget_delta
-            self.records_emitted = self.records_emitted + batch.structured_records.len()
-        }
-
-        if batch.is_payload {
-            budget_state.result_payload_bytes_emitted = budget_state.result_payload_bytes_emitted + budget_delta
-        } else {
-            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + budget_delta
-        }
-
-        return EmitOutcome::Written
     }
 
-    pub fn write_raw(self, s: str) -> EmitOutcome {
+    pub fn write_raw(self#, s: str) -> EmitOutcome {
         match self.sink {
             auto OutputSink::Memory => {
                 self.memory_str#.push_str(s)

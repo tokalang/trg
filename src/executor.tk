@@ -2,6 +2,7 @@
 import core/str::{str}
 import core/option::{Option}
 import std/vec::{Vec}
+import std/env as env
 import src/types::{
     CliOptions,
     BudgetState,
@@ -10,11 +11,16 @@ import src/types::{
     GlobalStats,
     ScanPass,
     OutputFormat,
-    SearchDiagnostic
+    SearchDiagnostic,
+    TextLayout,
+    PathStyle,
+    OutputMode
 }
 import src/matcher::{SearchPlan}
 import src/walker::{collect_search_targets}
 import src/scanner::{scan_file_stream_with_pass}
+import src/posix::{posix_isatty}
+import src/path_norm::{resolve_path, normalize_cwd}
 import src/printer::{
     OutputBudgetWriter,
     OutputBatch,
@@ -26,7 +32,7 @@ import src/printer::{
 
 pub fn execute_files_mode(
     opts: CliOptions,
-    writer: OutputBudgetWriter
+    writer#: OutputBudgetWriter
 ) -> Result<SearchReport, SearchDiagnostic> {
     auto walk_res = collect_search_targets(opts)
     auto global_had_error# = walk_res.had_error
@@ -49,16 +55,14 @@ pub fn execute_files_mode(
         ))
     }
 
+    auto startup_cwd = normalize_cwd(env::current_dir().as_str())
     auto f_idx# = 0:usize
-    auto dummy_frame# = FileFrameState(target_path = string::from(""), begin_emitted = false)
     auto is_broken_pipe# = false
     loop f_idx < num_files {
         if budget_state.is_truncated { break }
         auto &path_str = files.borrow(f_idx)
-        auto wire_str# = path_str.clone()
-        wire_str#.push_str("\n")
-        auto batch = OutputBatch::new_payload(cede wire_str, path_str.clone(), 0)
-        auto outcome = writer.emit_payload(budget_state#, dummy_frame#, batch)
+        auto resolved = resolve_path(startup_cwd.as_str(), path_str.as_str(), opts.path_style)
+        auto outcome = writer#.emit_files_mode_path(budget_state#, resolved.display_path.as_str())
         match outcome {
             EmitOutcome::Written => {}
             EmitOutcome::Truncated => { break }
@@ -87,10 +91,10 @@ pub fn execute_files_mode(
 
 pub fn execute_search(
     opts: CliOptions,
-    writer: OutputBudgetWriter
+    writer#: OutputBudgetWriter
 ) -> Result<SearchReport, SearchDiagnostic> {
     if opts.files_mode {
-        return execute_files_mode(opts, writer)
+        return execute_files_mode(opts, writer#)
     }
 
     // Fail-fast on regex/plan compilation before touching filesystem
@@ -114,6 +118,37 @@ pub fn execute_search(
     auto budget_state# = BudgetState::new(opts.budget_limits)
     budget_state.files_selected = num_files
 
+    auto multiple_files = num_files > 1 || opts.paths.len() > 1
+
+    auto resolved_layout# = opts.text_layout
+    match opts.text_layout {
+        auto TextLayout::Auto => {
+            if writer.mode == OutputMode::McpCollecting {
+                resolved_layout = TextLayout::Grouped
+            } else if posix_isatty(1:i32) && multiple_files {
+                resolved_layout = TextLayout::Grouped
+            } else {
+                resolved_layout = TextLayout::Flat
+            }
+        }
+        _ => {}
+    }
+
+    auto effective_with_filename# = false
+    match opts.with_filename {
+        auto Option<bool>::Some(wf) => {
+            effective_with_filename = wf
+        }
+        _ => {
+            if writer.mode == OutputMode::McpCollecting {
+                effective_with_filename = true
+            } else {
+                effective_with_filename = multiple_files
+            }
+        }
+    }
+    writer#.set_effective_projection(resolved_layout, opts.path_style, effective_with_filename)
+
     if num_files == 0 {
         return Result<SearchReport, SearchDiagnostic>::Ok(SearchReport(
             found_result = false,
@@ -124,8 +159,6 @@ pub fn execute_search(
             diagnostics = cede all_diagnostics
         ))
     }
-
-    auto multiple_files = num_files > 1 || opts.paths.len() > 1
     auto broken_pipe_occurred# = false
     auto found_any_match# = false
 
@@ -153,7 +186,7 @@ pub fn execute_search(
             auto has_m# = false
             {
                 auto &f_state# = file_states#.borrow_mut(i)
-                auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, cur_pass, f_state#)
+                auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer#, budget_state#, cur_pass, f_state#)
                 is_bp = scan_res.is_broken_pipe
                 had_err = scan_res.had_error
                 has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
@@ -184,6 +217,7 @@ pub fn execute_search(
         }
 
         if !budget_state.is_truncated && !broken_pipe_occurred && !(opts.quiet && found_any_match) {
+            writer#.reset_active_segment()
             auto j# = 0:usize
             loop j < num_files {
                 if budget_state.is_truncated {
@@ -197,7 +231,7 @@ pub fn execute_search(
                     auto has_m# = false
                     {
                         auto &f_state# = file_states#.borrow_mut(j)
-                        auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, ScanPass::UsagesOnly, f_state#)
+                        auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer#, budget_state#, ScanPass::UsagesOnly, f_state#)
                         is_bp = scan_res.is_broken_pipe
                         had_err = scan_res.had_error
                         has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
@@ -237,7 +271,7 @@ pub fn execute_search(
             auto has_m# = false
             {
                 auto &f_state# = file_states#.borrow_mut(i)
-                auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer, budget_state#, ScanPass::All, f_state#)
+                auto scan_res# = scan_file_stream_with_pass(target_file.clone(), opts, plan, multiple_files, writer#, budget_state#, ScanPass::All, f_state#)
                 is_bp = scan_res.is_broken_pipe
                 had_err = scan_res.had_error
                 has_m = !scan_res.is_binary && !scan_res.had_error && scan_res.has_match
@@ -281,7 +315,7 @@ pub fn execute_search(
 
 pub fn finalize_search(
     opts: CliOptions,
-    writer: OutputBudgetWriter,
+    writer#: OutputBudgetWriter,
     report: SearchReport
 ) -> EmitOutcome {
     if !opts.json_mode {
@@ -305,5 +339,5 @@ pub fn finalize_search(
     } else {
         sum_str = format_summary_json(stats, report.budget_state, report.had_error)
     }
-    return writer.write_raw(sum_str.as_str())
+    return writer#.write_raw(sum_str.as_str())
 }

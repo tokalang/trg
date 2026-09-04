@@ -1,0 +1,181 @@
+// Component-aware lexical path normalization and ResolvedPath identity resolution for trg.
+import core/str::{str}
+import std/vec::{Vec}
+import src/types::{PathStyle, PathKind, ResolvedPath}
+
+fn is_slash(b: u8) -> bool {
+    return b == 47:u8 // '/'
+}
+
+// Lexically normalizes an absolute or relative path into components,
+// resolving '.' and '..', collapsing multiple slashes, and returning the components.
+fn split_and_normalize_components(path: str) -> Vec<string> {
+    auto parts# = Vec<string>::new()
+    auto len = path.len
+    if len == 0 {
+        return parts
+    }
+
+    auto i# = 0:usize
+    loop i < len {
+        // Skip consecutive slashes
+        loop i < len && is_slash(path.byte_at(i)) {
+            i = i + 1
+        }
+        if i >= len {
+            break
+        }
+
+        auto start = i
+        loop i < len && !is_slash(path.byte_at(i)) {
+            i = i + 1
+        }
+        auto comp = path.substr(start, i - start)
+        if comp == "." {
+            // Ignore current directory
+        } else if comp == ".." {
+            // Traverse up one level if possible
+            if parts.len() > 0 {
+                parts#.pop()
+            }
+        } else if comp.len > 0 {
+            parts#.push(string::from(comp))
+        }
+    }
+    return parts
+}
+
+// Computes the normalized absolute identity key from (startup_cwd, target_path).
+pub fn compute_identity_key(startup_cwd: str, target_path: str) -> string {
+    auto full_path# = string::new()
+    if target_path.len > 0 && is_slash(target_path.byte_at(0)) {
+        // Target is already an absolute path
+        full_path#.push_str(target_path)
+    } else {
+        // Join with startup_cwd
+        full_path#.push_str(startup_cwd)
+        if startup_cwd.len == 0 || !is_slash(startup_cwd.byte_at(startup_cwd.len - 1)) {
+            full_path#.push_str("/")
+        }
+        full_path#.push_str(target_path)
+    }
+
+    auto comps = split_and_normalize_components(full_path.as_str())
+    if comps.is_empty() {
+        return string::from("/")
+    }
+
+    auto res# = string::new()
+    auto c_idx# = 0:usize
+    loop c_idx < comps.len() {
+        res#.push_str("/")
+        res#.push_str(comps.borrow(c_idx).as_str())
+        c_idx = c_idx + 1
+    }
+    return cede res
+}
+
+// Normalizes startup_cwd lexically so that containment checks are consistent.
+pub fn normalize_cwd(raw_cwd: str) -> string {
+    auto comps = split_and_normalize_components(raw_cwd)
+    if comps.is_empty() {
+        return string::from("/")
+    }
+    auto res# = string::new()
+    auto c_idx# = 0:usize
+    loop c_idx < comps.len() {
+        res#.push_str("/")
+        res#.push_str(comps.borrow(c_idx).as_str())
+        c_idx = c_idx + 1
+    }
+    return cede res
+}
+
+// Checks if identity_key is strictly contained inside normalized_cwd with component boundary safety.
+pub fn is_inside_base(identity_key: str, normalized_cwd: str) -> bool {
+    if normalized_cwd == "/" {
+        return true
+    }
+    if identity_key == normalized_cwd {
+        return true
+    }
+    if identity_key.starts_with(normalized_cwd) {
+        // Ensure exact directory boundary (i.e. followed by '/')
+        if identity_key.len > normalized_cwd.len && is_slash(identity_key.byte_at(normalized_cwd.len)) {
+            return true
+        }
+    }
+    return false
+}
+
+// Resolves a target path relative to startup CWD and PathStyle into a complete ResolvedPath.
+pub fn resolve_path(
+    normalized_cwd: str,
+    target_path: str,
+    style: PathStyle
+) -> ResolvedPath {
+    if target_path == "-" {
+        return ResolvedPath(
+            identity_key = string::from("<stdin>"),
+            display_path = string::new(),
+            path_kind = PathKind::Relative
+        )
+    }
+
+    auto identity_key = compute_identity_key(normalized_cwd, target_path)
+    auto inside = is_inside_base(identity_key.as_str(), normalized_cwd)
+
+    match style {
+        auto PathStyle::WorkspaceRelative => {
+            if inside {
+                if identity_key.as_str() == normalized_cwd {
+                    return ResolvedPath(
+                        identity_key = cede identity_key,
+                        display_path = string::from("."),
+                        path_kind = PathKind::Relative
+                    )
+                }
+                auto prefix_len# = normalized_cwd.len
+                if normalized_cwd != "/" {
+                    prefix_len = prefix_len + 1:usize // strip the trailing '/'
+                } else {
+                    prefix_len = 1:usize
+                }
+                auto rel_len = identity_key.as_str().len - prefix_len
+                auto rel_str = string::from(identity_key.as_str().substr(prefix_len, rel_len))
+                return ResolvedPath(
+                    identity_key = cede identity_key,
+                    display_path = cede rel_str,
+                    path_kind = PathKind::Relative
+                )
+            } else {
+                auto disp = identity_key.clone()
+                return ResolvedPath(
+                    identity_key = cede identity_key,
+                    display_path = cede disp,
+                    path_kind = PathKind::Absolute
+                )
+            }
+        }
+        auto PathStyle::Absolute => {
+            auto disp = identity_key.clone()
+            return ResolvedPath(
+                identity_key = cede identity_key,
+                display_path = cede disp,
+                path_kind = PathKind::Absolute
+            )
+        }
+        auto PathStyle::AsGiven => {
+            auto is_abs = target_path.len > 0 && is_slash(target_path.byte_at(0))
+            auto pkind# = PathKind::Relative
+            if is_abs {
+                pkind = PathKind::Absolute
+            }
+            return ResolvedPath(
+                identity_key = cede identity_key,
+                display_path = string::from(target_path),
+                path_kind = pkind
+            )
+        }
+    }
+}

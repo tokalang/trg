@@ -2,6 +2,50 @@
 import core/option::{Option}
 import std/vec::{Vec}
 
+pub shape OutputMode (
+    CliStreaming = 0 |
+    McpCollecting = 1
+)
+
+pub shape PathStyle (
+    AsGiven = 0 |
+    WorkspaceRelative = 1 |
+    Absolute = 2
+)
+
+pub shape TextLayout (
+    Auto = 0 |
+    Grouped = 1 |
+    Flat = 2
+)
+
+pub shape PathKind (
+    Relative = 0 |
+    Absolute = 1
+)
+
+pub shape ResolvedPath (
+    identity_key: string,
+    display_path: string,
+    path_kind: PathKind
+)
+
+pub shape PathBase (
+    kind: string,
+    path: string
+)
+
+pub shape FileEntry (
+    id: usize,
+    path: string,
+    path_kind: PathKind
+)
+
+pub shape ProjectionConfig (
+    path_style: PathStyle,
+    text_layout: TextLayout
+)
+
 pub shape CaseMode (
     Sensitive = 0 |
     Insensitive = 1 |
@@ -211,7 +255,10 @@ pub shape CliOptions (
     max_block_lines: usize,
     scope: bool,
     def_first: bool,
-    mcp_mode: bool
+    mcp_mode: bool,
+    path_style: PathStyle,
+    text_layout: TextLayout,
+    with_filename: Option<bool>
 )
 
 pub shape ScopeFrame (
@@ -234,6 +281,66 @@ pub shape SubMatch (
     start: usize,
     end: usize
 )
+
+impl SubMatch {
+    pub fn clone(self) -> SubMatch {
+        return SubMatch(
+            match_text = self.match_text.clone(),
+            start = self.start,
+            end = self.end
+        )
+    }
+}
+
+pub shape InternedRecord (
+    kind: string,
+    group_id: usize,
+    line_number: usize,
+    absolute_offset: usize,
+    text: string,
+    submatches: Vec<SubMatch>,
+    scope: Option<string>,
+    block_truncated: bool
+)
+
+impl InternedRecord {
+    pub fn clone(self) -> InternedRecord {
+        auto subs# = Vec<SubMatch>::new()
+        auto i# = 0:usize
+        loop i < self.submatches.len() {
+            subs#.push(self.submatches.borrow(i).clone())
+            i = i + 1
+        }
+        auto sc# = Option<string>::None
+        match self.scope {
+            auto Option<string>::Some(&s) => {
+                sc = Option<string>::Some(s.clone())
+            }
+            _ => {}
+        }
+        return InternedRecord(
+            kind = self.kind.clone(),
+            group_id = self.group_id,
+            line_number = self.line_number,
+            absolute_offset = self.absolute_offset,
+            text = self.text.clone(),
+            submatches = cede subs,
+            scope = cede sc,
+            block_truncated = self.block_truncated
+        )
+    }
+}
+
+pub shape ResultSegment (
+    file_id: usize,
+    records: Vec<InternedRecord>
+)
+
+impl ResultSegment {
+    pub fn add_record(self#, cede rec: InternedRecord) {
+        self.records#.push(cede rec)
+    }
+}
 
 pub shape MatchEvent (
     path: string,

@@ -37,7 +37,9 @@ pub shape OptionFamily (
     NoIgnore = 21 |         // --no-ignore
     NoPrefilter = 22 |      // --no-prefilter
     LineNumber = 23 |       // -n, -N, --line-number, --no-line-number
-    MaxBlockLines = 24      // --max-block-lines, --max-block-lines=*
+    MaxBlockLines = 24 |    // --max-block-lines, --max-block-lines=*
+    Heading = 25 |          // --heading, --no-heading
+    PathStyle = 26          // --path-style, --path-style=*
 )
 
 pub shape OptionToken (
@@ -186,6 +188,11 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                 i = i + 1
                 continue
             }
+            if view.starts_with("--path-style=") {
+                families#.push(OptionToken(family = OptionFamily::PathStyle, token = string::from(view)))
+                i = i + 1
+                continue
+            }
 
             // Two-token value-taking long options
             if view == "--glob" || view == "--type" || view == "--type-not" || view == "--regexp" ||
@@ -193,7 +200,7 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                view == "--max-total-matches" || view == "--max-result-bytes" ||
                view == "--max-files-with-matches" || view == "--sort" || view == "--sortr" ||
                view == "--context" || view == "--before-context" || view == "--after-context" ||
-               view == "--max-block-lines" {
+               view == "--max-block-lines" || view == "--path-style" {
                 if i + 1 >= num_args {
                     auto err# = string::from("Option '")
                     err#.push_str(view)
@@ -212,6 +219,7 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                 else if view == "--sort" || view == "--sortr" { fam = OptionFamily::Sort }
                 else if view == "--context" || view == "--before-context" || view == "--after-context" { fam = OptionFamily::Context }
                 else if view == "--max-block-lines" { fam = OptionFamily::MaxBlockLines }
+                else if view == "--path-style" { fam = OptionFamily::PathStyle }
 
                 families#.push(OptionToken(family = fam, token = string::from(view)))
                 i = i + 2:usize
@@ -219,6 +227,11 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
             }
 
             // Zero-argument long options
+            if view == "--heading" || view == "--no-heading" {
+                families#.push(OptionToken(family = OptionFamily::Heading, token = string::from(view)))
+                i = i + 1
+                continue
+            }
             if view == "--extended-regexp" || view == "--regex-mode" || view == "--fixed-strings" {
                 families#.push(OptionToken(family = OptionFamily::PatternMode, token = string::from(view)))
                 i = i + 1
@@ -458,6 +471,12 @@ pub fn find_family_token(tokens: Vec<OptionToken>, target: OptionFamily) -> Opti
             auto OptionFamily::MaxBlockLines => {
                 match target { auto OptionFamily::MaxBlockLines => { matched = true } _ => {} }
             }
+            auto OptionFamily::Heading => {
+                match target { auto OptionFamily::Heading => { matched = true } _ => {} }
+            }
+            auto OptionFamily::PathStyle => {
+                match target { auto OptionFamily::PathStyle => { matched = true } _ => {} }
+            }
         }
         if matched {
             return Option<string>::Some(ot.token.clone())
@@ -631,6 +650,8 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
             auto max_bytes# = ParamStringState(state = 0:u8, value = string::new())
             auto max_per_file# = ParamUsizeState(state = 0:u8, value = 0:usize)
             auto max_files_with_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
+            auto path_style# = ParamStringState(state = 0:u8, value = string::new())
+            auto text_layout# = ParamStringState(state = 0:u8, value = string::new())
             auto raw_args_state# = ParamVecState(state = 0:u8, value = Vec<string>::new())
 
             auto iter# = map.iter()
@@ -730,6 +751,14 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
                     auto r = parse_nullable_usize_param(node, "max_files_with_matches", 0:usize, 9007199254740991:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     max_files_with_matches = r.unwrap()
+                } else if k == "path_style" {
+                    auto r = parse_string_param(node, "path_style")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    path_style = r.unwrap()
+                } else if k == "text_layout" {
+                    auto r = parse_string_param(node, "text_layout")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    text_layout = r.unwrap()
                 } else if k == "args" {
                     auto r = parse_vec_string_param(node, "args", 0:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
@@ -787,6 +816,16 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
             if sort.state == 2:u8 {
                 if sort.value.as_str() != "path" && sort.value.as_str() != "reverse_path" && sort.value.as_str() != "none" {
                     return Result<Vec<string>, string>::Err(string::from("Invalid params: 'sort' must be 'path', 'reverse_path', or 'none'"))
+                }
+            }
+            if path_style.state == 2:u8 {
+                if path_style.value.as_str() != "workspace_relative" && path_style.value.as_str() != "absolute" {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: 'path_style' must be 'workspace_relative' or 'absolute'"))
+                }
+            }
+            if text_layout.state == 2:u8 {
+                if text_layout.value.as_str() != "grouped" && text_layout.value.as_str() != "flat" {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: 'text_layout' must be 'grouped' or 'flat'"))
                 }
             }
 
@@ -957,6 +996,22 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
                 return Result<Vec<string>, string>::Err(cede err)
             }
 
+            auto tok_ps_style = find_family_token(families, OptionFamily::PathStyle)
+            if tok_ps_style.is_some() && path_style.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'path_style' conflicts with args option '")
+                err#.push_str(tok_ps_style.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_hd = find_family_token(families, OptionFamily::Heading)
+            if tok_hd.is_some() && text_layout.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'text_layout' conflicts with args option '")
+                err#.push_str(tok_hd.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
             // 8. Build final CLI argument vector
             auto cli_args# = Vec<string>::new()
             cli_args#.push(string::from("trg"))
@@ -1109,6 +1164,28 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
                     cli_args#.push(types.value.borrow(ti).clone())
                     ti = ti + 1
                 }
+            }
+
+            // Path style
+            if path_style.state == 2:u8 {
+                if path_style.value.as_str() == "workspace_relative" {
+                    cli_args#.push(string::from("--path-style=workspace-relative"))
+                } else if path_style.value.as_str() == "absolute" {
+                    cli_args#.push(string::from("--path-style=absolute"))
+                }
+            } else if !has_family(families, OptionFamily::PathStyle) {
+                cli_args#.push(string::from("--path-style=workspace-relative"))
+            }
+
+            // Text layout
+            if text_layout.state == 2:u8 {
+                if text_layout.value.as_str() == "grouped" {
+                    cli_args#.push(string::from("--heading"))
+                } else if text_layout.value.as_str() == "flat" {
+                    cli_args#.push(string::from("--no-heading"))
+                }
+            } else if !has_family(families, OptionFamily::Heading) {
+                cli_args#.push(string::from("--heading"))
             }
 
             // Pass-through raw args

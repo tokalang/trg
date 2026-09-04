@@ -2,13 +2,16 @@
 import core/str::{str}
 import std/vec::{Vec}
 import std/hashmap::{HashMap}
+import std/env as env
 import stdx/serde/json::{JsonNode}
 import std/math::{is_finite, floor}
 import src/types::{CliOptions, OutputFormat, SearchReport, SearchDiagnostic, BudgetState}
+import src/path_norm::{normalize_cwd}
 import src/posix::{posix_write_stdout, posix_read_stdin_line}
 import src/cli::{parse_cli_args_from_vec}
 import src/printer::{
     OutputBudgetWriter,
+    FormatConfig,
     u64_to_string,
     i64_to_string,
     json_escape
@@ -86,6 +89,7 @@ fn send_tool_error(id_str: str, message: str) -> bool {
 
 pub fn run_mcp_server() -> i32 {
     auto server_state# = McpServerState::new()
+    auto startup_cwd = normalize_cwd(env::current_dir().as_str())
 
     loop true {
         auto line_opt = posix_read_stdin_line()
@@ -212,7 +216,7 @@ pub fn run_mcp_server() -> i32 {
                     resp#.push_str(id_str.as_str())
                     resp#.push_str(",\"result\":{\"protocolVersion\":\"")
                     resp#.push_str(negotiated.as_str())
-                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.10.0\"}}}\n")
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.11.0\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
@@ -285,8 +289,14 @@ pub fn run_mcp_server() -> i32 {
                                                         send_error(id_str.as_str(), -32602, val_res.unwrap_err().as_str())
                                                         continue
                                                     }
-                                                    auto writer = OutputBudgetWriter::new_mcp()
-                                                    auto search_res = execute_search(search_opts, writer)
+                                                    auto fmt_cfg = FormatConfig::from_options(&search_opts)
+                                                    auto writer# = OutputBudgetWriter::new_mcp(
+                                                        startup_cwd.clone(),
+                                                        search_opts.text_layout,
+                                                        search_opts.path_style,
+                                                        fmt_cfg
+                                                    )
+                                                    auto search_res = execute_search(search_opts, writer#)
                                                     auto report# = SearchReport(
                                                         found_result = false,
                                                         had_error = false,
@@ -310,10 +320,10 @@ pub fn run_mcp_server() -> i32 {
                                                         )
                                                     } else {
                                                         report = search_res.unwrap()
-                                                        finalize_search(search_opts, writer, report)
+                                                        finalize_search(search_opts, writer#, report)
                                                     }
-                                            auto resp = format_tool_call_response(id_str, report, search_opts, writer, server_state.negotiated_version.as_str())
-                                            send_mcp_response(resp.as_str())
+                                                    auto resp = format_tool_call_response(id_str, report, search_opts, writer, server_state.negotiated_version.as_str())
+                                                    send_mcp_response(resp.as_str())
                                         }
                                         _ => {
                                             send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")

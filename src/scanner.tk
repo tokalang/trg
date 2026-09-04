@@ -2,6 +2,7 @@
 import core/str::{str}
 import core/option::{Option}
 import std/vec::{Vec}
+import std/env
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
 import src/types::{
     CliOptions,
@@ -17,8 +18,11 @@ import src/types::{
     FileRunState,
     ScanPass,
     SyntaxFamily,
-    SearchDiagnostic
+    SearchDiagnostic,
+    ResolvedPath,
+    InternedRecord
 }
+import src/path_norm::{resolve_path, normalize_cwd}
 import src/matcher::{SearchPlan}
 import src/posix::{posix_ferror, posix_get_errno}
 import src/printer::{
@@ -27,16 +31,7 @@ import src/printer::{
     OutputBatch,
     EmitOutcome,
     format_json_begin,
-    format_json_match,
-    format_json_match_compact,
-    format_json_context,
-    format_json_context_compact,
     format_json_end,
-    format_human_match,
-    format_human_context,
-    format_group_separator,
-    format_mcp_structured_match,
-    format_mcp_structured_context,
     emit_json_begin,
     emit_json_end,
     write_line,
@@ -95,9 +90,9 @@ fn process_logical_line(
     ranges: Vec<MatchRange>,
     opts: CliOptions,
     state#: ContextState,
-    target_path: str,
+    resolved_path: ResolvedPath,
     multiple_files: bool,
-    writer: OutputBudgetWriter,
+    writer#: OutputBudgetWriter,
     budget_state#: BudgetState,
     frame_state#: FileFrameState,
     file_matched_lines_emitted#: usize,
@@ -107,15 +102,13 @@ fn process_logical_line(
 ) -> LineProcessOutcome {
     if line_matches {
         auto is_first_for_file = !file_has_emitted_match
-        auto res_ok = budget_state#.reserve_match(target_path, line.line_number, is_first_for_file)
+        auto res_ok = budget_state#.reserve_match(resolved_path.display_path.as_str(), line.line_number, is_first_for_file)
         if !res_ok {
             return LineProcessOutcome::Continue
         }
 
-        auto batch_payload# = string::new()
-        auto structured_recs# = Vec<string>::new()
-
         // 1. Group separator & Group ID
+        auto separator_needed# = false
         auto has_context = opts.before_context > 0 || opts.after_context > 0 || opts.context_block
         if has_context && state.last_emitted_line_num > 0 && state.had_emitted_group {
             auto first_to_emit# = line.line_number
@@ -127,9 +120,7 @@ fn process_logical_line(
             }
             if first_to_emit > state.last_emitted_line_num + 1 {
                 state.current_group_id = state.current_group_id + 1
-                if !opts.json_mode {
-                    batch_payload#.push_str(format_group_separator().as_str())
-                }
+                separator_needed = true
             }
         } else if !has_context && state.had_emitted_group {
             state.current_group_id = state.current_group_id + 1
@@ -165,41 +156,23 @@ fn process_logical_line(
             state.block_lines_emitted = num_ring - emit_start_idx + 1
         }
 
+        auto records# = Vec<InternedRecord>::new()
         auto r_idx# = emit_start_idx
         loop r_idx < num_ring {
             auto actual_idx = (state.ring.head + r_idx) % state.ring.capacity
-            auto r_line_num = state.ring.lines.borrow(actual_idx).line_number
+            auto &r_line = state.ring.lines.borrow(actual_idx)
+            auto r_line_num = r_line.line_number
             if r_line_num > state.last_emitted_line_num {
-                auto roles# = Vec<string>::new()
-                roles#.push(string::from("before"))
-                if opts.context_block && r_idx < num_ring - opts.before_context {
-                    roles#.push(string::from("block"))
-                }
-                auto ev = MatchEvent(
-                    path = string::from(target_path),
-                    line_text = state.ring.lines.borrow(actual_idx).text.clone(),
-                    line_number = r_line_num,
-                    absolute_offset = state.ring.lines.borrow(actual_idx).absolute_offset,
-                    submatches = Vec<SubMatch>::new(),
-                    scope_name = string::from(""),
-                    block_truncated = false,
-                    is_context = true,
+                records#.push(InternedRecord(
+                    kind = string::from("context"),
                     group_id = cur_gid,
-                    context_roles = cede roles
-                )
-                if opts.json_mode {
-                    if opts.json_compact {
-                        batch_payload#.push_str(format_json_context_compact(ev).as_str())
-                    } else {
-                        batch_payload#.push_str(format_json_context(ev).as_str())
-                    }
-                } else {
-                    batch_payload#.push_str(format_human_context(ev, opts, multiple_files).as_str())
-                }
-                if opts.mcp_mode {
-                    auto rec_str = format_mcp_structured_context(ev)
-                    structured_recs#.push(cede rec_str)
-                }
+                    line_number = r_line_num,
+                    absolute_offset = r_line.absolute_offset,
+                    text = r_line.text.clone(),
+                    submatches = Vec<SubMatch>::new(),
+                    scope = Option<string>::None,
+                    block_truncated = false
+                ))
                 state.last_emitted_line_num = r_line_num
             }
             r_idx = r_idx + 1
@@ -226,43 +199,26 @@ fn process_logical_line(
             }
         }
         auto submatch_count = submatches.len()
+        auto sc_opt# = Option<string>::None
+        if scope_name.len() > 0 {
+            sc_opt = Option<string>::Some(string::from(scope_name))
+        }
 
-        auto ev = MatchEvent(
-            path = string::from(target_path),
-            line_text = line.text.clone(),
+        records#.push(InternedRecord(
+            kind = string::from("match"),
+            group_id = cur_gid,
             line_number = line.line_number,
             absolute_offset = line.absolute_offset,
+            text = line.text.clone(),
             submatches = cede submatches,
-            scope_name = string::from(scope_name),
-            block_truncated = false,
-            is_context = false,
-            group_id = cur_gid,
-            context_roles = Vec<string>::new()
-        )
-        if opts.json_mode {
-            if opts.json_compact {
-                batch_payload#.push_str(format_json_match_compact(ev).as_str())
-            } else {
-                batch_payload#.push_str(format_json_match(ev).as_str())
-            }
-        } else {
-            batch_payload#.push_str(format_human_match(ev, opts, multiple_files).as_str())
-        }
-        if opts.mcp_mode {
-            auto rec_str = format_mcp_structured_match(ev)
-            structured_recs#.push(cede rec_str)
-        }
+            scope = cede sc_opt,
+            block_truncated = false
+        ))
 
         // 4. Emit via Writer (Atomic OpeningMatchBatch)
         auto is_first_emitted = !file_has_emitted_match
-        auto batch = OutputBatch(
-            payload_str = cede batch_payload,
-            path = string::from(target_path),
-            line_number = line.line_number,
-            is_payload = true,
-            structured_records = cede structured_recs
-        )
-        auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
+        auto batch = OutputBatch::new(cede records, separator_needed)
+        auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
         match outcome {
             EmitOutcome::Written => {
                 budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
@@ -315,66 +271,32 @@ fn process_logical_line(
         }
 
         if line.line_number > state.last_emitted_line_num {
-            auto roles# = Vec<string>::new()
-            if state.pending_after > 0 {
-                roles#.push(string::from("after"))
-            }
-            roles#.push(string::from("block"))
             auto target_gid = state.current_group_id
-            auto ev = MatchEvent(
-                path = string::from(target_path),
-                line_text = line.text.clone(),
+            auto ctx_recs# = Vec<InternedRecord>::new()
+            ctx_recs#.push(InternedRecord(
+                kind = string::from("context"),
+                group_id = target_gid,
                 line_number = line.line_number,
                 absolute_offset = line.absolute_offset,
+                text = line.text.clone(),
                 submatches = Vec<SubMatch>::new(),
-                scope_name = string::from(""),
-                block_truncated = is_block_truncated,
-                is_context = true,
-                group_id = target_gid,
-                context_roles = cede roles
-            )
-            auto ctx_payload# = string::new()
-            if opts.json_mode {
-                if opts.json_compact {
-                    ctx_payload = format_json_context_compact(ev)
-                } else {
-                    ctx_payload = format_json_context(ev)
+                scope = Option<string>::None,
+                block_truncated = is_block_truncated
+            ))
+            auto batch = OutputBatch::new(cede ctx_recs, false)
+            auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
+            match outcome {
+                EmitOutcome::Written => {
+                    state.last_emitted_line_num = line.line_number
                 }
-            } else {
-                ctx_payload = format_human_context(ev, opts, multiple_files)
-                if is_block_truncated {
-                    ctx_payload#.push_str("[block context truncated by --max-block-lines ")
-                    ctx_payload#.push_str(u64_to_string(opts.max_block_lines as u64).as_str())
-                    ctx_payload#.push_str("]\n")
+                EmitOutcome::Truncated => {
+                    return LineProcessOutcome::Continue
                 }
-            }
-            if ctx_payload.len() > 0 {
-                auto structured_recs# = Vec<string>::new()
-                if opts.mcp_mode {
-                    auto rec_str = format_mcp_structured_context(ev)
-                    structured_recs#.push(cede rec_str)
+                EmitOutcome::BrokenPipe => {
+                    return LineProcessOutcome::BrokenPipe
                 }
-                auto batch = OutputBatch(
-                    payload_str = cede ctx_payload,
-                    path = string::from(target_path),
-                    line_number = line.line_number,
-                    is_payload = true,
-                    structured_records = cede structured_recs
-                )
-                auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
-                match outcome {
-                    EmitOutcome::Written => {
-                        state.last_emitted_line_num = line.line_number
-                    }
-                    EmitOutcome::Truncated => {
-                        return LineProcessOutcome::Continue
-                    }
-                    EmitOutcome::BrokenPipe => {
-                        return LineProcessOutcome::BrokenPipe
-                    }
-                    EmitOutcome::FatalError => {
-                        return LineProcessOutcome::FatalError
-                    }
+                EmitOutcome::FatalError => {
+                    return LineProcessOutcome::FatalError
                 }
             }
         }
@@ -391,58 +313,32 @@ fn process_logical_line(
     // Normal pending after-context line
     if state.pending_after > 0 {
         if line.line_number > state.last_emitted_line_num {
-            auto roles# = Vec<string>::new()
-            roles#.push(string::from("after"))
             auto target_gid = state.current_group_id
-            auto ev = MatchEvent(
-                path = string::from(target_path),
-                line_text = line.text.clone(),
+            auto ctx_recs# = Vec<InternedRecord>::new()
+            ctx_recs#.push(InternedRecord(
+                kind = string::from("context"),
+                group_id = target_gid,
                 line_number = line.line_number,
                 absolute_offset = line.absolute_offset,
+                text = line.text.clone(),
                 submatches = Vec<SubMatch>::new(),
-                scope_name = string::from(""),
-                block_truncated = false,
-                is_context = true,
-                group_id = target_gid,
-                context_roles = cede roles
-            )
-            auto ctx_payload# = string::new()
-            if opts.json_mode {
-                if opts.json_compact {
-                    ctx_payload = format_json_context_compact(ev)
-                } else {
-                    ctx_payload = format_json_context(ev)
+                scope = Option<string>::None,
+                block_truncated = false
+            ))
+            auto batch = OutputBatch::new(cede ctx_recs, false)
+            auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
+            match outcome {
+                EmitOutcome::Written => {
+                    state.last_emitted_line_num = line.line_number
                 }
-            } else {
-                ctx_payload = format_human_context(ev, opts, multiple_files)
-            }
-            if ctx_payload.len() > 0 {
-                auto structured_recs# = Vec<string>::new()
-                if opts.mcp_mode {
-                    auto rec_str = format_mcp_structured_context(ev)
-                    structured_recs#.push(cede rec_str)
+                EmitOutcome::Truncated => {
+                    return LineProcessOutcome::Continue
                 }
-                auto batch = OutputBatch(
-                    payload_str = cede ctx_payload,
-                    path = string::from(target_path),
-                    line_number = line.line_number,
-                    is_payload = true,
-                    structured_records = cede structured_recs
-                )
-                auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
-                match outcome {
-                    EmitOutcome::Written => {
-                        state.last_emitted_line_num = line.line_number
-                    }
-                    EmitOutcome::Truncated => {
-                        return LineProcessOutcome::Continue
-                    }
-                    EmitOutcome::BrokenPipe => {
-                        return LineProcessOutcome::BrokenPipe
-                    }
-                    EmitOutcome::FatalError => {
-                        return LineProcessOutcome::FatalError
-                    }
+                EmitOutcome::BrokenPipe => {
+                    return LineProcessOutcome::BrokenPipe
+                }
+                EmitOutcome::FatalError => {
+                    return LineProcessOutcome::FatalError
                 }
             }
         }
@@ -457,7 +353,7 @@ fn process_logical_line(
             auto old_len = state.ring.lines.borrow(state.ring.head).text.len()
             auto next_bytes = state.ring.bytes - old_len + line.text.len()
             if next_bytes > 67108864:usize {
-                log_scanner_err(target_path, "Maximum before-context memory limit exceeded (64MB limit)")
+                log_scanner_err(resolved_path.display_path.as_str(), "Maximum before-context memory limit exceeded (64MB limit)")
                 return LineProcessOutcome::FatalError
             }
             state.ring.bytes = next_bytes
@@ -468,7 +364,7 @@ fn process_logical_line(
 
         auto next_bytes = state.ring.bytes + line.text.len()
         if next_bytes > 67108864:usize {
-            log_scanner_err(target_path, "Maximum before-context memory limit exceeded (64MB limit)")
+            log_scanner_err(resolved_path.display_path.as_str(), "Maximum before-context memory limit exceeded (64MB limit)")
             return LineProcessOutcome::FatalError
         }
         state.ring.bytes = next_bytes
@@ -483,7 +379,7 @@ fn scan_and_process_line(
     plan: SearchPlan,
     opts: CliOptions,
     context_state#: ContextState,
-    target_path: str,
+    resolved_path: ResolvedPath,
     multiple_files: bool,
     line_text: str,
     line_num: usize,
@@ -496,7 +392,7 @@ fn scan_and_process_line(
     matches_count#: usize,
     has_match#: bool,
     max_count_reached#: bool,
-    writer: OutputBudgetWriter,
+    writer#: OutputBudgetWriter,
     budget_state#: BudgetState,
     frame_state#: FileFrameState,
     file_matched_lines_emitted#: usize,
@@ -559,14 +455,11 @@ fn scan_and_process_line(
 
             if opts.files_with_matches {
                 auto is_first = !file_has_emitted_match
-                auto res_ok = budget_state#.reserve_match(target_path, line_num, is_first)
+                auto res_ok = budget_state#.reserve_match(resolved_path.display_path.as_str(), line_num, is_first)
                 if !res_ok {
                     return LineProcessOutcome::Continue
                 }
-                auto path_line# = string::from(target_path)
-                path_line#.push_str("\n")
-                auto batch = OutputBatch::new_payload(cede path_line, string::from(target_path), line_num)
-                auto outcome = writer.emit_payload(budget_state#, frame_state#, batch)
+                auto outcome = writer#.emit_files_mode_path(budget_state#, resolved_path.display_path.as_str())
                 match outcome {
                     EmitOutcome::Written => {
                         budget_state#.commit_match_emitted(0, is_first)
@@ -604,9 +497,9 @@ fn scan_and_process_line(
             ranges,
             opts,
             context_state#,
-            target_path,
+            resolved_path,
             multiple_files,
-            writer,
+            writer#,
             budget_state#,
             frame_state#,
             file_matched_lines_emitted#,
@@ -624,7 +517,7 @@ pub fn scan_file_stream(
     opts: CliOptions,
     plan: SearchPlan,
     multiple_files: bool,
-    writer: OutputBudgetWriter,
+    writer#: OutputBudgetWriter,
     budget_state#: BudgetState,
     file_state#: FileRunState
 ) -> ScanResult {
@@ -633,7 +526,7 @@ pub fn scan_file_stream(
         opts,
         plan,
         multiple_files,
-        writer,
+        writer#,
         budget_state#,
         ScanPass::All,
         file_state#
@@ -645,7 +538,7 @@ pub fn scan_file_stream_with_pass(
     opts: CliOptions,
     plan: SearchPlan,
     multiple_files: bool,
-    writer: OutputBudgetWriter,
+    writer#: OutputBudgetWriter,
     budget_state#: BudgetState,
     pass_mode: ScanPass,
     file_state#: FileRunState
@@ -655,6 +548,9 @@ pub fn scan_file_stream_with_pass(
         file_state.scanned_unique = true
         budget_state.files_scanned = budget_state.files_scanned + 1
     }
+
+    auto startup_cwd = normalize_cwd(env::current_dir().as_str())
+    auto resolved_path = resolve_path(startup_cwd.as_str(), target_path.as_str(), opts.path_style)
 
     auto is_stdin = target_path.as_str() == "-"
     auto open_path# = target_path.clone()
@@ -677,15 +573,15 @@ pub fn scan_file_stream_with_pass(
             auto err_code = posix_get_errno()
             diagnostics#.push(SearchDiagnostic::new(
                 string::from("open"),
-                Option<string>::Some(target_path.clone()),
+                Option<string>::Some(resolved_path.display_path.clone()),
                 string::from("Permission denied or failed to open file"),
                 Option<i32>::Some(err_code)
             ))
             if !opts.mcp_mode {
-                log_scanner_err(target_path.as_str(), "Permission denied or failed to open file")
+                log_scanner_err(resolved_path.display_path.as_str(), "Permission denied or failed to open file")
             }
             return ScanResult(
-                path = target_path.clone(),
+                path = resolved_path.display_path.clone(),
                 matches_count = 0,
                 has_match = false,
                 is_binary = false,
@@ -701,15 +597,15 @@ pub fn scan_file_stream_with_pass(
             libc_fclose(*file)
             diagnostics#.push(SearchDiagnostic::new(
                 string::from("open"),
-                Option<string>::Some(target_path.clone()),
+                Option<string>::Some(resolved_path.display_path.clone()),
                 string::from("Out of memory allocating chunk buffer"),
                 Option<i32>::None
             ))
             if !opts.mcp_mode {
-                log_scanner_err(target_path.as_str(), "Out of memory allocating chunk buffer")
+                log_scanner_err(resolved_path.display_path.as_str(), "Out of memory allocating chunk buffer")
             }
             return ScanResult(
-                path = target_path.clone(),
+                path = resolved_path.display_path.clone(),
                 matches_count = 0,
                 has_match = false,
                 is_binary = false,
@@ -732,17 +628,18 @@ pub fn scan_file_stream_with_pass(
         auto file_match_observed# = file_state.match_observed
         auto file_has_emitted_match# = file_state.match_emitted
         auto frame_state# = FileFrameState(
-            target_path = target_path.clone(),
-            begin_emitted = false
+            target_path = resolved_path.display_path.clone(),
+            begin_emitted = false,
+            file_changed = false
         )
 
         // If not in budget mode, JSON begins immediately on file open (unless compact)
         if opts.json_mode && !opts.json_compact && !opts.quiet && !opts.budget_limits.is_budget_active() {
-            auto b_res = emit_json_begin(target_path.as_str())
+            auto b_res = emit_json_begin(resolved_path.display_path.as_str())
             if b_res == 1 { is_broken_pipe = true }
             else if b_res == 2 { had_error = true }
             frame_state.begin_emitted = true
-            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + format_json_begin(target_path.as_str()).len()
+            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + format_json_begin(resolved_path.display_path.as_str()).len()
         }
 
         auto family = detect_syntax_family(target_path.as_str())
@@ -819,11 +716,11 @@ pub fn scan_file_stream_with_pass(
                         scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                         outcome = scan_and_process_line(
-                            plan, opts, context_state#, target_path.as_str(), multiple_files,
+                            plan, opts, context_state#, resolved_path, multiple_files,
                             line_text, line_num, abs_offset, delim_len,
                             line_brace_depth, line_indent, scope_tracker, pass_mode,
                             matches_count#, has_match#, max_count_reached#,
-                            writer, budget_state#, frame_state#,
+                            writer#, budget_state#, frame_state#,
                             file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
                         )
                     } else {
@@ -845,11 +742,11 @@ pub fn scan_file_stream_with_pass(
                             scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                             outcome = scan_and_process_line(
-                                plan, opts, context_state#, target_path.as_str(), multiple_files,
+                                plan, opts, context_state#, resolved_path, multiple_files,
                                 line_text, line_num, abs_offset, delim_len,
                                 line_brace_depth, line_indent, scope_tracker, pass_mode,
                                 matches_count#, has_match#, max_count_reached#,
-                                writer, budget_state#, frame_state#,
+                                writer#, budget_state#, frame_state#,
                                 file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
                             )
                         }
@@ -912,11 +809,11 @@ pub fn scan_file_stream_with_pass(
                     scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                     outcome = scan_and_process_line(
-                        plan, opts, context_state#, target_path.as_str(), multiple_files,
+                        plan, opts, context_state#, resolved_path, multiple_files,
                         line_text, line_num, abs_offset, delim_len,
                         line_brace_depth, line_indent, scope_tracker, pass_mode,
                         matches_count#, has_match#, max_count_reached#,
-                        writer, budget_state#, frame_state#,
+                        writer#, budget_state#, frame_state#,
                         file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
                     )
                 }
@@ -939,7 +836,7 @@ pub fn scan_file_stream_with_pass(
             if matches_count > 0 || opts.include_zero {
                 auto out# = string::new()
                 if multiple_files && target_path.as_str() != "-" {
-                    out#.push_str(target_path.as_str())
+                    out#.push_str(resolved_path.display_path.as_str())
                     out#.push_str(":")
                 }
                 auto cnt_str = u64_to_string(matches_count as u64)
@@ -952,10 +849,10 @@ pub fn scan_file_stream_with_pass(
 
         // In JSON mode: emit end event only if begin was emitted (and not in compact mode)
         if opts.json_mode && !opts.json_compact && !opts.quiet && !is_broken_pipe && frame_state.begin_emitted {
-            auto e_res = emit_json_end(target_path.as_str(), file_matched_lines_emitted)
+            auto e_res = emit_json_end(resolved_path.display_path.as_str(), file_matched_lines_emitted)
             if e_res == 1 { is_broken_pipe = true }
             else if e_res == 2 { had_error = true }
-            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + format_json_end(target_path.as_str(), file_matched_lines_emitted).len()
+            budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + format_json_end(resolved_path.display_path.as_str(), file_matched_lines_emitted).len()
         }
 
         libc_free(*buf)
@@ -974,7 +871,7 @@ pub fn scan_file_stream_with_pass(
         }
 
         return ScanResult(
-            path = target_path.clone(),
+            path = resolved_path.display_path.clone(),
             matches_count = ret_matches,
             has_match = has_match,
             is_binary = is_binary,

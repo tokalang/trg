@@ -1,11 +1,12 @@
-import src/types::{OutputFormat}
+import src/types::{OutputFormat, OutputSink}
 import src/posix::{posix_init_signals, print_err}
 import src/cli::{parse_cli_args}
 import src/mcp::{run_mcp_server}
 import src/printer::{
     OutputBudgetWriter,
     EmitOutcome,
-    print_truncation_notice_stderr
+    print_truncation_notice_stderr,
+    FormatConfig
 }
 import src/file_types::{print_type_list}
 import src/executor::{execute_search, finalize_search}
@@ -38,8 +39,9 @@ fn main() -> i32 {
     }
 
     auto format = OutputFormat::from_cli_options(opts)
-    auto writer = OutputBudgetWriter::new(format)
-    auto search_res = execute_search(opts, writer)
+    auto fmt_cfg = FormatConfig::from_options(&opts)
+    auto writer# = OutputBudgetWriter::new_cli(format, OutputSink::Stdout, opts.text_layout, opts.path_style, fmt_cfg)
+    auto search_res = execute_search(opts, writer#)
     if search_res.is_err() {
         print_err(search_res.unwrap_err().message.as_str())
         return 2
@@ -55,7 +57,7 @@ fn main() -> i32 {
         return 0
     }
 
-    auto fin_outcome = finalize_search(opts, writer, report)
+    auto fin_outcome = finalize_search(opts, writer#, report)
     match fin_outcome {
         EmitOutcome::FatalError => { return 2 }
         EmitOutcome::BrokenPipe => {

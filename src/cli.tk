@@ -6,14 +6,14 @@ import sys/libc::{libc_fopen, libc_fread, libc_fclose, libc_malloc, libc_free}
 import std/vec::{Vec}
 import std/env as env
 import std/io::{println}
-import src/types::{CliOptions, GlobRule, CaseMode, SortMode, BudgetLimits}
+import src/types::{CliOptions, GlobRule, CaseMode, SortMode, BudgetLimits, PathStyle, TextLayout}
 import src/glob::{parse_glob_rule}
 import src/file_types::{lookup_type_extensions}
 import src/posix::{posix_ferror}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
 
 pub fn print_help() {
-    println("trg 0.10.0 - Fast, agent-friendly code search tool")
+    println("trg 0.11.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -34,6 +34,8 @@ pub fn print_help() {
     println("  -x, --line-regexp          Only show matches that match the full line")
     println("  -n, --line-number          Show line numbers (1-based)")
     println("  -N, --no-line-number       Suppress line numbers")
+    println("  -H, --with-filename        Print the file path with matched lines")
+    println("  -I, --no-filename          Never print the file path with matched lines")
     println("  -o, --only-matching        Show only the matching part of lines")
     println("  -q, --quiet                Do not print matches; exit 0 on first match, 1 otherwise")
     println("  -l, --files-with-matches   Only print the paths of matching files")
@@ -68,13 +70,16 @@ pub fn print_help() {
     println("      --json                 Output newline-delimited JSONL search events (trg-json-v2)")
     println("      --json=compact         Output streamlined compact JSONL without control frames (alias: --json-compact)")
     println("      --hidden               Search hidden files and directories")
+    println("      --heading              Print path headings above match groups")
+    println("      --no-heading           Print path on each match line (flat format)")
+    println("      --path-style <STYLE>   Path style: as-given, workspace-relative, absolute")
     println("      --                     Treat all remaining arguments as paths/positionals")
     println("  -V, --version              Print version information")
     println("  -h, --help                 Print this help message")
 }
 
 pub fn print_version() {
-    println("trg 0.10.0 (Toka)")
+    println("trg 0.11.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
@@ -291,6 +296,9 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     auto scope# = false
     auto def_first# = false
     auto mcp_mode# = false
+    auto path_style# = PathStyle::AsGiven
+    auto text_layout# = TextLayout::Auto
+    auto with_filename# = Option<bool>::None
     auto globs# = Vec<GlobRule>::new()
     auto include_type_exts# = Vec<string>::new()
     auto exclude_type_exts# = Vec<string>::new()
@@ -797,6 +805,71 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             continue
         }
 
+        if view == "--heading" {
+            text_layout = TextLayout::Grouped
+            i = i + 1
+            continue
+        }
+
+        if view == "--no-heading" {
+            text_layout = TextLayout::Flat
+            i = i + 1
+            continue
+        }
+
+        if view == "-H" || view == "--with-filename" {
+            with_filename = Option<bool>::Some(true)
+            i = i + 1
+            continue
+        }
+
+        if view == "-I" || view == "--no-filename" {
+            with_filename = Option<bool>::Some(false)
+            i = i + 1
+            continue
+        }
+
+        if view == "--path-style" {
+            if i + 1 >= num_args {
+                return Result<CliOptions, string>::Err(string::from("Flag --path-style requires an argument"))
+            }
+            i = i + 1
+            auto &style_arg = args.borrow(i)
+            auto s_view = style_arg.as_str()
+            if s_view == "as-given" {
+                path_style = PathStyle::AsGiven
+            } else if s_view == "workspace-relative" {
+                path_style = PathStyle::WorkspaceRelative
+            } else if s_view == "absolute" {
+                path_style = PathStyle::Absolute
+            } else {
+                auto err# = string::from("Unrecognized path style: '")
+                err#.push_str(s_view)
+                err#.push_str("'. Expected 'as-given', 'workspace-relative', or 'absolute'")
+                return Result<CliOptions, string>::Err(cede err)
+            }
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--path-style=") {
+            auto s_view = view.substr(13:usize, view.len - 13:usize)
+            if s_view == "as-given" {
+                path_style = PathStyle::AsGiven
+            } else if s_view == "workspace-relative" {
+                path_style = PathStyle::WorkspaceRelative
+            } else if s_view == "absolute" {
+                path_style = PathStyle::Absolute
+            } else {
+                auto err# = string::from("Unrecognized path style: '")
+                err#.push_str(s_view)
+                err#.push_str("'. Expected 'as-given', 'workspace-relative', or 'absolute'")
+                return Result<CliOptions, string>::Err(cede err)
+            }
+            i = i + 1
+            continue
+        }
+
         // -t / --type options
         if view == "-t" || view == "--type" {
             if i + 1 >= num_args {
@@ -1135,6 +1208,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
                 else if ch == ('x' as char) { line_regexp = true }
                 else if ch == ('n' as char) { line_number = true }
                 else if ch == ('N' as char) { line_number = false }
+                else if ch == ('H' as char) { with_filename = Option<bool>::Some(true) }
+                else if ch == ('I' as char) { with_filename = Option<bool>::Some(false) }
                 else if ch == ('o' as char) { only_matching = true }
                 else if ch == ('q' as char) { quiet = true }
                 else if ch == ('l' as char) { files_with_matches = true }
@@ -1231,7 +1306,10 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             max_block_lines = 80,
             scope = false,
             def_first = false,
-            mcp_mode = false
+            mcp_mode = false,
+            path_style = PathStyle::AsGiven,
+            text_layout = TextLayout::Auto,
+            with_filename = Option<bool>::None
         ))
     }
 
@@ -1337,6 +1415,9 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         max_block_lines = max_block_lines,
         scope = scope,
         def_first = def_first,
-        mcp_mode = mcp_mode
+        mcp_mode = mcp_mode,
+        path_style = path_style,
+        text_layout = text_layout,
+        with_filename = with_filename
     ))
 }

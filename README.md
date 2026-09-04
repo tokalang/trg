@@ -22,16 +22,24 @@
   - Two-pass streaming search prioritizing symbol declarations/definitions before usages when running under output budgets (`--max-total-matches`, `--max-result-bytes`).
   - **Identifier-Aware Extraction**: Correctly identifies the declared symbol name while skipping modifiers (`pub`, `async`, `export`), declaration keywords (`fn`, `struct`, `class`, `shape`, `type`), generics (`<...>`), and `impl Trait for Target`. Ensures references in parameter or return types are not falsely treated as definitions.
   - Maintains strict $O(1)$ memory streaming per file.
-- **Native Stdio MCP Server (`--mcp`) & Typed Search API (v0.10.0)**:
+- **Presentation Projection & Layout Modes (`--heading`, `--no-heading`, `--path-style`)**:
+  - Independent orthogonal separation of path formatting and output layout.
+  - `--heading`: Group matches under file path headings with blank line separators (default when stdout is an interactive TTY and searching multiple files).
+  - `--no-heading`: Output flat lines prefixed with file path (`path:line:text` / `path-line-text`).
+  - `--path-style <STYLE>`: Control rendered path style (`as-given` [CLI default], `workspace-relative` [MCP default], `absolute`).
+- **Native Stdio MCP Server (`--mcp`) & Canonical Protocol (`trg-mcp-result-v2`)**:
   - Run natively as a Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio for LLMs and agent harnesses (Claude Desktop, Cursor, etc.).
   - Zero external runtimes (no Node.js or Python needed).
   - Strictly isolated memory buffers guarantee stdout is never polluted by raw search text.
-  - **Protocol Version Negotiation**: Fully supports MCP `2024-11-05` (legacy pure content + `_meta`) and `2025-11-25` (canonical `structuredContent` + `outputSchema` + tool annotations).
-  - **Canonical Structured Output (`trg-mcp-result-v1`)**: Exposes complete machine-readable `structuredContent` with exact 1:1 `effective_query` parity (all 18 options reflected), monotonic context clustering (`group_id`), multi-role context (`context_roles`), and structured `errors` with POSIX `errno`.
+  - **Canonical Path Interning Table (`files[]`)**: Deduplicated path table (`id`, `path`, `kind`) eliminates repetitive path string bloating in multi-match results.
+  - **Chronological Execution Segments (`segments[]`)**: Groups interned records into file-scoped segments preserving execution chronology across multi-pass scans (e.g. `--def-first`).
+  - **Interned Record Structure**: Records omit repetitive path fields while preserving exact `line_number`, `absolute_offset`, `text`, `submatches`, `scope`, and `block_truncated`.
+  - **Budget Purity Guarantee**: Switching `text_layout` between `grouped` and `flat` produces 100% identical canonical matches and budgeted bytes.
+  - **Dual-Engine Architecture**:
+    - CLI Streaming: $O(\text{selected\_files} + \text{longest\_line} + \text{context\_buffer})$ render-and-discard memory pipeline that does not scale with emitted match count.
+    - MCP Collecting: Builds structured `files` table and chronological `segments` with preflight canonical evidence budgeting.
   - **Agent-Safe Default Budgets**: Automatically applies default caps (50 matches, 64KiB canonical bytes) to guard LLM contexts against runaway token consumption. Explicit `null` safely overrides budgets for unbounded searches.
-  - **Comprehensive Typed Parameters**: Exposes `mode` (`literal` | `regex`), `match_boundary` (`substring` | `word` | `line`), `case_mode` (`sensitive` | `smart` | `ignore`), `paths[]`, `globs[]`, `types[]`, `sort`, `max_total_matches`, `max_result_bytes`, `max_per_file`, and `max_files_with_matches`.
-  - **Fail-Closed Conflict Matrix**: Stateful `classify_args` parser isolates option families and strictly prevents conflicting overrides between typed properties and pass-through `args` with `-32602 Invalid params`. Forbidden flags (`--files`, `-q`, `-c`, `-l`, `--mcp`, `-h`, `-V`, `--type-list`) are rejected immediately.
-  - **Deterministic Status Footer & Meta**: Appends standard human-readable verification footer `[trg: complete=..., truncated=..., reason=..., matches=..., scanned=..., passes=...]` to `content[0].text` and lightweight `_meta.summary`.
+  - **Comprehensive Typed Parameters**: Exposes `path_style` (`workspace_relative` | `absolute`), `text_layout` (`grouped` | `flat`), `mode`, `match_boundary`, `case_mode`, `paths[]`, `globs[]`, `types[]`, `sort`, `max_total_matches`, `max_result_bytes`, `max_per_file`, and `max_files_with_matches`.
 - **Token-Efficient Compact JSON Mode (`--json=compact` / `--json-compact`)**:
   - Eliminates per-file `begin` and `end` framing events.
   - Emits flat `match` and `context` lines and a single-line `summary` record (`matches_emitted`, `files_emitted`, `files_observed`, `files_scanned`).
@@ -183,12 +191,12 @@ You can also download standalone archives directly from [GitHub Releases](https:
 
 - **macOS (Apple Silicon / arm64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.10.0/trg-v0.10.0-macos-arm64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.11.0/trg-v0.11.0-macos-arm64.tar.gz
   ```
 
 - **Linux (x86_64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.10.0/trg-v0.10.0-linux-x64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.11.0/trg-v0.11.0-linux-x64.tar.gz
   ```
 
 Download `SHA256SUMS` from the same release and verify the archive before

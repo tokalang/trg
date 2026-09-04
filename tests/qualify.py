@@ -5,6 +5,7 @@ import time
 import subprocess
 import pathlib
 import json
+import tempfile
 
 def log(msg):
     print(f"[QUALIFY] {msg}", flush=True)
@@ -153,9 +154,22 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None, raw_mcp=False)
         raise RuntimeError(f"Command failed (exit {res.returncode}): {' '.join(cmd)}\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}")
     return res
 
+def extract_mcp_records(sc):
+    if "segments" in sc:
+        out = []
+        for seg in sc["segments"]:
+            fid = seg["file_id"]
+            p = sc["files"][fid]["path"] if "files" in sc and fid < len(sc["files"]) else ""
+            for r in seg["records"]:
+                item = dict(r)
+                item["path"] = p
+                out.append(item)
+        return out
+    return sc.get("records", [])
+
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.10.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.11.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -174,7 +188,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -201,25 +215,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.10.0 identity on both binaries
+    # Validate exact 0.11.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.10.0 (Toka)", f"Expected 'trg 0.10.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.11.0 (Toka)", f"Expected 'trg 0.11.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.10.0 (Toka)", f"Expected 'trg 0.10.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.11.0 (Toka)", f"Expected 'trg 0.11.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.10.0
-    log("Test 1: Help & Version flags (exact 0.10.0 release identity)")
+    # Test 1: Help & Version exact 0.11.0
+    log("Test 1: Help & Version flags (exact 0.11.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.10.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.11.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.10.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.11.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -769,7 +783,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.10.0" in r_re_ctx.stdout
+    assert "trg 0.11.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -2010,7 +2024,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.10.0"
+        assert resp1["result"]["serverInfo"]["version"] == "0.11.0"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -2603,7 +2617,7 @@ def main():
             (parity_dir / f"item_{idx}.txt").write_text(f"common_entry line {idx} match\nother line\ncommon_entry line {idx} match again\n", encoding="utf-8")
 
         # CLI execution with budget capping and deterministic sort
-        r_cli_p = run_cmd([trg, "--sort", "path", "--max-total-matches=4", "common_entry", str(parity_dir)])
+        r_cli_p = run_cmd([trg, "--path-style=workspace-relative", "--sort", "path", "--max-total-matches=4", "common_entry", str(parity_dir)])
         assert r_cli_p.returncode == 0
         cli_lines = [line for line in r_cli_p.stdout.strip().split("\n") if line.strip()]
 
@@ -2618,7 +2632,8 @@ def main():
                     "pattern": "common_entry",
                     "path": str(parity_dir),
                     "max_total_matches": 4,
-                    "sort": "path"
+                    "sort": "path",
+                    "text_layout": "flat"
                 }
             }
         }) + "\n"
@@ -2730,7 +2745,7 @@ def main():
         }) + "\n")
         res_lit = json.loads(r_lit.stdout.strip())["result"]["structuredContent"]
         assert res_lit["stats"]["matches_emitted"] == 1
-        assert res_lit["records"][0]["text"] == "hello.*world"
+        assert extract_mcp_records(res_lit)[0]["text"] == "hello.*world"
 
         r_reg = run_cmd([trg, "--mcp"], input_data=json.dumps({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -2738,7 +2753,7 @@ def main():
         }) + "\n")
         res_reg = json.loads(r_reg.stdout.strip())["result"]["structuredContent"]
         assert res_reg["stats"]["matches_emitted"] == 1
-        assert res_reg["records"][0]["text"] == "hello world"
+        assert extract_mcp_records(res_reg)[0]["text"] == "hello world"
 
         # 2. case_mode: sensitive vs ignore vs smart
         r_sens = run_cmd([trg, "--mcp"], input_data=json.dumps({
@@ -2747,7 +2762,7 @@ def main():
         }) + "\n")
         res_sens = json.loads(r_sens.stdout.strip())["result"]["structuredContent"]
         assert res_sens["stats"]["matches_emitted"] == 5 # hello world, hello_world, hello, foo hello bar, hello.*world
-        assert all("HELLO" not in rec["text"] for rec in res_sens["records"])
+        assert all("HELLO" not in rec["text"] for rec in extract_mcp_records(res_sens))
 
         r_ign = run_cmd([trg, "--mcp"], input_data=json.dumps({
             "jsonrpc": "2.0", "id": 4, "method": "tools/call",
@@ -2777,7 +2792,7 @@ def main():
         res_word = json.loads(r_word.stdout.strip())["result"]["structuredContent"]
         # Matches: "hello world", "hello", "foo hello bar", "hello.*world" (because '.' is not word char)
         # Does NOT match: "hello_world"
-        word_texts = [rec["text"] for rec in res_word["records"]]
+        word_texts = [rec["text"] for rec in extract_mcp_records(res_word)]
         assert "hello_world" not in word_texts
         assert "hello world" in word_texts
         assert "hello" in word_texts
@@ -2788,7 +2803,7 @@ def main():
         }) + "\n")
         res_line = json.loads(r_line.stdout.strip())["result"]["structuredContent"]
         assert res_line["stats"]["matches_emitted"] == 1
-        assert res_line["records"][0]["text"] == "hello"
+        assert extract_mcp_records(res_line)[0]["text"] == "hello"
 
         # 4. Invalid enums rejection (-32602)
         for bad_prop, val in [("mode", "bad"), ("case_mode", "bad"), ("match_boundary", "bad")]:
@@ -2815,7 +2830,7 @@ def main():
         }) + "\n")
         res_mp = json.loads(r_mp.stdout.strip())["result"]["structuredContent"]
         assert res_mp["stats"]["matches_emitted"] == 2
-        texts = [rec["text"] for rec in res_mp["records"]]
+        texts = [rec["text"] for rec in extract_mcp_records(res_mp)]
         assert "apple pie" in texts
         assert "cherry tart" in texts
         assert "banana split" not in texts
@@ -2873,7 +2888,7 @@ def main():
         }) + "\n")
         res_paths = json.loads(r_paths.stdout.strip())["result"]["structuredContent"]
         assert res_paths["stats"]["matches_emitted"] == 2
-        p_texts = [rec["path"] for rec in res_paths["records"]]
+        p_texts = [rec["path"] for rec in extract_mcp_records(res_paths)]
         assert any("dir1" in p for p in p_texts)
         assert any("dir2" in p for p in p_texts)
 
@@ -2912,7 +2927,7 @@ def main():
             "params": {"name": "trg_search", "arguments": {"pattern": "match_var", "types": ["py", "tk"], "path": str(t105_dir)}}
         }) + "\n")
         res_types = json.loads(r_types.stdout.strip())["result"]["structuredContent"]
-        exts = [rec["path"].split(".")[-1] for rec in res_types["records"]]
+        exts = [rec["path"].split(".")[-1] for rec in extract_mcp_records(res_types)]
         assert "py" in exts and "tk" in exts
         assert "rs" not in exts
 
@@ -2923,7 +2938,7 @@ def main():
         }) + "\n")
         res_globs = json.loads(r_globs.stdout.strip())["result"]["structuredContent"]
         assert res_globs["stats"]["matches_emitted"] == 1
-        assert "one.py" in res_globs["records"][0]["path"]
+        assert "one.py" in extract_mcp_records(res_globs)[0]["path"]
 
         # 3. Conflicts
         r_t_conf = run_cmd([trg, "--mcp"], input_data=json.dumps({
@@ -3055,7 +3070,7 @@ def main():
         assert meta_byte["truncated"] is True
 
         # Atomic batch preflight verification: every context record belongs to an emitted match
-        recs = sc_2025["records"]
+        recs = extract_mcp_records(sc_2025)
         match_group_ids = {r["group_id"] for r in recs if r["kind"] == "match"}
         ctx_group_ids = {r["group_id"] for r in recs if r["kind"] == "context"}
         assert ctx_group_ids.issubset(match_group_ids), "Orphaned context records detected without corresponding match!"
@@ -3115,14 +3130,16 @@ def main():
             "jsonrpc": "2.0", "id": 26, "method": "tools/call",
             "params": {"name": "trg_search", "arguments": {"pattern": "HIT", "path": str(t108_dir), "sort": "path", "max_per_file": 1}}
         }) + "\n")
-        files_asc = [r["path"] for r in json.loads(r_sort_asc.stdout.strip())["result"]["structuredContent"]["records"]]
+        sc_asc = json.loads(r_sort_asc.stdout.strip())["result"]["structuredContent"]
+        files_asc = [sc_asc["files"][seg["file_id"]]["path"] for seg in sc_asc["segments"]]
         assert "a_file.txt" in files_asc[0] and "c_file.txt" in files_asc[2]
 
         r_sort_desc = run_cmd([trg, "--mcp"], input_data=json.dumps({
             "jsonrpc": "2.0", "id": 27, "method": "tools/call",
             "params": {"name": "trg_search", "arguments": {"pattern": "HIT", "path": str(t108_dir), "sort": "reverse_path", "max_per_file": 1}}
         }) + "\n")
-        files_desc = [r["path"] for r in json.loads(r_sort_desc.stdout.strip())["result"]["structuredContent"]["records"]]
+        sc_desc = json.loads(r_sort_desc.stdout.strip())["result"]["structuredContent"]
+        files_desc = [sc_desc["files"][seg["file_id"]]["path"] for seg in sc_desc["segments"]]
         assert "c_file.txt" in files_desc[0] and "a_file.txt" in files_desc[2]
     finally:
         if t108_dir.exists():
@@ -3211,7 +3228,7 @@ def main():
             "params": {"name": "trg_search", "arguments": {"pattern": "magic_var", "path": str(t111_dir), "block": False}}
         }) + "\n")
         res_bf = json.loads(r_bf.stdout.strip())["result"]["structuredContent"]
-        assert len(res_bf["records"]) == 1 # Only the match record, no block context records
+        assert len(extract_mcp_records(res_bf)) == 1 # Only the match record, no block context records
         assert res_bf["effective_query"]["block"] is False
         assert res_bf["effective_query"]["max_block_lines"] is None
 
@@ -3407,9 +3424,14 @@ def main():
     search_tool = next(t for t in tools if t["name"] == "trg_search")
     assert "outputSchema" in search_tool
     out_schema = search_tool["outputSchema"]
+    assert "outputSchema" in search_tool
+    out_schema = search_tool["outputSchema"]
     assert out_schema["type"] == "object"
     assert "effective_query" in out_schema["properties"]
-    assert "records" in out_schema["properties"]
+    assert "files" in out_schema["properties"]
+    assert "segments" in out_schema["properties"]
+    assert "projection" in out_schema["properties"]
+    assert "path_base" in out_schema["properties"]
 
     # Structural schema validator for structuredContent
     t112_dir = fixtures_dir / "test_t112"
@@ -3423,7 +3445,7 @@ def main():
         sc = json.loads(r_sc_val.stdout.strip())["result"]["structuredContent"]
 
         # 1. Top-level contract
-        assert sc["schema"] == "trg-mcp-result-v1"
+        assert sc["schema"] == "trg-mcp-result-v2"
         assert isinstance(sc["complete"], bool)
         assert isinstance(sc["truncated"], bool)
         assert sc["termination_reason"] in ["completed", "max_total_matches", "max_result_bytes", "max_files_with_matches", "search_error"]
@@ -3447,35 +3469,58 @@ def main():
         assert eq["scope"] is True
         assert isinstance(eq["def_first"], bool)
 
-        # 3. limits validation
+        # 3. projection validation
+        proj = sc["projection"]
+        assert proj["path_style"] in ["as_given", "workspace_relative", "absolute"]
+        assert proj["text_layout"] in ["grouped", "flat"]
+
+        # 4. path_base validation
+        pb = sc["path_base"]
+        assert pb["kind"] == "cwd"
+        assert isinstance(pb["path"], str)
+
+        # 5. files table validation
+        assert isinstance(sc["files"], list)
+        assert len(sc["files"]) >= 1
+        for fe in sc["files"]:
+            assert isinstance(fe["id"], int) and fe["id"] >= 0
+            assert isinstance(fe["path"], str)
+            assert fe["kind"] in ["workspace_relative", "absolute", "stdin"]
+
+        # 6. segments validation
+        assert isinstance(sc["segments"], list)
+        assert len(sc["segments"]) >= 1
+        for seg in sc["segments"]:
+            assert isinstance(seg["file_id"], int) and seg["file_id"] >= 0
+            assert isinstance(seg["records"], list)
+            for rec in seg["records"]:
+                assert rec["kind"] in ["match", "context"]
+                assert isinstance(rec["group_id"], int)
+                assert "path" not in rec, "Interned records must not duplicate file path"
+                assert isinstance(rec["line_number"], int) and rec["line_number"] >= 1
+                assert isinstance(rec["absolute_offset"], int)
+                assert isinstance(rec["text"], str)
+                if rec["kind"] == "match":
+                    assert isinstance(rec["submatches"], list)
+                    for sm in rec["submatches"]:
+                        assert isinstance(sm["match_text"], str)
+                        assert isinstance(sm["start"], int) and isinstance(sm["end"], int)
+                elif rec["kind"] == "context":
+                    assert "context_roles" not in rec
+
+        # 7. limits validation
         lim = sc["limits"]
         assert "max_total_matches" in lim
         assert "max_result_bytes" in lim
         assert "max_per_file" in lim
         assert "max_files_with_matches" in lim
 
-        # 4. stats validation (9 numeric fields)
+        # 8. stats validation (9 numeric fields)
         st = sc["stats"]
         for k in ["matches_emitted", "matches_observed", "files_scanned", "files_with_match_observed", "files_with_match_emitted", "file_scan_passes", "text_record_bytes_emitted", "structured_record_bytes_emitted", "budgeted_record_bytes_emitted"]:
             assert isinstance(st[k], int) and st[k] >= 0
 
-        # 5. records validation
-        for rec in sc["records"]:
-            assert rec["kind"] in ["match", "context"]
-            assert isinstance(rec["group_id"], int)
-            assert isinstance(rec["path"], str)
-            assert isinstance(rec["line_number"], int) and rec["line_number"] >= 1
-            assert isinstance(rec["absolute_offset"], int)
-            assert isinstance(rec["text"], str)
-            if rec["kind"] == "match":
-                assert isinstance(rec["submatches"], list)
-                for sm in rec["submatches"]:
-                    assert isinstance(sm["match_text"], str)
-                    assert isinstance(sm["start"], int) and isinstance(sm["end"], int)
-            elif rec["kind"] == "context":
-                assert "context_roles" not in rec, "context_roles must not be present in structured context records"
-
-        # 6. Live recursive JSON Schema validation against advertised outputSchema
+        # 9. Live recursive JSON Schema validation against advertised outputSchema
         validate_json_schema(sc, out_schema)
     finally:
         if t112_dir.exists():
@@ -3646,7 +3691,8 @@ print(json.dumps({{"rss_mb": rss_mb, "stdout": call_out}}))
         # Verify mathematical consistency across channels & bounded records
         assert sc_scale["stats"]["matches_emitted"] == 50
         assert summary_scale["matches_emitted"] == 50
-        assert len(sc_scale["records"]) == 50
+        total_scale_records = sum(len(seg["records"]) for seg in sc_scale["segments"])
+        assert total_scale_records == 50
         assert sc_scale["complete"] is False
         assert sc_scale["truncated"] is True
         assert summary_scale["complete"] is False
@@ -3656,8 +3702,256 @@ print(json.dumps({{"rss_mb": rss_mb, "stdout": call_out}}))
         if t115_dir.exists():
             shutil.rmtree(t115_dir)
 
+    # Test 116: CLI Heading vs No-Heading layout and separator semantics
+    log("Test 116: CLI Heading vs No-Heading layout and separator semantics")
+    t116_dir = fixtures_dir / "test_t116"
+    try:
+        t116_dir.mkdir(parents=True, exist_ok=True)
+        (t116_dir / "f1.txt").write_text("alpha\nHIT_ONE\nbeta\n", encoding="utf-8")
+        (t116_dir / "f2.txt").write_text("gamma\nHIT_TWO\ndelta\n", encoding="utf-8")
+
+        # Heading mode: filename on heading line, line:text below, empty line separator between files
+        r_head = run_cmd([trg, "--heading", "HIT", str(t116_dir / "f1.txt"), str(t116_dir / "f2.txt")])
+        assert r_head.returncode == 0
+        head_lines = r_head.stdout.strip().split("\n")
+        assert head_lines[0].endswith("f1.txt")
+        assert head_lines[1] == "2:HIT_ONE"
+        assert "" in head_lines, "Grouped layout must separate file groups with blank line"
+
+        # No-heading mode: path:line:text
+        r_nohead = run_cmd([trg, "--no-heading", "HIT", str(t116_dir / "f1.txt"), str(t116_dir / "f2.txt")])
+        assert r_nohead.returncode == 0
+        nohead_lines = r_nohead.stdout.strip().split("\n")
+        assert any("f1.txt:2:HIT_ONE" in l for l in nohead_lines)
+        assert any("f2.txt:2:HIT_TWO" in l for l in nohead_lines)
+        assert all(":" in l for l in nohead_lines)
+
+        # Context lines separator: -- only within segment for heading mode
+        (t116_dir / "f3.txt").write_text("line1\nHIT_A\nline3\nline4\nline5\nHIT_B\nline7\n", encoding="utf-8")
+        r_ctx_head = run_cmd([trg, "--heading", "-C", "1", "HIT", str(t116_dir / "f3.txt")])
+        assert "--" in r_ctx_head.stdout
+    finally:
+        if t116_dir.exists():
+            shutil.rmtree(t116_dir)
+
+    # Test 117: Path Style CLI (--path-style=as-given, workspace-relative, absolute)
+    log("Test 117: Path Style CLI (--path-style=as-given, workspace-relative, absolute)")
+    t117_dir = fixtures_dir / "test_t117"
+    try:
+        t117_dir.mkdir(parents=True, exist_ok=True)
+        sub_dir = t117_dir / "sub"
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        test_file = sub_dir / "target.txt"
+        test_file.write_text("TARGET_CONTENT\n", encoding="utf-8")
+
+        # 1. as-given
+        rel_arg = os.path.relpath(str(test_file), str(repo_root))
+        r_given = run_cmd([trg, "-H", "--no-heading", "--path-style=as-given", "TARGET_CONTENT", rel_arg], cwd=str(repo_root))
+        assert r_given.stdout.startswith(rel_arg), f"Expected prefix {rel_arg}, got {r_given.stdout}"
+
+        # 2. absolute
+        r_abs = run_cmd([trg, "-H", "--no-heading", "--path-style=absolute", "TARGET_CONTENT", rel_arg], cwd=str(repo_root))
+        assert r_abs.stdout.startswith(str(test_file)), f"Expected absolute path {test_file}, got {r_abs.stdout}"
+
+        # 3. workspace-relative with absolute argument inside workspace
+        r_rel = run_cmd([trg, "-H", "--no-heading", "--path-style=workspace-relative", "TARGET_CONTENT", str(test_file)], cwd=str(repo_root))
+        assert r_rel.stdout.startswith(rel_arg), f"Expected relative path {rel_arg}, got {r_rel.stdout}"
+
+        # 4. outside workspace falls back to absolute
+        with tempfile.TemporaryDirectory() as tmp_out:
+            out_file = pathlib.Path(tmp_out) / "out.txt"
+            out_file.write_text("TARGET_CONTENT\n", encoding="utf-8")
+            r_out = run_cmd([trg, "-H", "--no-heading", "--path-style=workspace-relative", "TARGET_CONTENT", str(out_file)], cwd=str(repo_root))
+            assert r_out.stdout.startswith(str(out_file)), f"Outside workspace path must remain absolute: {r_out.stdout}"
+
+        # 5. -I (--no-filename) suppresses filename even with multiple files
+        r_no_fn = run_cmd([trg, "-I", "--no-heading", "TARGET_CONTENT", rel_arg, str(test_file)], cwd=str(repo_root))
+        assert r_no_fn.returncode == 0
+        assert not r_no_fn.stdout.startswith(rel_arg)
+        assert "TARGET_CONTENT" in r_no_fn.stdout
+    finally:
+        if t117_dir.exists():
+            shutil.rmtree(t117_dir)
+
+    # Test 118: MCP Canonical trg-mcp-result-v2 path interning table (files[]) & segments
+    log("Test 118: MCP Canonical trg-mcp-result-v2 path interning table & segments")
+    t118_dir = fixtures_dir / "test_t118"
+    try:
+        t118_dir.mkdir(parents=True, exist_ok=True)
+        (t118_dir / "doc1.txt").write_text("ALPHA_SYM 1\nALPHA_SYM 2\n", encoding="utf-8")
+        (t118_dir / "doc2.txt").write_text("ALPHA_SYM 3\n", encoding="utf-8")
+
+        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
+        notif_req = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        call_req = json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "ALPHA_SYM", "paths": [str(t118_dir / "doc1.txt"), str(t118_dir / "doc2.txt")], "sort": "path"}}
+        }) + "\n"
+
+        r_mcp_v2 = run_cmd([trg, "--mcp"], input_data=init_req + notif_req + call_req)
+        resps = [json.loads(l) for l in r_mcp_v2.stdout.strip().split("\n") if l]
+        sc_v2 = resps[1]["result"]["structuredContent"]
+
+        assert sc_v2["schema"] == "trg-mcp-result-v2"
+        # files[] deduplication
+        assert len(sc_v2["files"]) == 2
+        assert sc_v2["files"][0]["id"] == 0
+        assert sc_v2["files"][1]["id"] == 1
+
+        # segments[] mapping
+        assert len(sc_v2["segments"]) == 2
+        assert sc_v2["segments"][0]["file_id"] == 0
+        assert len(sc_v2["segments"][0]["records"]) == 2
+        assert sc_v2["segments"][1]["file_id"] == 1
+        assert len(sc_v2["segments"][1]["records"]) == 1
+
+        # Records do not repeat path
+        for seg in sc_v2["segments"]:
+            for r in seg["records"]:
+                assert "path" not in r
+                assert r["kind"] == "match"
+    finally:
+        if t118_dir.exists():
+            shutil.rmtree(t118_dir)
+
+    # Test 119: Grouped vs Flat Canonical Budget Purity
+    log("Test 119: Grouped vs Flat Canonical Budget Purity")
+    t119_dir = fixtures_dir / "test_t119"
+    try:
+        t119_dir.mkdir(parents=True, exist_ok=True)
+        (t119_dir / "code.txt").write_text("test_marker_one\ntest_marker_two\ntest_marker_three\n", encoding="utf-8")
+
+        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
+        notif_req = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+
+        call_grp = json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "test_marker", "path": str(t119_dir), "text_layout": "grouped", "max_result_bytes": "64K"}}
+        }) + "\n"
+        r_grp = run_cmd([trg, "--mcp"], input_data=init_req + notif_req + call_grp)
+        sc_grp = json.loads(r_grp.stdout.strip().split("\n")[1])["result"]["structuredContent"]
+
+        call_flt = json.dumps({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "test_marker", "path": str(t119_dir), "text_layout": "flat", "max_result_bytes": "64K"}}
+        }) + "\n"
+        r_flt = run_cmd([trg, "--mcp"], input_data=init_req + notif_req + call_flt)
+        sc_flt = json.loads(r_flt.stdout.strip().split("\n")[1])["result"]["structuredContent"]
+
+        # Canonical evidence must be 100% identical regardless of text presentation layout
+        assert sc_grp["stats"]["matches_emitted"] == sc_flt["stats"]["matches_emitted"]
+        assert sc_grp["stats"]["budgeted_record_bytes_emitted"] == sc_flt["stats"]["budgeted_record_bytes_emitted"]
+        assert sc_grp["stats"]["structured_record_bytes_emitted"] == sc_flt["stats"]["structured_record_bytes_emitted"]
+        assert sc_grp["segments"] == sc_flt["segments"]
+        assert sc_grp["files"] == sc_flt["files"]
+        # Projection layout metadata properly recorded
+        assert sc_grp["projection"]["text_layout"] == "grouped"
+        assert sc_flt["projection"]["text_layout"] == "flat"
+    finally:
+        if t119_dir.exists():
+            shutil.rmtree(t119_dir)
+
+    # Test 120: Two-Pass --def-first Segment Separation
+    log("Test 120: Two-Pass --def-first Segment Separation")
+    t120_dir = fixtures_dir / "test_t120"
+    try:
+        t120_dir.mkdir(parents=True, exist_ok=True)
+        # In a single file: definition and usages
+        code_content = (
+            "auto usage1 = MySymbol();\n"
+            "auto usage2 = MySymbol();\n"
+            "fn MySymbol() -> i32 { return 0; }\n"
+        )
+        (t120_dir / "symbol.tk").write_text(code_content, encoding="utf-8")
+
+        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
+        notif_req = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        call_df = json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "MySymbol", "path": str(t120_dir), "def_first": True}}
+        }) + "\n"
+        r_df = run_cmd([trg, "--mcp"], input_data=init_req + notif_req + call_df)
+        sc_df = json.loads(r_df.stdout.strip().split("\n")[1])["result"]["structuredContent"]
+
+        # Only one file entry in path table
+        assert len(sc_df["files"]) == 1
+        assert sc_df["files"][0]["id"] == 0
+
+        # But two distinct chronological execution segments for Pass 1 (definitions) and Pass 2 (usages)
+        assert len(sc_df["segments"]) == 2
+        assert sc_df["segments"][0]["file_id"] == 0
+        assert sc_df["segments"][1]["file_id"] == 0
+        # Pass 1 contains definition (line 3)
+        assert sc_df["segments"][0]["records"][0]["line_number"] == 3
+        # Pass 2 contains usages (lines 1, 2)
+        assert sc_df["segments"][1]["records"][0]["line_number"] == 1
+        assert sc_df["segments"][1]["records"][1]["line_number"] == 2
+    finally:
+        if t120_dir.exists():
+            shutil.rmtree(t120_dir)
+
+    # Test 121: Atomic OpeningMatchBatch Rollback on Canonical Byte Cutoff
+    log("Test 121: Atomic OpeningMatchBatch Rollback on Canonical Byte Cutoff")
+    t121_dir = fixtures_dir / "test_t121"
+    try:
+        t121_dir.mkdir(parents=True, exist_ok=True)
+        (t121_dir / "f1.txt").write_text("MATCH_FIRST\n", encoding="utf-8")
+        (t121_dir / "f2.txt").write_text("MATCH_SECOND\n", encoding="utf-8")
+
+        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
+        notif_req = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+
+        # First probe the exact bytes needed for f1
+        call_probe = json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "MATCH_", "path": str(t121_dir / "f1.txt"), "max_total_matches": None, "max_result_bytes": None}}
+        }) + "\n"
+        r_probe = run_cmd([trg, "--mcp"], input_data=init_req + notif_req + call_probe)
+        sc_probe = json.loads(r_probe.stdout.strip().split("\n")[1])["result"]["structuredContent"]
+        f1_bytes = sc_probe["stats"]["budgeted_record_bytes_emitted"]
+
+        # Budget allows f1 but rejects f2
+        budget_cutoff = f1_bytes + 20
+        call_cut = json.dumps({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"pattern": "MATCH_", "path": str(t121_dir), "sort": "path", "max_total_matches": None, "max_result_bytes": budget_cutoff}}
+        }) + "\n"
+        r_cut = run_cmd([trg, "--mcp"], input_data=init_req + notif_req + call_cut)
+        sc_cut = json.loads(r_cut.stdout.strip().split("\n")[1])["result"]["structuredContent"]
+
+        assert sc_cut["truncated"] is True
+        assert sc_cut["termination_reason"] == "max_result_bytes"
+        assert sc_cut["stats"]["matches_emitted"] == 1
+        # Crucial check: f2 was rolled back atomically, so files[] has only 1 file and segments[] has only 1 segment
+        assert len(sc_cut["files"]) == 1
+        assert "f1.txt" in sc_cut["files"][0]["path"]
+        assert len(sc_cut["segments"]) == 1
+        assert len(sc_cut["segments"][0]["records"]) == 1
+    finally:
+        if t121_dir.exists():
+            shutil.rmtree(t121_dir)
+
+    # Test 122: CLI Stream Render-and-Discard Memory Safety
+    log("Test 122: CLI Stream Render-and-Discard Memory Safety")
+    t122_dir = fixtures_dir / "test_t122"
+    try:
+        t122_dir.mkdir(parents=True, exist_ok=True)
+        # Create 50 files each with 200 matches = 10,000 matches total
+        for i in range(50):
+            lines = [f"MATCH_STREAM line {j} content payload {i}" for j in range(200)]
+            (t122_dir / f"stream_{i:02d}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        # Run CLI search piping through cat to /dev/null
+        cmd = f"{trg} --no-heading 'MATCH_STREAM' '{t122_dir}' | wc -l"
+        p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        assert p.returncode == 0
+        assert "10000" in p.stdout.strip()
+    finally:
+        if t122_dir.exists():
+            shutil.rmtree(t122_dir)
+
     log("=" * 60)
-    log("ALL 115 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.10.0)!")
+    log("ALL 122 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.11.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":
