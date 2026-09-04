@@ -26,24 +26,27 @@ pub shape OutputBatch (
 
 pub shape OutputBudgetWriter (
     is_json_mode: bool,
+    is_json_compact: bool,
     is_budget_active: bool,
     is_memory_sink: bool,
     memory_buffer#: Vec<string>
 )
 
 impl OutputBudgetWriter {
-    pub fn new(is_json_mode: bool, is_budget_active: bool) -> OutputBudgetWriter {
+    pub fn new(is_json_mode: bool, is_json_compact: bool, is_budget_active: bool) -> OutputBudgetWriter {
         return OutputBudgetWriter(
             is_json_mode = is_json_mode,
+            is_json_compact = is_json_compact,
             is_budget_active = is_budget_active,
             is_memory_sink = false,
             memory_buffer = Vec<string>::new()
         )
     }
 
-    pub fn new_memory(is_json_mode: bool, is_budget_active: bool) -> OutputBudgetWriter {
+    pub fn new_memory(is_json_mode: bool, is_json_compact: bool, is_budget_active: bool) -> OutputBudgetWriter {
         return OutputBudgetWriter(
             is_json_mode = is_json_mode,
+            is_json_compact = is_json_compact,
             is_budget_active = is_budget_active,
             is_memory_sink = true,
             memory_buffer = Vec<string>::new()
@@ -75,7 +78,7 @@ impl OutputBudgetWriter {
         }
 
         // Lazy JSON begin framing: write begin first, and on success immediately set begin_emitted = true
-        if self.is_json_mode && !frame_state.begin_emitted {
+        if self.is_json_mode && !self.is_json_compact && !frame_state.begin_emitted {
             auto b_str = format_json_begin(frame_state.target_path.as_str())
             if self.is_memory_sink {
                 self.memory_buffer#.push(b_str.clone())
@@ -260,8 +263,51 @@ pub fn format_json_context(ev: MatchEvent) -> string {
     ctx_json#.push_str(",\"absolute_offset\":")
     auto abs_str = u64_to_string(ev.absolute_offset as u64)
     ctx_json#.push_str(abs_str.as_str())
-    ctx_json#.push_str(",\"submatches\":[]}}\n")
+    if ev.block_truncated {
+        ctx_json#.push_str(",\"submatches\":[],\"block_truncated\":true}}\n")
+    } else {
+        ctx_json#.push_str(",\"submatches\":[]}}\n")
+    }
     return cede ctx_json
+}
+
+pub fn format_json_match_compact(ev: MatchEvent) -> string {
+    auto esc_path = json_escape(ev.path.as_str())
+    auto res# = string::from("{\"type\":\"match\",\"path\":\"")
+    res#.push_str(esc_path.as_str())
+    res#.push_str("\",\"line\":")
+    auto lnum_str = u64_to_string(ev.line_number as u64)
+    res#.push_str(lnum_str.as_str())
+    res#.push_str(",\"text\":\"")
+    auto esc_line = json_escape(ev.line_text.as_str())
+    res#.push_str(esc_line.as_str())
+    res#.push_str("\\n\"")
+    if ev.scope_name.len() > 0 {
+        res#.push_str(",\"scope\":\"")
+        auto esc_scope = json_escape(ev.scope_name.as_str())
+        res#.push_str(esc_scope.as_str())
+        res#.push_str("\"")
+    }
+    res#.push_str("}\n")
+    return cede res
+}
+
+pub fn format_json_context_compact(ev: MatchEvent) -> string {
+    auto esc_path = json_escape(ev.path.as_str())
+    auto res# = string::from("{\"type\":\"context\",\"path\":\"")
+    res#.push_str(esc_path.as_str())
+    res#.push_str("\",\"line\":")
+    auto lnum_str = u64_to_string(ev.line_number as u64)
+    res#.push_str(lnum_str.as_str())
+    res#.push_str(",\"text\":\"")
+    auto esc_line = json_escape(ev.line_text.as_str())
+    res#.push_str(esc_line.as_str())
+    res#.push_str("\\n\"")
+    if ev.block_truncated {
+        res#.push_str(",\"block_truncated\":true")
+    }
+    res#.push_str("}\n")
+    return cede res
 }
 
 pub fn format_json_end(path: str, matches_emitted: usize) -> string {
@@ -414,6 +460,8 @@ fn format_summary_json_raw(
     if is_trunc { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str(",\"had_error\":")
     if had_error { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"block_truncated\":")
+    if budget_state.block_contexts_truncated > 0 { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str(",\"termination_reason\":\"")
     s#.push_str(term_reason.as_str())
     s#.push_str("\",\"limits\":{\"max_total_matches\":")
@@ -460,6 +508,8 @@ fn format_summary_json_raw(
     s#.push_str(u64_to_string(stats.files_with_match as u64).as_str())
     s#.push_str(",\"matches\":")
     s#.push_str(u64_to_string(stats.total_matches as u64).as_str())
+    s#.push_str(",\"block_contexts_truncated\":")
+    s#.push_str(u64_to_string(budget_state.block_contexts_truncated as u64).as_str())
     s#.push_str("},\"stopped_at\":")
     if is_trunc && budget_state.stopped_path.len() > 0 {
         s#.push_str("{\"path\":\"")
@@ -472,6 +522,37 @@ fn format_summary_json_raw(
         s#.push_str("null")
     }
     s#.push_str("}}\n")
+    return cede s
+}
+
+pub fn format_summary_json_compact(
+    stats: GlobalStats,
+    budget_state: BudgetState,
+    had_error: bool
+) -> string {
+    auto is_trunc = budget_state.is_truncated
+    auto is_comp = !is_trunc && !had_error
+    auto term_reason# = string::from("completed")
+    if is_trunc {
+        term_reason = budget_state.truncation_reason.clone()
+    } else if had_error {
+        term_reason = string::from("search_error")
+    }
+    auto s# = string::from("{\"type\":\"summary\",\"complete\":")
+    if is_comp { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"truncated\":")
+    if is_trunc { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"had_error\":")
+    if had_error { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"reason\":\"")
+    s#.push_str(term_reason.as_str())
+    s#.push_str("\",\"matches\":")
+    s#.push_str(u64_to_string(stats.total_matches as u64).as_str())
+    s#.push_str(",\"files\":")
+    s#.push_str(u64_to_string(stats.files_with_match as u64).as_str())
+    s#.push_str(",\"block_truncated\":")
+    if budget_state.block_contexts_truncated > 0 { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str("}\n")
     return cede s
 }
 

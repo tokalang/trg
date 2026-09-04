@@ -15,6 +15,8 @@ import src/printer::{
     OutputBatch,
     EmitOutcome,
     format_summary_json,
+    format_summary_json_compact,
+    u64_to_string,
     json_escape
 }
 
@@ -167,6 +169,54 @@ fn extract_json_string_array(json: str, key: str) -> Vec<string> {
     return cede res
 }
 
+fn extract_json_bool(json: str, key: str) -> Option<bool> {
+    auto pos_opt = find_json_key(json, key)
+    if pos_opt.is_none() {
+        return Option<bool>::None
+    }
+    auto pos = pos_opt.unwrap()
+    if pos + 4 <= json.len && json.substr(pos, 4:usize) == "true" {
+        return Option<bool>::Some(true)
+    }
+    if pos + 5 <= json.len && json.substr(pos, 5:usize) == "false" {
+        return Option<bool>::Some(false)
+    }
+    return Option<bool>::None
+}
+
+fn extract_json_usize(json: str, key: str) -> Option<usize> {
+    auto pos_opt = find_json_key(json, key)
+    if pos_opt.is_none() {
+        return Option<usize>::None
+    }
+    auto pos# = pos_opt.unwrap()
+    auto num# = 0:usize
+    auto found_digit# = false
+    loop pos < json.len {
+        auto ch = json.byte_at(pos)
+        if ch >= ('0' as char) && ch <= ('9' as char) {
+            found_digit = true
+            num = num * 10 + ((ch as usize) - ('0' as usize))
+        } else {
+            break
+        }
+        pos = pos + 1
+    }
+    if found_digit {
+        return Option<usize>::Some(num)
+    }
+    return Option<usize>::None
+}
+
+pub shape McpSearchResult (
+    output_text: string,
+    complete: bool,
+    truncated: bool,
+    termination_reason: string,
+    matches_emitted: usize,
+    files_scanned: usize
+)
+
 fn join_memory_buffer(buf: Vec<string>) -> string {
     auto res# = string::new()
     auto i# = 0:usize
@@ -178,10 +228,10 @@ fn join_memory_buffer(buf: Vec<string>) -> string {
     return cede res
 }
 
-pub fn run_search_to_memory(opts: CliOptions) -> Result<string, string> {
+pub fn run_search_to_memory(opts: CliOptions) -> Result<McpSearchResult, string> {
     auto plan_res = SearchPlan::create(opts)
     if !opts.files_mode && plan_res.is_err() {
-        return Result<string, string>::Err(plan_res.unwrap_err())
+        return Result<McpSearchResult, string>::Err(plan_res.unwrap_err())
     }
 
     auto walk_res = collect_search_targets(opts)
@@ -191,7 +241,7 @@ pub fn run_search_to_memory(opts: CliOptions) -> Result<string, string> {
 
     auto budget_state# = BudgetState::new(opts.budget_limits)
     budget_state.files_selected = num_files
-    auto writer = OutputBudgetWriter::new_memory(opts.json_mode, opts.budget_limits.is_budget_active())
+    auto writer = OutputBudgetWriter::new_memory(opts.json_mode, opts.json_compact, opts.budget_limits.is_budget_active())
 
     if opts.files_mode {
         auto f_idx# = 0:usize
@@ -207,11 +257,26 @@ pub fn run_search_to_memory(opts: CliOptions) -> Result<string, string> {
                 EmitOutcome::Written => {}
                 EmitOutcome::Truncated => { break }
                 EmitOutcome::BrokenPipe => { break }
-                EmitOutcome::FatalError => { return Result<string, string>::Err(string::from("Write error")) }
+                EmitOutcome::FatalError => { return Result<McpSearchResult, string>::Err(string::from("Write error")) }
             }
             f_idx = f_idx + 1
         }
-        return Result<string, string>::Ok(join_memory_buffer(writer.memory_buffer))
+        auto is_trunc = budget_state.is_truncated
+        auto is_comp = !is_trunc && !global_had_error
+        auto term_reason# = string::from("completed")
+        if is_trunc {
+            term_reason = budget_state.truncation_reason.clone()
+        } else if global_had_error {
+            term_reason = string::from("search_error")
+        }
+        return Result<McpSearchResult, string>::Ok(McpSearchResult(
+            output_text = join_memory_buffer(writer.memory_buffer),
+            complete = is_comp,
+            truncated = is_trunc,
+            termination_reason = cede term_reason,
+            matches_emitted = f_idx,
+            files_scanned = budget_state.files_scanned
+        ))
     }
 
     auto plan = plan_res.unwrap()
@@ -280,11 +345,32 @@ pub fn run_search_to_memory(opts: CliOptions) -> Result<string, string> {
             total_matches = total_matches,
             elapsed_nanos = 0:u64
         )
-        auto sum_str = format_summary_json(stats, budget_state, global_had_error)
-        writer.memory_buffer#.push(sum_str)
+        auto sum_str# = string::new()
+        if opts.json_compact {
+            sum_str = format_summary_json_compact(stats, budget_state, global_had_error)
+        } else {
+            sum_str = format_summary_json(stats, budget_state, global_had_error)
+        }
+        writer.memory_buffer#.push(cede sum_str)
     }
 
-    return Result<string, string>::Ok(join_memory_buffer(writer.memory_buffer))
+    auto is_trunc = budget_state.is_truncated
+    auto is_comp = !is_trunc && !global_had_error
+    auto term_reason# = string::from("completed")
+    if is_trunc {
+        term_reason = budget_state.truncation_reason.clone()
+    } else if global_had_error {
+        term_reason = string::from("search_error")
+    }
+
+    return Result<McpSearchResult, string>::Ok(McpSearchResult(
+        output_text = join_memory_buffer(writer.memory_buffer),
+        complete = is_comp,
+        truncated = is_trunc,
+        termination_reason = cede term_reason,
+        matches_emitted = budget_state.matched_lines_emitted,
+        files_scanned = budget_state.files_scanned
+    ))
 }
 
 fn send_mcp_response(resp: str) -> bool {
@@ -319,7 +405,7 @@ pub fn run_mcp_server() -> i32 {
         if method.as_str() == "initialize" {
             auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
             resp#.push_str(id_str.as_str())
-            resp#.push_str(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.8.0\"}}}")
+            resp#.push_str(",\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.9.0\"}}}")
             send_mcp_response(resp.as_str())
         } else if method.as_str() == "notifications/initialized" {
             // Notification: no response
@@ -331,7 +417,7 @@ pub fn run_mcp_server() -> i32 {
         } else if method.as_str() == "tools/list" {
             auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
             resp#.push_str(id_str.as_str())
-            resp#.push_str(",\"result\":{\"tools\":[{\"name\":\"trg_search\",\"description\":\"Fast ripgrep-compatible code search with semantic block context, scopes, and budget control.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Search pattern (literal or regex with -E)\"},\"path\":{\"type\":\"string\",\"description\":\"Path or directory to search\"},\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Additional CLI arguments, e.g. [\\\"--block\\\", \\\"--scope\\\", \\\"--def-first\\\", \\\"-t\\\", \\\"rust\\\"]\"}},\"required\":[\"pattern\"]}}]}}")
+            resp#.push_str(",\"result\":{\"tools\":[{\"name\":\"trg_search\",\"description\":\"Fast ripgrep-compatible code search with semantic block context, scopes, and budget control.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\",\"description\":\"Search pattern (literal or regex with -E)\"},\"path\":{\"type\":\"string\",\"description\":\"Path or directory to search\"},\"block\":{\"type\":\"boolean\",\"description\":\"Include enclosing code block context\"},\"scope\":{\"type\":\"boolean\",\"description\":\"Show enclosing class/function header for matches\"},\"def_first\":{\"type\":\"boolean\",\"description\":\"Prioritize definitions before usages\"},\"max_matches\":{\"type\":\"integer\",\"description\":\"Limit total matches returned\"},\"max_bytes\":{\"type\":\"string\",\"description\":\"Limit total result bytes emitted (e.g. \\\"4K\\\", \\\"1M\\\", \\\"50000\\\")\"},\"type\":{\"type\":\"string\",\"description\":\"Filter by file type (e.g. rust, py, tk)\"},\"args\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Additional CLI arguments, e.g. [\\\"--json=compact\\\"]\"}},\"required\":[\"pattern\"]}}]}}")
             send_mcp_response(resp.as_str())
         } else if method.as_str() == "tools/call" {
             auto tool_name_opt = extract_json_string(trimmed, "name")
@@ -369,6 +455,13 @@ pub fn run_mcp_server() -> i32 {
 
             auto pattern = pattern_opt.unwrap()
             auto path_opt = extract_json_string(args_slice, "path")
+            auto block_opt = extract_json_bool(args_slice, "block")
+            auto scope_opt = extract_json_bool(args_slice, "scope")
+            auto def_first_opt = extract_json_bool(args_slice, "def_first")
+            auto max_matches_opt = extract_json_usize(args_slice, "max_matches")
+            auto max_bytes_str_opt = extract_json_string(args_slice, "max_bytes")
+            auto max_bytes_num_opt = extract_json_usize(args_slice, "max_bytes")
+            auto type_opt = extract_json_string(args_slice, "type")
             auto extra_args = extract_json_string_array(args_slice, "args")
 
             auto argv# = Vec<string>::new()
@@ -376,6 +469,41 @@ pub fn run_mcp_server() -> i32 {
             argv#.push(pattern)
             if path_opt.is_some() {
                 argv#.push(path_opt.unwrap())
+            }
+            if block_opt.is_some() {
+                auto b = block_opt.unwrap()
+                if b {
+                    argv#.push(string::from("--block"))
+                }
+            }
+            if scope_opt.is_some() {
+                auto s = scope_opt.unwrap()
+                if s {
+                    argv#.push(string::from("--scope"))
+                }
+            }
+            if def_first_opt.is_some() {
+                auto d = def_first_opt.unwrap()
+                if d {
+                    argv#.push(string::from("--def-first"))
+                }
+            }
+            if max_matches_opt.is_some() {
+                auto m = max_matches_opt.unwrap()
+                argv#.push(string::from("--max-total-matches"))
+                argv#.push(u64_to_string(m as u64))
+            }
+            if max_bytes_str_opt.is_some() {
+                argv#.push(string::from("--max-result-bytes"))
+                argv#.push(max_bytes_str_opt.unwrap())
+            } else if max_bytes_num_opt.is_some() {
+                auto mb = max_bytes_num_opt.unwrap()
+                argv#.push(string::from("--max-result-bytes"))
+                argv#.push(u64_to_string(mb as u64))
+            }
+            if type_opt.is_some() {
+                argv#.push(string::from("-t"))
+                argv#.push(type_opt.unwrap())
             }
             auto a_idx# = 0:usize
             auto a_len = extra_args.len()
@@ -409,13 +537,44 @@ pub fn run_mcp_server() -> i32 {
                 continue
             }
 
-            auto out_str = search_res.unwrap()
-            auto esc_output = json_escape(out_str.as_str())
+            auto mcp_res = search_res.unwrap()
+            auto text_out# = mcp_res.output_text.clone()
+
+            if !search_opts.json_mode {
+                if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
+                    text_out#.push_str("\n")
+                }
+                text_out#.push_str("[trg: complete=")
+                if mcp_res.complete { text_out#.push_str("true") } else { text_out#.push_str("false") }
+                text_out#.push_str(", truncated=")
+                if mcp_res.truncated { text_out#.push_str("true") } else { text_out#.push_str("false") }
+                text_out#.push_str(", reason=")
+                text_out#.push_str(mcp_res.termination_reason.as_str())
+                text_out#.push_str(", matches=")
+                text_out#.push_str(u64_to_string(mcp_res.matches_emitted as u64).as_str())
+                text_out#.push_str(", scanned=")
+                text_out#.push_str(u64_to_string(mcp_res.files_scanned as u64).as_str())
+                text_out#.push_str("]\n")
+            }
+
+            auto esc_output = json_escape(text_out.as_str())
+            auto esc_reason = json_escape(mcp_res.termination_reason.as_str())
+
             auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
             resp#.push_str(id_str.as_str())
             resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
             resp#.push_str(esc_output.as_str())
-            resp#.push_str("\"}]}}")
+            resp#.push_str("\"}],\"_meta\":{\"summary\":{\"complete\":")
+            if mcp_res.complete { resp#.push_str("true") } else { resp#.push_str("false") }
+            resp#.push_str(",\"truncated\":")
+            if mcp_res.truncated { resp#.push_str("true") } else { resp#.push_str("false") }
+            resp#.push_str(",\"termination_reason\":\"")
+            resp#.push_str(esc_reason.as_str())
+            resp#.push_str("\",\"matches_emitted\":")
+            resp#.push_str(u64_to_string(mcp_res.matches_emitted as u64).as_str())
+            resp#.push_str(",\"files_scanned\":")
+            resp#.push_str(u64_to_string(mcp_res.files_scanned as u64).as_str())
+            resp#.push_str("}}}}")
             send_mcp_response(resp.as_str())
         } else {
             // Unknown method

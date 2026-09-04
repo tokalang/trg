@@ -13,9 +13,20 @@ import src/printer::{
     OutputBatch,
     EmitOutcome,
     format_summary_json,
+    format_summary_json_compact,
     print_truncation_notice_stderr
 }
 import src/file_types::{print_type_list}
+
+fn emit_summary_json(opts: CliOptions, stats: GlobalStats, budget_state: BudgetState, global_had_error: bool) -> i32 {
+    auto sum_str# = string::new()
+    if opts.json_compact {
+        sum_str = format_summary_json_compact(stats, budget_state, global_had_error)
+    } else {
+        sum_str = format_summary_json(stats, budget_state, global_had_error)
+    }
+    return posix_write_stdout(sum_str.as_str())
+}
 
 fn main() -> i32 {
     // Phase -1: Initialize POSIX signals (ignore SIGPIPE to prevent crash on broken pipe)
@@ -57,7 +68,7 @@ fn main() -> i32 {
 
     auto budget_state# = BudgetState::new(opts.budget_limits)
     budget_state.files_selected = num_files
-    auto writer = OutputBudgetWriter::new(opts.json_mode, opts.budget_limits.is_budget_active())
+    auto writer = OutputBudgetWriter::new(opts.json_mode, opts.json_compact, opts.budget_limits.is_budget_active())
 
     if opts.files_mode {
         if opts.quiet {
@@ -102,8 +113,7 @@ fn main() -> i32 {
                 total_matches = 0:usize,
                 elapsed_nanos = 0:u64
             )
-            auto sum_str = format_summary_json(stats, budget_state, global_had_error)
-            auto s_res = posix_write_stdout(sum_str.as_str())
+            auto s_res = emit_summary_json(opts, stats, budget_state, global_had_error)
             if s_res == 1 {
                 if global_had_error { return 2 }
                 return 0
@@ -164,8 +174,7 @@ fn main() -> i32 {
                                 total_matches = total_matches,
                                 elapsed_nanos = 0:u64
                             )
-                            auto sum_str = format_summary_json(stats, budget_state, global_had_error)
-                            auto s_res = posix_write_stdout(sum_str.as_str())
+                            auto s_res = emit_summary_json(opts, stats, budget_state, global_had_error)
                             if s_res == 2 { return 2 }
                         }
                         return 0
@@ -211,8 +220,7 @@ fn main() -> i32 {
                                         total_matches = total_matches,
                                         elapsed_nanos = 0:u64
                                     )
-                                    auto sum_str = format_summary_json(stats, budget_state, global_had_error)
-                                    auto s_res = posix_write_stdout(sum_str.as_str())
+                                    auto s_res = emit_summary_json(opts, stats, budget_state, global_had_error)
                                     if s_res == 2 { return 2 }
                                 }
                                 return 0
@@ -254,8 +262,7 @@ fn main() -> i32 {
                                 total_matches = total_matches,
                                 elapsed_nanos = 0:u64
                             )
-                            auto sum_str = format_summary_json(stats, budget_state, global_had_error)
-                            auto s_res = posix_write_stdout(sum_str.as_str())
+                            auto s_res = emit_summary_json(opts, stats, budget_state, global_had_error)
                             if s_res == 2 { return 2 }
                         }
                         return 0
@@ -283,8 +290,7 @@ fn main() -> i32 {
             total_matches = total_matches,
             elapsed_nanos = 0:u64
         )
-        auto sum_str = format_summary_json(stats, budget_state, global_had_error)
-        auto s_res = posix_write_stdout(sum_str.as_str())
+        auto s_res = emit_summary_json(opts, stats, budget_state, global_had_error)
         if s_res == 1 {
             if global_had_error { return 2 }
             return 0 // Broken pipe on summary -> exit 0

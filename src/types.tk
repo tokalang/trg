@@ -61,6 +61,7 @@ pub shape BudgetState (
     submatches_emitted#: usize,
     result_payload_bytes_emitted#: usize,
     protocol_bytes_emitted#: usize,
+    block_contexts_truncated#: usize,
     is_truncated#: bool,
     truncation_reason#: string,
     stopped_path#: string,
@@ -80,6 +81,7 @@ impl BudgetState {
             submatches_emitted = 0,
             result_payload_bytes_emitted = 0,
             protocol_bytes_emitted = 0,
+            block_contexts_truncated = 0,
             is_truncated = false,
             truncation_reason = string::from(""),
             stopped_path = string::from(""),
@@ -143,6 +145,7 @@ pub shape CliOptions (
     no_ignore: bool,
     files_mode: bool,
     json_mode: bool,
+    json_compact: bool,
     hidden: bool,
     type_list_only: bool,
     before_context: usize,
@@ -188,7 +191,8 @@ pub shape MatchEvent (
     line_number: usize,
     absolute_offset: usize,
     submatches: Vec<SubMatch>,
-    scope_name: string
+    scope_name: string,
+    block_truncated: bool
 )
 
 pub shape LogicalLine (

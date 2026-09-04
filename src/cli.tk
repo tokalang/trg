@@ -12,7 +12,7 @@ import src/file_types::{lookup_type_extensions}
 import src/posix::{posix_ferror}
 
 pub fn print_help() {
-    println("trg 0.8.0 - Fast, agent-friendly code search tool")
+    println("trg 0.9.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -65,6 +65,7 @@ pub fn print_help() {
     println("  -g, --glob <GLOB>          Include or exclude files matching GLOB (last match wins)")
     println("      --files                Print the files that would be searched")
     println("      --json                 Output newline-delimited JSONL search events (trg-json-v2)")
+    println("      --json=compact         Output streamlined compact JSONL without control frames (alias: --json-compact)")
     println("      --hidden               Search hidden files and directories")
     println("      --                     Treat all remaining arguments as paths/positionals")
     println("  -V, --version              Print version information")
@@ -72,7 +73,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.8.0 (Toka)")
+    println("trg 0.9.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
@@ -374,6 +375,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     auto no_truncation_notice# = false
     auto files_mode# = false
     auto json_mode# = false
+    auto json_compact# = false
     auto hidden# = false
     auto type_list_only# = false
     auto before_context# = 0:usize
@@ -860,6 +862,28 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             continue
         }
 
+        if view == "--json-compact" || view == "--json=compact" {
+            json_mode = true
+            json_compact = true
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--json=") {
+            auto opt_val = view.substr(7:usize, view.len - 7:usize)
+            if opt_val == "compact" {
+                json_mode = true
+                json_compact = true
+                i = i + 1
+                continue
+            } else {
+                auto err# = string::from("Unknown value for --json: '")
+                err#.push_str(opt_val)
+                err#.push_str("'. Supported: compact")
+                return Result<CliOptions, string>::Err(cede err)
+            }
+        }
+
         if view == "--hidden" {
             hidden = true
             i = i + 1
@@ -1276,6 +1300,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             no_ignore = false,
             files_mode = false,
             json_mode = false,
+            json_compact = false,
             hidden = false,
             type_list_only = true,
             before_context = 0,
@@ -1379,6 +1404,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         no_ignore = no_ignore,
         files_mode = files_mode,
         json_mode = json_mode,
+        json_compact = json_compact,
         hidden = hidden,
         type_list_only = false,
         before_context = before_context,

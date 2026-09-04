@@ -78,7 +78,7 @@ def run_cmd(cmd, cwd=None, check=True, input_data=None, env=None):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.8.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.9.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -97,7 +97,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.8.0" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.0" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -124,25 +124,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.8.0 identity on both binaries
+    # Validate exact 0.9.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.8.0 (Toka)", f"Expected 'trg 0.8.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.9.0 (Toka)", f"Expected 'trg 0.9.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.8.0 (Toka)", f"Expected 'trg 0.8.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.9.0 (Toka)", f"Expected 'trg 0.9.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.8.0
-    log("Test 1: Help & Version flags (exact 0.8.0 release identity)")
+    # Test 1: Help & Version exact 0.9.0
+    log("Test 1: Help & Version flags (exact 0.9.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.8.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.9.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.8.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.9.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -692,7 +692,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.8.0" in r_re_ctx.stdout
+    assert "trg 0.9.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1928,7 +1928,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.8.0"
+        assert resp1["result"]["serverInfo"]["version"] == "0.9.0"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -1961,6 +1961,9 @@ def main():
         text_res = resp_call["result"]["content"][0]["text"]
         assert "def hello():" in text_res
         assert "return 'world'" in text_res
+        assert "[trg: complete=true, truncated=false, reason=completed" in text_res
+        assert resp_call["result"]["_meta"]["summary"]["complete"] is True
+        assert resp_call["result"]["_meta"]["summary"]["truncated"] is False
 
         # 4. Unknown method error handling
         bad_req = json.dumps({"jsonrpc": "2.0", "id": 99, "method": "unknown/method"}) + "\n"
@@ -1998,8 +2001,175 @@ def main():
         if decouple_dir.exists():
             shutil.rmtree(decouple_dir)
 
+    # Test 91: Def-first identifier precision
+    log("Test 91: Def-first identifier precision (extract declared identifier)")
+    prec_dir = fixtures_dir / "test_def_first_precision"
+    try:
+        prec_dir.mkdir(parents=True, exist_ok=True)
+        (prec_dir / "a_usage.tk").write_text("fn process(svc: UserService) -> bool {\n    return true;\n}\n", encoding="utf-8")
+        (prec_dir / "b_definition.tk").write_text("pub shape UserService (\n    id: usize\n)\n", encoding="utf-8")
+
+        r_def_first = run_cmd([trg, "--def-first", "UserService", str(prec_dir)])
+        assert r_def_first.returncode == 0
+        lines = [line for line in r_def_first.stdout.strip().split("\n") if line.strip()]
+        assert "b_definition.tk" in lines[0], f"Expected definition first, got:\n{r_def_first.stdout}"
+        assert any("a_usage.tk" in line for line in lines[1:]), f"Expected usage later, got:\n{r_def_first.stdout}"
+
+        # With --max-total-matches 1, ONLY the definition must be emitted
+        r_budget_def = run_cmd([trg, "--def-first", "--max-total-matches", "1", "UserService", str(prec_dir)])
+        assert r_budget_def.returncode == 0
+        assert "b_definition.tk" in r_budget_def.stdout
+        assert "a_usage.tk" not in r_budget_def.stdout
+    finally:
+        if prec_dir.exists():
+            shutil.rmtree(prec_dir)
+
+    # Test 92: Block context truncation marker
+    log("Test 92: Block context truncation marker in human and JSON modes")
+    trunc_dir = fixtures_dir / "test_block_truncation"
+    try:
+        trunc_dir.mkdir(parents=True, exist_ok=True)
+        sample_code = "fn big_function() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    let e = 5;\n}\n"
+        (trunc_dir / "sample.tk").write_text(sample_code, encoding="utf-8")
+
+        # Human mode: check for cutoff indicator
+        r_human = run_cmd([trg, "--block", "--max-block-lines", "3", "let a = 1", str(trunc_dir / "sample.tk")])
+        assert r_human.returncode == 0
+        assert "[block context truncated by --max-block-lines 3]" in r_human.stdout
+
+        # JSON mode: check for block_truncated flag on context line and summary stats
+        r_json_trunc = run_cmd([trg, "--json", "--block", "--max-block-lines", "3", "let a = 1", str(trunc_dir / "sample.tk")])
+        assert r_json_trunc.returncode == 0
+        j_lines = [json.loads(l) for l in r_json_trunc.stdout.strip().split("\n") if l.strip()]
+        ctx_events = [ev for ev in j_lines if ev.get("type") == "context"]
+        assert any(ev.get("data", {}).get("block_truncated") is True for ev in ctx_events), f"No context line flagged block_truncated: {r_json_trunc.stdout}"
+        summary_ev = next(ev for ev in j_lines if ev.get("type") == "summary")
+        assert summary_ev["data"]["block_truncated"] is True
+        assert summary_ev["data"]["stats"]["block_contexts_truncated"] >= 1
+    finally:
+        if trunc_dir.exists():
+            shutil.rmtree(trunc_dir)
+
+    # Test 93: Compact JSON mode (--json=compact and --json-compact)
+    log("Test 93: Compact JSON mode (--json=compact / --json-compact)")
+    compact_dir = fixtures_dir / "test_compact_json"
+    try:
+        compact_dir.mkdir(parents=True, exist_ok=True)
+        (compact_dir / "code.tk").write_text("fn test() {\n    let x = 10;\n    let y = 20;\n}\n", encoding="utf-8")
+
+        for flag in ["--json=compact", "--json-compact"]:
+            r_cmp = run_cmd([trg, flag, "-C", "1", "let x", str(compact_dir / "code.tk")])
+            assert r_cmp.returncode == 0, f"Failed for flag {flag}: {r_cmp.stderr}"
+            parsed_lines = [json.loads(l) for l in r_cmp.stdout.strip().split("\n") if l.strip()]
+
+            assert not any(ev.get("type") in ("begin", "end") for ev in parsed_lines), f"begin/end found in compact JSON: {r_cmp.stdout}"
+
+            matches = [ev for ev in parsed_lines if ev.get("type") == "match"]
+            contexts = [ev for ev in parsed_lines if ev.get("type") == "context"]
+            summaries = [ev for ev in parsed_lines if ev.get("type") == "summary"]
+
+            assert len(matches) == 1
+            assert matches[0]["line"] == 2
+            assert "let x = 10" in matches[0]["text"]
+            assert matches[0]["path"] == str(compact_dir / "code.tk")
+
+            assert len(contexts) >= 1
+            assert contexts[0]["line"] in (1, 3)
+
+            assert len(summaries) == 1
+            sum_ev = summaries[0]
+            assert sum_ev["complete"] is True
+            assert sum_ev["truncated"] is False
+            assert sum_ev["reason"] == "completed"
+            assert sum_ev["matches"] == 1
+            assert sum_ev["files"] == 1
+
+        r_inv = run_cmd([trg, "--json=xml", "let", str(compact_dir / "code.tk")], check=False)
+        assert r_inv.returncode == 2, f"Expected exit code 2 for --json=xml, got {r_inv.returncode}"
+        assert "Unknown value for --json" in r_inv.stderr
+    finally:
+        if compact_dir.exists():
+            shutil.rmtree(compact_dir)
+
+    # Test 94: MCP typed properties schema & invocation
+    log("Test 94: MCP typed properties schema & invocation")
+    mcp_typed_dir = fixtures_dir / "test_mcp_typed"
+    try:
+        mcp_typed_dir.mkdir(parents=True, exist_ok=True)
+        (mcp_typed_dir / "service.py").write_text("class MyService:\n    def execute(self):\n        return 42\n", encoding="utf-8")
+
+        list_req = json.dumps({"jsonrpc": "2.0", "id": 101, "method": "tools/list"}) + "\n"
+        r_list = run_cmd([trg, "--mcp"], input_data=list_req)
+        assert r_list.returncode == 0
+        resp_list = json.loads(r_list.stdout.strip())
+        tool_props = resp_list["result"]["tools"][0]["inputSchema"]["properties"]
+        expected_props = ["pattern", "path", "block", "scope", "def_first", "max_matches", "max_bytes", "type", "args"]
+        for prop in expected_props:
+            assert prop in tool_props, f"Missing typed property '{prop}' in tools/list schema"
+
+        call_req = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "return 42",
+                    "path": str(mcp_typed_dir / "service.py"),
+                    "block": True,
+                    "scope": True
+                }
+            }
+        }) + "\n"
+        r_call = run_cmd([trg, "--mcp"], input_data=call_req)
+        assert r_call.returncode == 0
+        resp_call = json.loads(r_call.stdout.strip())
+        call_text = resp_call["result"]["content"][0]["text"]
+        assert "def execute(self)" in call_text
+        assert "return 42" in call_text
+        assert "[def execute(self)]" in call_text
+        assert resp_call["result"]["_meta"]["summary"]["complete"] is True
+        assert resp_call["result"]["_meta"]["summary"]["truncated"] is False
+    finally:
+        if mcp_typed_dir.exists():
+            shutil.rmtree(mcp_typed_dir)
+
+    # Test 95: MCP result truncation notice & _meta.summary
+    log("Test 95: MCP result truncation notice & _meta.summary")
+    mcp_trunc_dir = fixtures_dir / "test_mcp_truncation"
+    try:
+        mcp_trunc_dir.mkdir(parents=True, exist_ok=True)
+        (mcp_trunc_dir / "items.txt").write_text("item alpha\nitem beta\nitem gamma\n", encoding="utf-8")
+
+        call_trunc_req = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 103,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "item",
+                    "path": str(mcp_trunc_dir / "items.txt"),
+                    "max_matches": 1
+                }
+            }
+        }) + "\n"
+        r_trunc_call = run_cmd([trg, "--mcp"], input_data=call_trunc_req)
+        assert r_trunc_call.returncode == 0
+        resp_trunc = json.loads(r_trunc_call.stdout.strip())
+        summary = resp_trunc["result"]["_meta"]["summary"]
+        assert summary["truncated"] is True
+        assert summary["termination_reason"] == "max_total_matches"
+        assert summary["matches_emitted"] == 1
+
+        trunc_text = resp_trunc["result"]["content"][0]["text"]
+        assert "[trg: complete=false, truncated=true, reason=max_total_matches, matches=1, scanned=1]" in trunc_text
+    finally:
+        if mcp_trunc_dir.exists():
+            shutil.rmtree(mcp_trunc_dir)
+
     log("=" * 60)
-    log("ALL 90 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.8.0)!")
+    log("ALL 95 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.9.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

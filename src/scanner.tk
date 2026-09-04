@@ -14,7 +14,9 @@ import src/printer::{
     EmitOutcome,
     format_json_begin,
     format_json_match,
+    format_json_match_compact,
     format_json_context,
+    format_json_context_compact,
     format_json_end,
     format_human_match,
     format_human_context,
@@ -65,6 +67,108 @@ fn make_context_state(before_cap: usize, archetype: usize) -> ContextState {
         block_archetype = archetype,
         block_lines_emitted = 0:usize
     )
+}
+
+pub fn extract_declared_identifier(line: str) -> string {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") {
+        return string::from("")
+    }
+    auto s# = trimmed
+    // Skip visibility & modifiers
+    if s.starts_with("pub ") {
+        s = s.substr(4:usize, s.len - 4:usize).trim()
+    } else if s.starts_with("pub(") {
+        auto close_paren = s.index_of(')' as char)
+        if close_paren.is_some() {
+            auto idx = close_paren.unwrap() + 1:usize
+            s = s.substr(idx, s.len - idx).trim()
+        }
+    }
+    if s.starts_with("export default ") {
+        s = s.substr(15:usize, s.len - 15:usize).trim()
+    } else if s.starts_with("export ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
+    if s.starts_with("async ") {
+        s = s.substr(6:usize, s.len - 6:usize).trim()
+    }
+    if s.starts_with("inline ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
+
+    auto kw_len# = 0:usize
+    auto is_impl# = false
+    if s.starts_with("fn ") { kw_len = 3:usize }
+    else if s.starts_with("def ") { kw_len = 4:usize }
+    else if s.starts_with("func ") { kw_len = 5:usize }
+    else if s.starts_with("function ") { kw_len = 9:usize }
+    else if s.starts_with("class ") { kw_len = 6:usize }
+    else if s.starts_with("struct ") { kw_len = 7:usize }
+    else if s.starts_with("shape ") { kw_len = 6:usize }
+    else if s.starts_with("interface ") { kw_len = 10:usize }
+    else if s.starts_with("type ") { kw_len = 5:usize }
+    else if s.starts_with("enum ") { kw_len = 5:usize }
+    else if s.starts_with("trait ") { kw_len = 6:usize }
+    else if s.starts_with("impl ") { kw_len = 5:usize; is_impl = true }
+    else { return string::from("") }
+
+    auto rem# = s.substr(kw_len, s.len - kw_len).trim()
+
+    // Skip generic parameters right after keyword: e.g. impl<T>, struct Foo<T>
+    if rem.starts_with("<") {
+        auto g_depth# = 0:usize
+        auto g_idx# = 0:usize
+        loop g_idx < rem.len {
+            auto c = rem.byte_at(g_idx)
+            if c == ('<' as char) {
+                g_depth = g_depth + 1
+            } else if c == ('>' as char) {
+                if g_depth > 0 { g_depth = g_depth - 1 }
+                if g_depth == 0 {
+                    g_idx = g_idx + 1
+                    break
+                }
+            }
+            g_idx = g_idx + 1
+        }
+        rem = rem.substr(g_idx, rem.len - g_idx).trim()
+    }
+
+    // For impl blocks: if it's `impl Trait for Target`, extract the target after `for`
+    if is_impl {
+        auto for_opt = rem.index_of_str(" for ")
+        if for_opt.is_some() {
+            auto for_idx = for_opt.unwrap() + 5:usize
+            rem = rem.substr(for_idx, rem.len - for_idx).trim()
+        }
+    }
+
+    // Extract identifier characters (a-z, A-Z, 0-9, _)
+    auto id_end# = 0:usize
+    loop id_end < rem.len {
+        auto c = rem.byte_at(id_end)
+        auto is_valid_char = (c >= ('a' as char) && c <= ('z' as char)) ||
+                             (c >= ('A' as char) && c <= ('Z' as char)) ||
+                             (c >= ('0' as char) && c <= ('9' as char)) ||
+                             c == ('_' as char)
+        if !is_valid_char {
+            break
+        }
+        id_end = id_end + 1
+    }
+    if id_end == 0 {
+        return string::from("")
+    }
+    return string::from(rem.substr(0, id_end))
+}
+
+pub fn is_defining_symbol(line: str, plan: SearchPlan) -> bool {
+    auto id = extract_declared_identifier(line)
+    if id.len() == 0 {
+        return false
+    }
+    return plan.is_match(id.as_str())
 }
 
 pub fn is_definition_line(line: str) -> bool {
@@ -445,10 +549,15 @@ fn process_logical_line(
                     line_number = r_line_num,
                     absolute_offset = state.ring.lines.borrow(actual_idx).absolute_offset,
                     submatches = Vec<SubMatch>::new(),
-                    scope_name = string::from("")
+                    scope_name = string::from(""),
+                    block_truncated = false
                 )
                 if opts.json_mode {
-                    batch_payload#.push_str(format_json_context(ev).as_str())
+                    if opts.json_compact {
+                        batch_payload#.push_str(format_json_context_compact(ev).as_str())
+                    } else {
+                        batch_payload#.push_str(format_json_context(ev).as_str())
+                    }
                 } else {
                     batch_payload#.push_str(format_human_context(ev, opts, multiple_files).as_str())
                 }
@@ -485,10 +594,15 @@ fn process_logical_line(
             line_number = line.line_number,
             absolute_offset = line.absolute_offset,
             submatches = cede submatches,
-            scope_name = string::from(scope_name)
+            scope_name = string::from(scope_name),
+            block_truncated = false
         )
         if opts.json_mode {
-            batch_payload#.push_str(format_json_match(ev).as_str())
+            if opts.json_compact {
+                batch_payload#.push_str(format_json_match_compact(ev).as_str())
+            } else {
+                batch_payload#.push_str(format_json_match(ev).as_str())
+            }
         } else {
             batch_payload#.push_str(format_human_match(ev, opts, multiple_files).as_str())
         }
@@ -528,9 +642,12 @@ fn process_logical_line(
     if state.block_active {
         state.block_lines_emitted = state.block_lines_emitted + 1
         auto terminate_block# = false
+        auto is_block_truncated# = false
 
         if state.block_lines_emitted >= opts.max_block_lines {
             terminate_block = true
+            is_block_truncated = true
+            budget_state.block_contexts_truncated = budget_state.block_contexts_truncated + 1
         } else if state.block_archetype == 1 {
             auto trimmed = line.text.as_str().trim()
             if trimmed.len > 0 && !trimmed.starts_with("#") {
@@ -552,13 +669,23 @@ fn process_logical_line(
                 line_number = line.line_number,
                 absolute_offset = line.absolute_offset,
                 submatches = Vec<SubMatch>::new(),
-                scope_name = string::from("")
+                scope_name = string::from(""),
+                block_truncated = is_block_truncated
             )
             auto ctx_payload# = string::new()
             if opts.json_mode {
-                ctx_payload = format_json_context(ev)
+                if opts.json_compact {
+                    ctx_payload = format_json_context_compact(ev)
+                } else {
+                    ctx_payload = format_json_context(ev)
+                }
             } else {
                 ctx_payload = format_human_context(ev, opts, multiple_files)
+                if is_block_truncated {
+                    ctx_payload#.push_str("[block context truncated by --max-block-lines ")
+                    ctx_payload#.push_str(u64_to_string(opts.max_block_lines as u64).as_str())
+                    ctx_payload#.push_str("]\n")
+                }
             }
             if ctx_payload.len() > 0 {
                 auto batch = OutputBatch(
@@ -603,11 +730,16 @@ fn process_logical_line(
                 line_number = line.line_number,
                 absolute_offset = line.absolute_offset,
                 submatches = Vec<SubMatch>::new(),
-                scope_name = string::from("")
+                scope_name = string::from(""),
+                block_truncated = false
             )
             auto ctx_payload# = string::new()
             if opts.json_mode {
-                ctx_payload = format_json_context(ev)
+                if opts.json_compact {
+                    ctx_payload = format_json_context_compact(ev)
+                } else {
+                    ctx_payload = format_json_context(ev)
+                }
             } else {
                 ctx_payload = format_human_context(ev, opts, multiple_files)
             }
@@ -715,9 +847,10 @@ fn scan_and_process_line(
 
         // Two-pass filter for --def-first
         if line_matches {
-            if pass_mode == 1 && !is_definition_line(line_text) {
+            auto is_def = is_defining_symbol(line_text, plan)
+            if pass_mode == 1 && !is_def {
                 line_matches = false
-            } else if pass_mode == 2 && is_definition_line(line_text) {
+            } else if pass_mode == 2 && is_def {
                 line_matches = false
             }
         }
@@ -895,8 +1028,8 @@ pub fn scan_file_stream_with_pass(
             begin_emitted = false
         )
 
-        // If not in budget mode, JSON begins immediately on file open
-        if opts.json_mode && !opts.quiet && !opts.budget_limits.is_budget_active() {
+        // If not in budget mode, JSON begins immediately on file open (unless compact)
+        if opts.json_mode && !opts.json_compact && !opts.quiet && !opts.budget_limits.is_budget_active() {
             auto b_res = emit_json_begin(target_path.as_str())
             if b_res == 1 { is_broken_pipe = true }
             else if b_res == 2 { had_error = true }
@@ -1100,8 +1233,8 @@ pub fn scan_file_stream_with_pass(
             }
         }
 
-        // In JSON mode: emit end event only if begin was emitted
-        if opts.json_mode && !opts.quiet && !is_broken_pipe && frame_state.begin_emitted {
+        // In JSON mode: emit end event only if begin was emitted (and not in compact mode)
+        if opts.json_mode && !opts.json_compact && !opts.quiet && !is_broken_pipe && frame_state.begin_emitted {
             auto e_res = emit_json_end(target_path.as_str(), file_matched_lines_emitted)
             if e_res == 1 { is_broken_pipe = true }
             else if e_res == 2 { had_error = true }
