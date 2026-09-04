@@ -183,12 +183,12 @@ You can also download standalone archives directly from [GitHub Releases](https:
 
 - **macOS (Apple Silicon / arm64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.9.2/trg-v0.9.2-macos-arm64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.10.0/trg-v0.10.0-macos-arm64.tar.gz
   ```
 
 - **Linux (x86_64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.9.2/trg-v0.9.2-linux-x64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.10.0/trg-v0.10.0-linux-x64.tar.gz
   ```
 
 Download `SHA256SUMS` from the same release and verify the archive before
