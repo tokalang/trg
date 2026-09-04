@@ -107,6 +107,9 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
         auto view = arg_str.as_str()
 
         if end_of_options {
+            if view == "-" {
+                return Result<Vec<OptionToken>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
+            }
             families#.push(OptionToken(family = OptionFamily::Path, token = string::from(view)))
             i = i + 1
             continue
@@ -142,7 +145,17 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                 i = i + 1
                 continue
             }
-            if view.starts_with("--regexp=") || view.starts_with("--file=") {
+            if view.starts_with("--file=") {
+                auto val = view.substr(7:usize, view.len - 7:usize)
+                if val == "-" {
+                    return Result<Vec<OptionToken>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
+                }
+                families#.push(OptionToken(family = OptionFamily::PatternSource, token = string::from(view)))
+                pattern_source_seen = true
+                i = i + 1
+                continue
+            }
+            if view.starts_with("--regexp=") {
                 families#.push(OptionToken(family = OptionFamily::PatternSource, token = string::from(view)))
                 pattern_source_seen = true
                 i = i + 1
@@ -206,6 +219,9 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                     err#.push_str(view)
                     err#.push_str("' requires a value")
                     return Result<Vec<OptionToken>, string>::Err(cede err)
+                }
+                if view == "--file" && args.borrow(i + 1).as_str() == "-" {
+                    return Result<Vec<OptionToken>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
                 }
                 auto fam# = OptionFamily::Glob
                 if view == "--type" { fam = OptionFamily::TypeFilter }
@@ -292,9 +308,7 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
 
         if view.starts_with("-") {
             if view == "-" {
-                families#.push(OptionToken(family = OptionFamily::Path, token = string::from(view)))
-                i = i + 1
-                continue
+                return Result<Vec<OptionToken>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
             }
 
             // Parse short flag cluster or attached value
@@ -345,7 +359,20 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                     auto fam# = OptionFamily::Glob
                     if ch == ('t' as char) { fam = OptionFamily::TypeFilter }
                     else if ch == ('T' as char) { fam = OptionFamily::ExcludeType }
-                    else if ch == ('e' as char) || ch == ('f' as char) { fam = OptionFamily::PatternSource; pattern_source_seen = true }
+                    else if ch == ('e' as char) || ch == ('f' as char) {
+                        fam = OptionFamily::PatternSource
+                        pattern_source_seen = true
+                        if ch == ('f' as char) {
+                            if j + 1 < view.len {
+                                auto rest = view.substr(j + 1:usize, view.len - (j + 1:usize))
+                                if rest == "-" {
+                                    return Result<Vec<OptionToken>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
+                                }
+                            } else if i + 1 < num_args && args.borrow(i + 1).as_str() == "-" {
+                                return Result<Vec<OptionToken>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
+                            }
+                        }
+                    }
                     else if ch == ('m' as char) { fam = OptionFamily::MaxPerFile }
                     else if ch == ('A' as char) || ch == ('B' as char) || ch == ('C' as char) { fam = OptionFamily::Context }
 
@@ -378,6 +405,9 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
         }
 
         // Positional argument
+        if view == "-" {
+            return Result<Vec<OptionToken>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
+        }
         if !pattern_source_seen {
             families#.push(OptionToken(family = OptionFamily::PatternSource, token = string::from(view)))
             pattern_source_seen = true
@@ -829,25 +859,37 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
                 }
             }
 
-            // 5. Classify raw args
+            // 5. Check typed pattern requirement
             auto has_typed_pattern = pattern.state == 2:u8 || patterns.state == 2:u8
+            if !has_typed_pattern {
+                return Result<Vec<string>, string>::Err(string::from("Invalid params: 'pattern' is required"))
+            }
+
+            // 6. Check for stdin path
+            if path.state == 2:u8 && path.value.as_str() == "-" {
+                return Result<Vec<string>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
+            }
+            if paths.state == 2:u8 {
+                auto pi# = 0:usize
+                loop pi < paths.value.len() {
+                    if paths.value.borrow(pi).as_str() == "-" {
+                        return Result<Vec<string>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
+                    }
+                    pi = pi + 1
+                }
+            }
+
+            // 7. Classify raw args
             auto families_res = classify_args(raw_args.clone(), has_typed_pattern)
             if families_res.is_err() {
                 return Result<Vec<string>, string>::Err(families_res.unwrap_err())
             }
             auto families = families_res.unwrap()
 
-            // 6. Check pattern requirement
-            if !has_typed_pattern && !has_family(families, OptionFamily::PatternSource) {
-                return Result<Vec<string>, string>::Err(string::from("Invalid params: 'pattern' is required"))
-            }
-
-            // 7. Conflict matrix against args
+            // 8. Strictly reject any pattern source in raw args
             auto tok_ps = find_family_token(families, OptionFamily::PatternSource)
-            if tok_ps.is_some() && has_typed_pattern {
-                auto err# = string::from("Invalid params: typed property 'pattern' conflicts with args option '")
-                err#.push_str(tok_ps.unwrap().as_str())
-                err#.push_str("'")
+            if tok_ps.is_some() {
+                auto err# = string::from("Invalid params: pattern source options ('-e', '-f', '--regexp', '--file') are not allowed in args; use typed 'pattern' or 'patterns'")
                 return Result<Vec<string>, string>::Err(cede err)
             }
 

@@ -3779,31 +3779,33 @@ print(json.dumps({{"rss_mb": rss_mb, "stdout": call_out}}))
     try:
         t118_dir.mkdir(parents=True, exist_ok=True)
         (t118_dir / "doc1.txt").write_text("ALPHA_SYM 1\nALPHA_SYM 2\n", encoding="utf-8")
-        (t118_dir / "doc2.txt").write_text("ALPHA_SYM 3\n", encoding="utf-8")
 
         init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
         notif_req = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        # Search passing the same file via 3 aliases: absolute, relative, and ./relative
         call_req = json.dumps({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "trg_search", "arguments": {"pattern": "ALPHA_SYM", "paths": [str(t118_dir / "doc1.txt"), str(t118_dir / "doc2.txt")], "sort": "path"}}
+            "params": {"name": "trg_search", "arguments": {
+                "pattern": "ALPHA_SYM",
+                "paths": [str(t118_dir / "doc1.txt"), "./doc1.txt", "doc1.txt"],
+                "sort": "path"
+            }}
         }) + "\n"
 
-        r_mcp_v2 = run_cmd([trg, "--mcp"], input_data=init_req + notif_req + call_req)
+        r_mcp_v2 = run_cmd([trg, "--mcp"], input_data=init_req + notif_req + call_req, cwd=str(t118_dir))
         resps = [json.loads(l) for l in r_mcp_v2.stdout.strip().split("\n") if l]
         sc_v2 = resps[1]["result"]["structuredContent"]
 
         assert sc_v2["schema"] == "trg-mcp-result-v2"
-        # files[] deduplication
-        assert len(sc_v2["files"]) == 2
+        # files[] deduplication across aliases: exactly 1 file entry
+        assert len(sc_v2["files"]) == 1, f"Expected 1 deduplicated file entry, got: {sc_v2['files']}"
         assert sc_v2["files"][0]["id"] == 0
-        assert sc_v2["files"][1]["id"] == 1
 
-        # segments[] mapping
-        assert len(sc_v2["segments"]) == 2
+        # segments[] mapping & pass verification
+        assert len(sc_v2["segments"]) == 1
         assert sc_v2["segments"][0]["file_id"] == 0
+        assert sc_v2["segments"][0]["pass"] == "all"
         assert len(sc_v2["segments"][0]["records"]) == 2
-        assert sc_v2["segments"][1]["file_id"] == 1
-        assert len(sc_v2["segments"][1]["records"]) == 1
 
         # Records do not repeat path
         for seg in sc_v2["segments"]:
@@ -3877,15 +3879,24 @@ print(json.dumps({{"rss_mb": rss_mb, "stdout": call_out}}))
         assert len(sc_df["files"]) == 1
         assert sc_df["files"][0]["id"] == 0
 
-        # But two distinct chronological execution segments for Pass 1 (definitions) and Pass 2 (usages)
+        # Two distinct chronological execution segments for Pass 1 (definitions) and Pass 2 (usages)
         assert len(sc_df["segments"]) == 2
         assert sc_df["segments"][0]["file_id"] == 0
         assert sc_df["segments"][1]["file_id"] == 0
-        # Pass 1 contains definition (line 3)
+
+        # Pass 1 contains definition (line 3) with pass labeled "definitions"
+        assert sc_df["segments"][0]["pass"] == "definitions"
+        assert len(sc_df["segments"][0]["records"]) == 1
         assert sc_df["segments"][0]["records"][0]["line_number"] == 3
-        # Pass 2 contains usages (lines 1, 2)
+        assert "fn MySymbol" in sc_df["segments"][0]["records"][0]["text"]
+
+        # Pass 2 contains usages (lines 1, 2) with pass labeled "usages"
+        assert sc_df["segments"][1]["pass"] == "usages"
+        assert len(sc_df["segments"][1]["records"]) == 2
         assert sc_df["segments"][1]["records"][0]["line_number"] == 1
+        assert "usage1" in sc_df["segments"][1]["records"][0]["text"]
         assert sc_df["segments"][1]["records"][1]["line_number"] == 2
+        assert "usage2" in sc_df["segments"][1]["records"][1]["text"]
     finally:
         if t120_dir.exists():
             shutil.rmtree(t120_dir)
@@ -3931,8 +3942,8 @@ print(json.dumps({{"rss_mb": rss_mb, "stdout": call_out}}))
         if t121_dir.exists():
             shutil.rmtree(t121_dir)
 
-    # Test 122: CLI Stream Render-and-Discard Memory Safety
-    log("Test 122: CLI Stream Render-and-Discard Memory Safety")
+    # Test 122: CLI Stream Render-and-Discard Memory Safety (Isolated RSS probe)
+    log("Test 122: CLI Stream Render-and-Discard Memory Safety (Isolated RSS probe)")
     t122_dir = fixtures_dir / "test_t122"
     try:
         t122_dir.mkdir(parents=True, exist_ok=True)
@@ -3941,17 +3952,95 @@ print(json.dumps({{"rss_mb": rss_mb, "stdout": call_out}}))
             lines = [f"MATCH_STREAM line {j} content payload {i}" for j in range(200)]
             (t122_dir / f"stream_{i:02d}.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-        # Run CLI search piping through cat to /dev/null
-        cmd = f"{trg} --no-heading 'MATCH_STREAM' '{t122_dir}' | wc -l"
-        p = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        assert p.returncode == 0
-        assert "10000" in p.stdout.strip()
+        # 1. Measure RSS in an isolated child process without capturing stdout into memory
+        probe_code = f"""
+import subprocess, resource, sys
+p = subprocess.run([{trg!r}, "--no-heading", "MATCH_STREAM", {str(t122_dir)!r}], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+rss = ru.ru_maxrss
+rss_mb = rss / (1024 * 1024) if sys.platform == "darwin" else rss / 1024
+print(f"{{p.returncode}}:{{rss_mb:.2f}}")
+"""
+        p_probe = subprocess.run([sys.executable, "-c", probe_code], capture_output=True, text=True)
+        assert p_probe.returncode == 0, f"Probe script failed: {p_probe.stderr}"
+        retcode_str, rss_str = p_probe.stdout.strip().split(":")
+        assert int(retcode_str) == 0, f"trg process failed with code {retcode_str}"
+        rss_mb = float(rss_str)
+        assert rss_mb < 50.0, f"CLI streaming RSS exceeded 50MB: {rss_mb:.2f}MB"
+
+        # 2. Verify completeness of streaming output via line count
+        p_count = subprocess.run([trg, "--no-heading", "MATCH_STREAM", str(t122_dir)], capture_output=True, text=True)
+        assert p_count.returncode == 0
+        emitted_lines = [l for l in p_count.stdout.splitlines() if l.strip()]
+        assert len(emitted_lines) == 10000, f"Expected 10000 matches, got {len(emitted_lines)}"
     finally:
         if t122_dir.exists():
             shutil.rmtree(t122_dir)
 
+    # Test 123: MCP Stdin Rejection & JSON-RPC Session Stream Preservation
+    log("Test 123: MCP Stdin Rejection & JSON-RPC Session Stream Preservation")
+    # Verify all forms of stdin and raw pattern sources are rejected with -32602
+    invalid_arg_cases = [
+        {"args": ["-f", "-"]},
+        {"args": ["-f-"]},
+        {"args": ["--file=-"]},
+        {"args": ["-"]},
+        {"path": "-"},
+        {"paths": ["-"]},
+        {"args": ["-efoo"]},
+        {"args": ["--regexp=foo"]},
+    ]
+    for case in invalid_arg_cases:
+        args_payload = {"pattern": "test_search"}
+        args_payload.update(case)
+        req = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": args_payload}
+        }) + "\n"
+        r = run_cmd([trg, "--mcp"], input_data=req)
+        resp = json.loads(r.stdout.strip())
+        assert resp["error"]["code"] == -32602, f"Expected -32602 for case {case}, got: {resp}"
+
+    # Verify persistent MCP session: invalid stdin call does NOT consume subsequent ping
+    mcp_session_input = (
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "trg_search", "arguments": {"pattern": "jsonrpc", "path": "-"}}}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}) + "\n"
+    )
+    r_sess = run_cmd([trg, "--mcp"], input_data=mcp_session_input)
+    sess_lines = [json.loads(l) for l in r_sess.stdout.strip().split("\n") if l.strip()]
+    assert len(sess_lines) == 3, f"Expected 3 responses (init, tool error, ping), got {len(sess_lines)}: {sess_lines}"
+    assert sess_lines[0]["id"] == 1
+    assert "result" in sess_lines[0]
+    assert sess_lines[1]["id"] == 2
+    assert sess_lines[1]["error"]["code"] == -32602
+    assert "stdin path/pattern source '-' is unavailable in MCP stdio mode" in sess_lines[1]["error"]["message"]
+    # Crucial: ping response is intact and was not eaten as search stdin
+    assert sess_lines[2]["id"] == 3
+    assert "result" in sess_lines[2]
+
+    # Test 124: CLI Stdin Filename Regression (<stdin> prefix)
+    log("Test 124: CLI Stdin Filename Regression (<stdin> prefix)")
+    # 1. -H forces <stdin> filename prefix
+    r_h = run_cmd([trg, "-H", "-n", "stdin_target", "-"], input_data="line1\nstdin_target\nline3\n")
+    assert r_h.returncode == 0
+    assert r_h.stdout.strip() == "<stdin>:2:stdin_target", f"Expected '<stdin>:2:stdin_target', got: {r_h.stdout.strip()!r}"
+
+    # 2. default without -H on single file suppresses filename prefix
+    r_no_h = run_cmd([trg, "-n", "stdin_target", "-"], input_data="line1\nstdin_target\nline3\n")
+    assert r_no_h.returncode == 0
+    assert r_no_h.stdout.strip() == "2:stdin_target", f"Expected '2:stdin_target', got: {r_no_h.stdout.strip()!r}"
+
+    # 3. JSON mode formats path as <stdin>
+    r_json = run_cmd([trg, "--json", "stdin_target", "-"], input_data="line1\nstdin_target\nline3\n")
+    assert r_json.returncode == 0
+    j_events = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+    m_event = next(e for e in j_events if e.get("type") == "match")
+    assert m_event["data"]["path"]["text"] == "<stdin>", f"Expected path '<stdin>', got: {m_event['data']['path']}"
+
     log("=" * 60)
-    log("ALL 122 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.11.0)!")
+    log("ALL 124 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.11.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

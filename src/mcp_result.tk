@@ -9,9 +9,10 @@ import src/types::{
     BudgetLimits,
     PathStyle,
     TextLayout,
-    PathKind
+    PathKind,
+    path_kind_name
 }
-import src/printer::{OutputBudgetWriter, u64_to_string, i64_to_string, json_escape}
+import src/printer::{OutputBudgetWriter, u64_to_string, i64_to_string, json_escape, format_segment_opening}
 
 pub fn format_effective_query(opts: CliOptions) -> string {
     auto eq = EffectiveQuery::from_cli_options(opts)
@@ -209,10 +210,7 @@ pub fn format_files(writer: OutputBudgetWriter) -> string {
         s#.push_str(",\"path\":\"")
         s#.push_str(json_escape(fe.path.as_str()).as_str())
         s#.push_str("\",\"kind\":\"")
-        match fe.path_kind {
-            auto PathKind::Relative => { s#.push_str("workspace_relative") }
-            auto PathKind::Absolute => { s#.push_str("absolute") }
-        }
+        s#.push_str(path_kind_name(fe.path_kind))
         s#.push_str("\"}")
         fi = fi + 1
     }
@@ -226,9 +224,7 @@ pub fn format_segments(writer: OutputBudgetWriter) -> string {
     loop si < writer.segments.len() {
         if si > 0 { s#.push_str(",") }
         auto &seg = writer.segments.borrow(si)
-        s#.push_str("{\"file_id\":")
-        s#.push_str(u64_to_string(seg.file_id as u64).as_str())
-        s#.push_str(",\"records\":[")
+        s#.push_str(format_segment_opening(seg.file_id, seg.scan_pass).as_str())
         auto ri# = 0:usize
         loop ri < seg.records.len() {
             if ri > 0 { s#.push_str(",") }

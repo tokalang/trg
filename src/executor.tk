@@ -170,6 +170,7 @@ pub fn execute_search(
     }
 
     if opts.def_first {
+        writer#.reset_active_segment(ScanPass::DefinitionsOnly)
         auto i# = 0:usize
         loop i < num_files {
             if budget_state.is_truncated {
@@ -217,7 +218,7 @@ pub fn execute_search(
         }
 
         if !budget_state.is_truncated && !broken_pipe_occurred && !(opts.quiet && found_any_match) {
-            writer#.reset_active_segment()
+            writer#.reset_active_segment(ScanPass::UsagesOnly)
             auto j# = 0:usize
             loop j < num_files {
                 if budget_state.is_truncated {
@@ -260,6 +261,7 @@ pub fn execute_search(
             }
         }
     } else {
+        writer#.reset_active_segment(ScanPass::All)
         auto i# = 0:usize
         loop i < num_files {
             if budget_state.is_truncated {

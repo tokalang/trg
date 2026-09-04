@@ -16,12 +16,15 @@ import src/types::{
     PathStyle,
     TextLayout,
     PathKind,
+    path_kind_name,
     ResolvedPath,
     InternedRecord,
     PathBase,
     FileEntry,
     ResultSegment,
-    ProjectionConfig
+    ProjectionConfig,
+    ScanPass,
+    scan_pass_name
 }
 import src/posix::{posix_write_stdout, print_err}
 
@@ -102,11 +105,17 @@ pub fn format_file_entry_json(id: usize, path: str, path_kind: PathKind) -> stri
     s#.push_str(",\"path\":\"")
     s#.push_str(json_escape(path).as_str())
     s#.push_str("\",\"kind\":\"")
-    match path_kind {
-        auto PathKind::Relative => { s#.push_str("workspace_relative") }
-        auto PathKind::Absolute => { s#.push_str("absolute") }
-    }
+    s#.push_str(path_kind_name(path_kind))
     s#.push_str("\"}")
+    return cede s
+}
+
+pub fn format_segment_opening(file_id: usize, scan_pass: ScanPass) -> string {
+    auto s# = string::from("{\"file_id\":")
+    s#.push_str(u64_to_string(file_id as u64).as_str())
+    s#.push_str(",\"pass\":\"")
+    s#.push_str(scan_pass_name(scan_pass))
+    s#.push_str("\",\"records\":[")
     return cede s
 }
 
@@ -476,6 +485,7 @@ pub shape OutputBudgetWriter (
     canonical_record_bytes#: usize,
     text_record_bytes#: usize,
     records_emitted#: usize,
+    current_scan_pass#: ScanPass,
     fmt_cfg: FormatConfig
 )
 
@@ -503,6 +513,7 @@ impl OutputBudgetWriter {
             canonical_record_bytes = 0:usize,
             text_record_bytes = 0:usize,
             records_emitted = 0:usize,
+            current_scan_pass = ScanPass::All,
             fmt_cfg = fmt_cfg
         )
     }
@@ -529,13 +540,15 @@ impl OutputBudgetWriter {
             canonical_record_bytes = 0:usize,
             text_record_bytes = 0:usize,
             records_emitted = 0:usize,
+            current_scan_pass = ScanPass::All,
             fmt_cfg = fmt_cfg
         )
     }
 
-    pub fn reset_active_segment(self#) {
+    pub fn reset_active_segment(self#, next_pass: ScanPass) {
         self.active_segment_file_id = Option<usize>::None
         self.last_emitted_file_key = string::new()
+        self.current_scan_pass = next_pass
     }
 
     pub fn set_effective_projection(self#, layout: TextLayout, style: PathStyle, with_filename: bool) {
@@ -708,8 +721,8 @@ impl OutputBudgetWriter {
                     if self.segments.len() > 0 {
                         prospective_delta = prospective_delta + 1:usize
                     }
-                    auto fid_str = u64_to_string(target_file_id as u64)
-                    prospective_delta = prospective_delta + 11:usize + fid_str.len() + 12:usize
+                    auto seg_open = format_segment_opening(target_file_id, self.current_scan_pass)
+                    prospective_delta = prospective_delta + seg_open.len()
                     prospective_delta = prospective_delta + 2:usize // reserved closing ]}
                 }
 
@@ -758,6 +771,7 @@ impl OutputBudgetWriter {
                 if is_new_segment {
                     self.segments#.push(ResultSegment(
                         file_id = target_file_id,
+                        scan_pass = self.current_scan_pass,
                         records = Vec<InternedRecord>::new()
                     ))
                     self.active_segment_file_id = Option<usize>::Some(target_file_id)

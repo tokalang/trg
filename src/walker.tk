@@ -8,6 +8,9 @@ import src/posix::{posix_stat, posix_opendir, posix_readdir, posix_closedir, pos
 import src/ignore::{IgnoreStack}
 import src/glob::{is_glob_allowed}
 import src/file_types::{match_type_filter}
+import std/env as env
+import std/hashmap::{HashMap}
+import src/path_norm::{normalize_cwd, compute_identity_key}
 
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
 
@@ -307,18 +310,40 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
         i = i + 1
     }
 
+    auto startup_cwd = normalize_cwd(env::current_dir().as_str())
+    auto seen_keys# = HashMap<string, bool>::new()
+    auto dedup_files# = Vec<string>::new()
+    auto num_raw = files.len()
+    auto idx# = 0:usize
+    loop idx < num_raw {
+        auto &f = files.borrow(idx)
+        auto key# = f.clone()
+        if f.as_str() != "-" {
+            key = compute_identity_key(startup_cwd.as_str(), f.as_str())
+        }
+        auto seen_opt = seen_keys.get(key.clone())
+        match seen_opt {
+            auto Option<bool>::Some(_) => {}
+            _ => {
+                seen_keys#.insert(key.clone(), true)
+                dedup_files#.push(f.clone())
+            }
+        }
+        idx = idx + 1
+    }
+
     match opts.sort_mode {
         auto SortMode::Path => {
-            sort_paths(files#, false)
+            sort_paths(dedup_files#, false)
         }
         auto SortMode::PathReverse => {
-            sort_paths(files#, true)
+            sort_paths(dedup_files#, true)
         }
         auto SortMode::None => {}
     }
 
     return WalkResult(
-        files = cede files,
+        files = cede dedup_files,
         had_error = had_error,
         diagnostics = cede diagnostics
     )

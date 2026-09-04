@@ -117,8 +117,8 @@ pub fn resolve_path(
     if target_path == "-" {
         return ResolvedPath(
             identity_key = string::from("<stdin>"),
-            display_path = string::new(),
-            path_kind = PathKind::Relative
+            display_path = string::from("<stdin>"),
+            path_kind = PathKind::Stdin
         )
     }
 

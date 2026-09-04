@@ -21,8 +21,27 @@ pub shape TextLayout (
 
 pub shape PathKind (
     Relative = 0 |
-    Absolute = 1
+    Absolute = 1 |
+    Stdin = 2
 )
+
+pub fn path_kind_name(kind: PathKind) -> str {
+    match kind {
+        auto PathKind::Relative => { return "workspace_relative" }
+        auto PathKind::Absolute => { return "absolute" }
+        auto PathKind::Stdin => { return "stdin" }
+    }
+    return ""
+}
+
+pub fn scan_pass_name(p: ScanPass) -> str {
+    match p {
+        auto ScanPass::All => { return "all" }
+        auto ScanPass::DefinitionsOnly => { return "definitions" }
+        auto ScanPass::UsagesOnly => { return "usages" }
+    }
+    return ""
+}
 
 pub shape ResolvedPath (
     identity_key: string,
@@ -333,6 +352,7 @@ impl InternedRecord {
 
 pub shape ResultSegment (
     file_id: usize,
+    scan_pass: ScanPass,
     records: Vec<InternedRecord>
 )
 
