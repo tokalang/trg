@@ -2238,8 +2238,8 @@ def main():
         if utf8_dir.exists():
             shutil.rmtree(utf8_dir)
 
-    # Test 97: MCP JSON-RPC 2.0 RFC Standards Compliance
-    log("Test 97: MCP JSON-RPC 2.0 RFC Standards Compliance")
+    # Test 97: MCP line-delimited single-request JSON-RPC 2.0 profile & typed validation
+    log("Test 97: MCP line-delimited single-request JSON-RPC 2.0 profile & typed validation")
     mcp_rfc_dir = fixtures_dir / "test_mcp_rfc"
     try:
         mcp_rfc_dir.mkdir(parents=True, exist_ok=True)
@@ -2580,8 +2580,8 @@ def main():
     assert "no such file or directory" not in r_ff.stderr.lower(), f"Filesystem walk ran before regex compilation! stderr: {r_ff.stderr}"
     log("Regex fail-fast verified.")
 
-    # Test 101: Full JSON stats.matches Mode-Aware Legacy Compatibility Gate
-    log("Test 101: Full JSON stats.matches Mode-Aware Legacy Compatibility Gate")
+    # Test 101: Full JSON stats.matches Mode-Aware Legacy Compatibility Gate (normal/truncated/quiet) & Count Matrix
+    log("Test 101: Full JSON stats.matches Mode-Aware Legacy Compatibility Gate (normal/truncated/quiet) & Count Matrix")
     compat_dir = fixtures_dir / "test_legacy_stats_compat"
     try:
         compat_dir.mkdir(exist_ok=True)

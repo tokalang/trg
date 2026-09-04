@@ -258,7 +258,7 @@ pub fn finalize_search(
     }
     auto legacy_files# = report.budget_state.files_with_match_emitted
     auto legacy_matches# = report.budget_state.matched_lines_emitted
-    if opts.quiet || opts.count {
+    if opts.quiet {
         legacy_files = report.budget_state.files_with_match_observed
         legacy_matches = report.budget_state.matched_lines_observed
     }
