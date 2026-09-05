@@ -1,9 +1,23 @@
 // Syntax and lexical analysis for trg: definitions, scopes, and delimiters.
 import core/str::{str}
 import std/vec::{Vec}
-import src/types::{ScopeFrame, SyntaxFamily}
+import src/types::{ScopeFrame, SyntaxFamily, BlockDelimiter}
 import src/matcher::{SearchPlan}
 import src/file_types::{extract_file_extension}
+
+pub shape DelimiterDepths (
+    brace_depth: usize,
+    paren_depth: usize
+)
+
+impl DelimiterDepths {
+    pub fn clone(self) -> DelimiterDepths {
+        return DelimiterDepths(
+            brace_depth = self.brace_depth,
+            paren_depth = self.paren_depth
+        )
+    }
+}
 
 pub fn utf8_truncate_len(s: str, max_bytes: usize) -> usize {
     if s.len <= max_bytes {
@@ -41,7 +55,7 @@ pub fn compute_line_indent(line: str) -> usize {
     return indent
 }
 
-pub fn update_brace_depth(line: str, depth#: usize) {
+pub fn update_delimiter_depths(line: str, depths#: DelimiterDepths) {
     auto in_str# = false
     auto str_char# = 0:char
     auto escape# = false
@@ -78,15 +92,27 @@ pub fn update_brace_depth(line: str, depth#: usize) {
         }
 
         if ch == ('{' as char) {
-            depth = depth + 1
+            depths.brace_depth = depths.brace_depth + 1
         } else if ch == ('}' as char) {
-            if depth > 0 {
-                depth = depth - 1
+            if depths.brace_depth > 0:usize {
+                depths.brace_depth = depths.brace_depth - 1:usize
+            }
+        } else if ch == ('(' as char) {
+            depths.paren_depth = depths.paren_depth + 1
+        } else if ch == (')' as char) {
+            if depths.paren_depth > 0:usize {
+                depths.paren_depth = depths.paren_depth - 1:usize
             }
         }
 
         i = i + 1
     }
+}
+
+pub fn update_brace_depth(line: str, depth#: usize) {
+    auto d# = DelimiterDepths(brace_depth = depth, paren_depth = 0:usize)
+    update_delimiter_depths(line, d#)
+    depth = d.brace_depth
 }
 
 pub fn extract_declared_identifier(line: str) -> string {
@@ -202,16 +228,140 @@ pub fn is_definition_line(line: str) -> bool {
             s = s.substr(idx, s.len - idx).trim()
         }
     }
+    if s.starts_with("export default ") {
+        s = s.substr(15:usize, s.len - 15:usize).trim()
+    } else if s.starts_with("export ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
     if s.starts_with("async ") {
         s = s.substr(6:usize, s.len - 6:usize).trim()
     }
+    if s.starts_with("inline ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
 
-    if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("class ") ||
-       s.starts_with("struct ") || s.starts_with("shape ") || s.starts_with("interface ") ||
-       s.starts_with("type ") || s.starts_with("impl ") || s.starts_with("function ") {
+    if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("func ") || s.starts_with("function ") ||
+       s.starts_with("class ") || s.starts_with("struct ") || s.starts_with("shape ") ||
+       s.starts_with("interface ") || s.starts_with("trait ") || s.starts_with("type ") ||
+       s.starts_with("enum ") || s.starts_with("impl ") {
         return true
     }
+    if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
+        auto eq_idx = s.index_of('=' as char)
+        if eq_idx.is_some() {
+            auto eq_pos = eq_idx.unwrap()
+            auto after_eq = s.substr(eq_pos + 1:usize, s.len - eq_pos - 1:usize).trim()
+            if after_eq.starts_with("(") {
+                return true
+            }
+        }
+    }
     return false
+}
+
+pub fn detect_block_delimiter(line: str) -> BlockDelimiter {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") {
+        return BlockDelimiter::Brace
+    }
+    auto s# = trimmed
+    if s.starts_with("pub ") {
+        s = s.substr(4:usize, s.len - 4:usize).trim()
+    } else if s.starts_with("pub(") {
+        auto close_paren = s.index_of(')' as char)
+        if close_paren.is_some() {
+            auto idx = close_paren.unwrap() + 1:usize
+            s = s.substr(idx, s.len - idx).trim()
+        }
+    }
+    if s.starts_with("export default ") {
+        s = s.substr(15:usize, s.len - 15:usize).trim()
+    } else if s.starts_with("export ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
+    if s.starts_with("async ") {
+        s = s.substr(6:usize, s.len - 6:usize).trim()
+    }
+    if s.starts_with("inline ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
+
+    // Explicit Brace-bound keywords: ALWAYS Brace, even if parameter list has '(' on this line
+    if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("func ") || s.starts_with("function ") ||
+       s.starts_with("class ") || s.starts_with("struct ") || s.starts_with("interface ") ||
+       s.starts_with("trait ") || s.starts_with("type ") || s.starts_with("enum ") || s.starts_with("impl ") {
+        return BlockDelimiter::Brace
+    }
+
+    // Explicit Paren-bound keywords: Toka shape or tuple/record const
+    if s.starts_with("shape ") {
+        return BlockDelimiter::Paren
+    }
+    if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
+        auto eq_idx = s.index_of('=' as char)
+        if eq_idx.is_some() {
+            auto eq_pos = eq_idx.unwrap()
+            auto after_eq = s.substr(eq_pos + 1:usize, s.len - eq_pos - 1:usize).trim()
+            if after_eq.starts_with("(") {
+                return BlockDelimiter::Paren
+            }
+        }
+    }
+
+    return BlockDelimiter::Brace
+}
+
+pub fn check_is_runaway_definition(
+    line_text: str,
+    line_brace_depth: usize,
+    target_delim: BlockDelimiter,
+    target_depth: usize
+) -> bool {
+    if !is_definition_line(line_text) {
+        return false
+    }
+    match target_delim {
+        auto BlockDelimiter::Paren => {
+            // Paren blocks (shape, const) NEVER legitimately contain sub-definitions
+            return true
+        }
+        auto BlockDelimiter::Brace => {
+            // Brace blocks: a definition is a runaway if it starts at depth <= target_depth.
+            // Note: line_brace_depth is depth after line_text.
+            // If the definition line opened a brace, depth before line was line_brace_depth - 1.
+            auto d_before# = line_brace_depth
+            if line_text.index_of('{' as char).is_some() && d_before > 0:usize {
+                d_before = d_before - 1:usize
+            }
+            if d_before <= target_depth {
+                return true
+            }
+            return false
+        }
+    }
+}
+
+pub fn check_is_self_closed_line(
+    line_text: str,
+    target_delim: BlockDelimiter,
+    line_brace_depth: usize,
+    line_paren_depth: usize,
+    target_depth: usize
+) -> bool {
+    match target_delim {
+        auto BlockDelimiter::Paren => {
+            if line_paren_depth <= target_depth && line_text.index_of(')' as char).is_some() {
+                return true
+            }
+            return false
+        }
+        auto BlockDelimiter::Brace => {
+            if line_brace_depth <= target_depth && line_text.index_of('}' as char).is_some() {
+                return true
+            }
+            return false
+        }
+    }
 }
 
 pub fn detect_declaration_scope(line: str) -> string {
@@ -219,32 +369,61 @@ pub fn detect_declaration_scope(line: str) -> string {
     if !is_definition_line(trimmed) {
         return string::from("")
     }
-    auto max_len# = trimmed.len
-    auto paren_depth# = 0:usize
-    auto i# = 0:usize
-    loop i < trimmed.len {
-        auto ch = trimmed.byte_at(i)
-        if ch == ('(' as char) {
-            paren_depth = paren_depth + 1
-        } else if ch == (')' as char) {
-            if paren_depth > 0 { paren_depth = paren_depth - 1 }
-        } else if paren_depth == 0 {
-            if ch == ('{' as char) {
-                max_len = i
-                break
-            } else if ch == (':' as char) {
-                max_len = i
+
+    auto s# = trimmed
+    if s.starts_with("pub ") {
+        s = s.substr(4:usize, s.len - 4:usize).trim()
+    } else if s.starts_with("pub(") {
+        auto close_paren = s.index_of(')' as char)
+        if close_paren.is_some() {
+            auto idx = close_paren.unwrap() + 1:usize
+            s = s.substr(idx, s.len - idx).trim()
+        }
+    }
+    if s.starts_with("async ") {
+        s = s.substr(6:usize, s.len - 6:usize).trim()
+    }
+
+    auto is_callable = s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("function ")
+    auto start_search_idx = trimmed.len - s.len
+
+    if is_callable {
+        auto paren_pos# = trimmed.len
+        auto i# = start_search_idx
+        loop i < trimmed.len {
+            auto ch = trimmed.byte_at(i)
+            if ch == ('(' as char) || ch == ('{' as char) || ch == (':' as char) {
+                paren_pos = i
                 break
             }
+            i = i + 1
         }
-        i = i + 1
+        auto prefix# = trimmed.substr(0, paren_pos).trim()
+        if prefix.len + 2:usize > 60:usize {
+            auto cut = utf8_truncate_len(prefix, 58:usize)
+            prefix = prefix.substr(0, cut).trim()
+        }
+        auto res# = string::from(prefix)
+        res#.push_str("()")
+        return res
+    } else {
+        auto cut_idx# = trimmed.len
+        auto i# = start_search_idx
+        loop i < trimmed.len {
+            auto ch = trimmed.byte_at(i)
+            if ch == ('{' as char) || ch == (':' as char) || ch == ('(' as char) {
+                cut_idx = i
+                break
+            }
+            i = i + 1
+        }
+        auto decl_sub# = trimmed.substr(0, cut_idx).trim()
+        if decl_sub.len > 60:usize {
+            auto cut = utf8_truncate_len(decl_sub, 60:usize)
+            decl_sub = decl_sub.substr(0, cut).trim()
+        }
+        return string::from(decl_sub)
     }
-    auto decl_sub# = trimmed.substr(0, max_len).trim()
-    if decl_sub.len > 60 {
-        auto cut = utf8_truncate_len(decl_sub, 60:usize)
-        decl_sub = decl_sub.substr(0, cut).trim()
-    }
-    return string::from(decl_sub)
 }
 
 pub shape ScopeTracker (

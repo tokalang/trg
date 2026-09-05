@@ -44,7 +44,9 @@ pub shape OptionFamily (
     PathStyle = 26 |        // --path-style, --path-style=*
     DeduplicateTargets = 27 | // --deduplicate-targets, --no-deduplicate-targets
     GroupByScope = 28 |     // --group-by-scope
-    SymbolVariants = 29     // --symbol-variants
+    SymbolVariants = 29 |   // --symbol-variants
+    Snippet = 30 |          // --snippet, --kwic
+    SnippetChars = 31       // --snippet-chars, --snippet-chars=*
 )
 
 pub shape OptionToken (
@@ -211,6 +213,11 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                 i = i + 1
                 continue
             }
+            if view.starts_with("--snippet-chars=") {
+                families#.push(OptionToken(family = OptionFamily::SnippetChars, token = string::from(view)))
+                i = i + 1
+                continue
+            }
 
             // Two-token value-taking long options
             if view == "--glob" || view == "--type" || view == "--type-not" || view == "--regexp" ||
@@ -218,7 +225,7 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                view == "--max-total-matches" || view == "--max-result-bytes" ||
                view == "--max-files-with-matches" || view == "--sort" || view == "--sortr" ||
                view == "--context" || view == "--before-context" || view == "--after-context" ||
-               view == "--max-block-lines" || view == "--path-style" {
+               view == "--max-block-lines" || view == "--path-style" || view == "--snippet-chars" {
                 if i + 1 >= num_args {
                     auto err# = string::from("Option '")
                     err#.push_str(view)
@@ -241,6 +248,7 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
                 else if view == "--context" || view == "--before-context" || view == "--after-context" { fam = OptionFamily::Context }
                 else if view == "--max-block-lines" { fam = OptionFamily::MaxBlockLines }
                 else if view == "--path-style" { fam = OptionFamily::PathStyle }
+                else if view == "--snippet-chars" { fam = OptionFamily::SnippetChars }
 
                 families#.push(OptionToken(family = fam, token = string::from(view)))
                 i = i + 2:usize
@@ -265,6 +273,11 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
             }
             if view == "--symbol-variants" {
                 families#.push(OptionToken(family = OptionFamily::SymbolVariants, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--snippet" || view == "--kwic" {
+                families#.push(OptionToken(family = OptionFamily::Snippet, token = string::from(view)))
                 i = i + 1
                 continue
             }
@@ -536,6 +549,12 @@ pub fn find_family_token(tokens: Vec<OptionToken>, target: OptionFamily) -> Opti
             auto OptionFamily::SymbolVariants => {
                 match target { auto OptionFamily::SymbolVariants => { matched = true } _ => {} }
             }
+            auto OptionFamily::Snippet => {
+                match target { auto OptionFamily::Snippet => { matched = true } _ => {} }
+            }
+            auto OptionFamily::SnippetChars => {
+                match target { auto OptionFamily::SnippetChars => { matched = true } _ => {} }
+            }
         }
         if matched {
             return Option<string>::Some(ot.token.clone())
@@ -711,6 +730,8 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
             auto scope# = ParamBoolState(state = 0:u8, value = false)
             auto group_by_scope# = ParamBoolState(state = 0:u8, value = false)
             auto symbol_variants# = ParamBoolState(state = 0:u8, value = false)
+            auto snippet# = ParamBoolState(state = 0:u8, value = false)
+            auto snippet_chars# = ParamUsizeState(state = 0:u8, value = 0:usize)
             auto max_total_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
             auto max_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
             auto max_result_bytes# = ParamStringState(state = 0:u8, value = string::new())
@@ -802,6 +823,14 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
                     auto r = parse_bool_param(node, "symbol_variants")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     symbol_variants = r.unwrap()
+                } else if k == "snippet" {
+                    auto r = parse_bool_param(node, "snippet")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    snippet = r.unwrap()
+                } else if k == "snippet_chars" {
+                    auto r = parse_nullable_usize_param(node, "snippet_chars", 5:usize, 500:usize)
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    snippet_chars = r.unwrap()
                 } else if k == "max_total_matches" {
                     auto r = parse_nullable_usize_param(node, "max_total_matches", 0:usize, 9007199254740991:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
@@ -1160,6 +1189,22 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
                 return Result<Vec<string>, string>::Err(cede err)
             }
 
+            auto tok_snip = find_family_token(families, OptionFamily::Snippet)
+            if tok_snip.is_some() && snippet.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'snippet' conflicts with args option '")
+                err#.push_str(tok_snip.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_sc_chars = find_family_token(families, OptionFamily::SnippetChars)
+            if tok_sc_chars.is_some() && snippet_chars.state != 0:u8 {
+                auto err# = string::from("Invalid params: typed property 'snippet_chars' conflicts with args option '")
+                err#.push_str(tok_sc_chars.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
             auto is_symbol_variants_active = (symbol_variants.state == 2:u8 && symbol_variants.value) || tok_sv.is_some()
             if is_symbol_variants_active {
                 auto is_regex_active# = false
@@ -1277,6 +1322,18 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
             // Symbol variants
             if symbol_variants.state == 2:u8 && symbol_variants.value {
                 cli_args#.push(string::from("--symbol-variants"))
+            }
+
+            // Snippet
+            if snippet.state == 2:u8 && snippet.value {
+                cli_args#.push(string::from("--snippet"))
+            }
+
+            // Snippet chars
+            if snippet_chars.state == 2:u8 {
+                auto s# = string::from("--snippet-chars=")
+                s#.push_str(u64_to_string(snippet_chars.value as u64).as_str())
+                cli_args#.push(cede s)
             }
 
             // Context

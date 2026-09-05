@@ -1,0 +1,589 @@
+// Stateless point hydration engine (trg view)
+import core/str::{str}
+
+import std/vec::{Vec}
+import std/io::{println}
+import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
+import src/posix::{posix_ferror, print_err, posix_write_stdout}
+import src/types::{BlockRange, SyntaxFamily, BlockDelimiter}
+import src/syntax::{
+    detect_syntax_family,
+    compute_line_indent,
+    update_delimiter_depths,
+    DelimiterDepths,
+    is_definition_line,
+    detect_block_delimiter,
+    check_is_runaway_definition,
+    check_is_self_closed_line
+}
+import src/printer::{u64_to_string}
+
+pub shape ViewOptions (
+    file_path: string,
+    line: Option<usize>,
+    context: usize,
+    block: bool,
+    lines_range: Option<BlockRange>
+)
+
+impl ViewOptions {
+    pub fn new(file_path: string) -> ViewOptions {
+        return ViewOptions(
+            file_path = file_path.clone(),
+            line = Option<usize>::None,
+            context = 10:usize,
+            block = false,
+            lines_range = Option<BlockRange>::None
+        )
+    }
+}
+
+pub fn read_file_lines(path: str) -> Result<Vec<string>, string> {
+    auto path_str = string::from(path)
+    auto mode_buf# = [0:char; 4]
+    mode_buf[0] = 'r' as char
+    mode_buf[1] = 'b' as char
+    mode_buf[2] = 0 as char
+
+    auto lines# = Vec<string>::new()
+
+    unsafe {
+        auto *mode_ptr = &mode_buf[0] as *char
+        auto *path_c = path_str.c_str()
+        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
+        if *fp == null {
+            auto err# = string::from("Failed to open file '")
+            err#.push_str(path)
+            err#.push_str("': No such file or directory or permission denied")
+            return Result<Vec<string>, string>::Err(cede err)
+        }
+        auto *file = fp.unwrap()
+        auto nul *raw_buf = libc_malloc(65536:usize)
+        if *raw_buf == null {
+            libc_fclose(*file)
+            return Result<Vec<string>, string>::Err(string::from("Out of memory reading file"))
+        }
+        auto *buf = raw_buf.unwrap()
+        auto line_buf# = string::new()
+        auto read_err# = false
+
+        loop true {
+            auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            if n == 0 {
+                if posix_ferror((*file) as Addr) {
+                    read_err = true
+                }
+                break
+            }
+
+            auto *c_ptr = ((*buf) as Addr) as *char
+            auto chunk_str = string::from_with_len(*c_ptr, n)
+            auto chunk_view = chunk_str.as_str()
+            auto cursor# = 0:usize
+
+            loop cursor < chunk_view.len {
+                auto rem = chunk_view.substr(cursor, chunk_view.len - cursor)
+                auto nl_opt = rem.index_of('\n' as char)
+                if nl_opt.is_none() {
+                    line_buf#.push_str(rem)
+                    break
+                }
+                auto nl_pos = nl_opt.unwrap()
+                auto chunk_slice = rem.substr(0, nl_pos)
+                line_buf#.push_str(chunk_slice)
+                {
+                    auto full_view = line_buf.as_str()
+                    auto pat_text# = full_view
+                    if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                        pat_text = full_view.substr(0, full_view.len - 1)
+                    }
+                    lines#.push(string::from(pat_text))
+                }
+                line_buf#.clear()
+                cursor = cursor + nl_pos + 1
+            }
+        }
+
+        if !read_err && line_buf.len() > 0 {
+            {
+                auto full_view = line_buf.as_str()
+                auto pat_text# = full_view
+                if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                    pat_text = full_view.substr(0, full_view.len - 1)
+                }
+                lines#.push(string::from(pat_text))
+            }
+            line_buf#.clear()
+        }
+
+        libc_free(*buf)
+        libc_fclose(*file)
+
+        if read_err {
+            auto err# = string::from("Error reading file '")
+            err#.push_str(path)
+            err#.push_str("'")
+            return Result<Vec<string>, string>::Err(cede err)
+        }
+    }
+
+    return Result<Vec<string>, string>::Ok(cede lines)
+}
+
+pub fn parse_usize_val(s: str) -> Result<usize, string> {
+    if s.len == 0 {
+        return Result<usize, string>::Err(string::from("Expected positive integer"))
+    }
+    auto val# = 0:usize
+    auto i# = 0:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i)
+        if ch < ('0' as char) || ch > ('9' as char) {
+            return Result<usize, string>::Err(string::from("Expected integer digits"))
+        }
+        val = val * 10:usize + ((ch as usize) - ('0' as usize))
+        i = i + 1
+    }
+    return Result<usize, string>::Ok(val)
+}
+
+pub fn parse_range_spec(s: str) -> Result<BlockRange, string> {
+    auto dash_opt = s.index_of('-' as char)
+    if dash_opt.is_none() {
+        return Result<BlockRange, string>::Err(string::from("Invalid line range: expected '<start>-<end>'"))
+    }
+    auto dash_idx = dash_opt.unwrap()
+    auto start_str = s.substr(0, dash_idx)
+    auto end_str = s.substr(dash_idx + 1, s.len - dash_idx - 1)
+    auto s_res = parse_usize_val(start_str)
+    if s_res.is_err() { return Result<BlockRange, string>::Err(s_res.unwrap_err()) }
+    auto e_res = parse_usize_val(end_str)
+    if e_res.is_err() { return Result<BlockRange, string>::Err(e_res.unwrap_err()) }
+    auto start = s_res.unwrap()
+    auto end = e_res.unwrap()
+    if start == 0:usize || end < start {
+        return Result<BlockRange, string>::Err(string::from("Invalid line range: start must be >= 1 and <= end"))
+    }
+    return Result<BlockRange, string>::Ok(BlockRange(start = start, end = end))
+}
+
+fn find_last_colon(s: str) -> Option<usize> {
+    auto i# = s.len
+    loop i > 0 {
+        i = i - 1
+        if s.byte_at(i) == (':' as char) {
+            return Option<usize>::Some(i)
+        }
+    }
+    return Option<usize>::None
+}
+
+pub fn execute_view_operation(opts: ViewOptions) -> Result<string, string> {
+    auto lines_res = read_file_lines(opts.file_path.as_str())
+    if lines_res.is_err() {
+        return Result<string, string>::Err(lines_res.unwrap_err())
+    }
+    auto lines = lines_res.unwrap()
+    auto total_lines = lines.len()
+    if total_lines == 0:usize {
+        return Result<string, string>::Err(string::from("File is empty"))
+    }
+
+    match opts.lines_range {
+        auto Option<BlockRange>::Some(range) => {
+            if range.start > total_lines {
+                auto err# = string::from("Line range start out of bounds: file has ")
+                err#.push_str(u64_to_string(total_lines as u64).as_str())
+                err#.push_str(" lines, requested start ")
+                err#.push_str(u64_to_string(range.start as u64).as_str())
+                return Result<string, string>::Err(cede err)
+            }
+            auto end_capped# = range.end
+            if end_capped > total_lines {
+                end_capped = total_lines
+            }
+            auto out# = string::new()
+            auto lnum# = range.start
+            loop lnum <= end_capped {
+                out#.push_str(u64_to_string(lnum as u64).as_str())
+                out#.push_str(":")
+                out#.push_str(lines.borrow(lnum - 1).as_str())
+                out#.push_str("\n")
+                lnum = lnum + 1
+            }
+            return Result<string, string>::Ok(cede out)
+        }
+        _ => {}
+    }
+
+    auto target_line# = 0:usize
+    match opts.line {
+        auto Option<usize>::Some(tl) => {
+            target_line = tl
+        }
+        _ => {
+            return Result<string, string>::Err(string::from("Viewing requires a target line number (e.g. <path>:<line>)"))
+        }
+    }
+
+    if target_line == 0:usize || target_line > total_lines {
+        auto err# = string::from("Line number out of bounds: file has ")
+        err#.push_str(u64_to_string(total_lines as u64).as_str())
+        err#.push_str(" lines, requested line ")
+        err#.push_str(u64_to_string(target_line as u64).as_str())
+        return Result<string, string>::Err(cede err)
+    }
+
+    if opts.block {
+        auto family = detect_syntax_family(opts.file_path.as_str())
+        auto block_start# = target_line
+        auto block_end# = target_line
+        auto block_closed# = false
+
+        match family {
+            auto SyntaxFamily::Indent => {
+                auto cur_indent = compute_line_indent(lines.borrow(target_line - 1).as_str())
+                auto is_def = is_definition_line(lines.borrow(target_line - 1).as_str())
+                auto target_indent# = cur_indent
+                if !is_def {
+                    auto k# = target_line - 1
+                    loop k > 0 {
+                        auto trimmed = lines.borrow(k - 1).as_str().trim()
+                        if trimmed.len > 0 && !trimmed.starts_with("#") {
+                            auto indent_k = compute_line_indent(lines.borrow(k - 1).as_str())
+                            if indent_k < cur_indent {
+                                block_start = k
+                                target_indent = indent_k
+                                break
+                            }
+                        }
+                        k = k - 1
+                    }
+                }
+                auto f# = target_line + 1
+                loop f <= total_lines {
+                    auto trimmed = lines.borrow(f - 1).as_str().trim()
+                    if trimmed.len > 0 && !trimmed.starts_with("#") {
+                        auto indent_f = compute_line_indent(lines.borrow(f - 1).as_str())
+                        if indent_f <= target_indent {
+                            block_end = f - 1
+                            block_closed = true
+                            break
+                        }
+                    }
+                    f = f + 1
+                }
+            }
+            auto SyntaxFamily::Brace => {
+                // Compute brace and paren depths
+                auto depths_before# = Vec<DelimiterDepths>::new()
+                auto depths_after# = Vec<DelimiterDepths>::new()
+                auto d# = DelimiterDepths(brace_depth = 0:usize, paren_depth = 0:usize)
+                auto li# = 0:usize
+                loop li < total_lines {
+                    depths_before#.push(d.clone())
+                    update_delimiter_depths(lines.borrow(li).as_str(), d#)
+                    depths_after#.push(d.clone())
+                    li = li + 1
+                }
+
+                auto cur_brace_depth = depths_after.borrow(target_line - 1).brace_depth
+                auto is_def = is_definition_line(lines.borrow(target_line - 1).as_str())
+                if is_def {
+                    block_start = target_line
+                } else {
+                    auto k# = target_line - 1
+                    loop k > 0 {
+                        auto k_line = lines.borrow(k - 1).as_str()
+                        if is_definition_line(k_line) || depths_before.borrow(k - 1).brace_depth < cur_brace_depth {
+                            block_start = k
+                            break
+                        }
+                        k = k - 1
+                    }
+                }
+
+                auto start_line_text = lines.borrow(block_start - 1).as_str()
+                auto delim = detect_block_delimiter(start_line_text)
+                auto target_depth# = 0:usize
+                if delim == BlockDelimiter::Brace {
+                    target_depth = depths_before.borrow(block_start - 1).brace_depth
+                } else {
+                    target_depth = 0:usize
+                }
+
+                auto &start_d_after = depths_after.borrow(block_start - 1)
+                if check_is_self_closed_line(start_line_text, delim, start_d_after.brace_depth, start_d_after.paren_depth, target_depth) {
+                    block_end = block_start
+                    block_closed = true
+                } else {
+                    auto f# = block_start + 1
+                    loop f <= total_lines {
+                        auto f_line = lines.borrow(f - 1).as_str()
+                        auto &f_d_after = depths_after.borrow(f - 1)
+
+                        // Runaway Guard: check if sibling definition started before closing!
+                        if check_is_runaway_definition(f_line, f_d_after.brace_depth, delim, target_depth) {
+                            break
+                        }
+
+                        match delim {
+                            auto BlockDelimiter::Paren => {
+                                if f_d_after.paren_depth <= target_depth && f_line.index_of(')' as char).is_some() {
+                                    block_end = f
+                                    block_closed = true
+                                    break
+                                }
+                            }
+                            auto BlockDelimiter::Brace => {
+                                if f_d_after.brace_depth <= target_depth && f_line.index_of('}' as char).is_some() {
+                                    block_end = f
+                                    block_closed = true
+                                    break
+                                }
+                            }
+                        }
+                        f = f + 1
+                    }
+                }
+            }
+        }
+
+        if !block_closed {
+            return Result<string, string>::Err(string::from("Unclosed code block: block could not be deterministically closed (fail-closed)"))
+        }
+
+        if block_end < target_line {
+            block_end = target_line
+        }
+
+        auto is_truncated# = false
+        if block_end - block_start + 1 > 80:usize {
+            block_end = block_start + 79:usize
+            is_truncated = true
+        }
+
+        auto out# = string::new()
+        if !is_truncated {
+            out#.push_str("[block: L")
+            out#.push_str(u64_to_string(block_start as u64).as_str())
+            out#.push_str("-L")
+            out#.push_str(u64_to_string(block_end as u64).as_str())
+            out#.push_str("]\n")
+        } else {
+            out#.push_str("[block truncated: exceeded maximum 80 lines]\n")
+        }
+
+        auto lnum# = block_start
+        loop lnum <= block_end {
+            out#.push_str(u64_to_string(lnum as u64).as_str())
+            if lnum == target_line {
+                out#.push_str(":")
+            } else {
+                out#.push_str("-")
+            }
+            out#.push_str(lines.borrow(lnum - 1).as_str())
+            out#.push_str("\n")
+            lnum = lnum + 1
+        }
+        return Result<string, string>::Ok(cede out)
+    }
+
+    // Normal line hydration with context
+    auto start_line# = 1:usize
+    if target_line > opts.context {
+        start_line = target_line - opts.context
+    }
+    auto end_line# = target_line + opts.context
+    if end_line > total_lines {
+        end_line = total_lines
+    }
+
+    auto out# = string::new()
+    auto lnum# = start_line
+    loop lnum <= end_line {
+        out#.push_str(u64_to_string(lnum as u64).as_str())
+        if lnum == target_line {
+            out#.push_str(":")
+        } else {
+            out#.push_str("-")
+        }
+        out#.push_str(lines.borrow(lnum - 1).as_str())
+        out#.push_str("\n")
+        lnum = lnum + 1
+    }
+    return Result<string, string>::Ok(cede out)
+}
+
+pub fn execute_view_cli(args: Vec<string>) -> i32 {
+    auto num_args = args.len()
+    if num_args < 3:usize {
+        print_err("Usage: trg view <path>:<line> [-C N] [--block] | trg view <path> --lines <start>-<end>")
+        return 2
+    }
+
+    auto path_opt# = Option<string>::None
+    auto line_opt# = Option<usize>::None
+    auto context# = 10:usize
+    auto block# = false
+    auto lines_range# = Option<BlockRange>::None
+
+    auto i# = 2:usize
+    loop i < num_args {
+        auto &arg = args.borrow(i)
+        auto view = arg.as_str()
+
+        if view == "-h" || view == "--help" {
+            println("Usage: trg view <path>:<line> [-C N] [--block] | trg view <path> --lines <start>-<end>")
+            println("")
+            println("Options:")
+            println("  -C, --context <NUM>  Lines of context around target line (default: 10)")
+            println("      --block          Expand enclosing syntactic block context")
+            println("      --lines <M-N>    Extract explicit physical line range M to N")
+            return 0
+        }
+
+        if view == "--block" {
+            block = true
+            i = i + 1
+            continue
+        }
+
+        if view == "-C" || view == "--context" {
+            if i + 1 >= num_args {
+                print_err("Option requires an argument: -C / --context")
+                return 2
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto c_res = parse_usize_val(val_arg.as_str())
+            if c_res.is_err() {
+                print_err("Invalid context number")
+                return 2
+            }
+            context = c_res.unwrap()
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-C") && view.len > 2:usize {
+            auto val_str = view.substr(2:usize, view.len - 2:usize)
+            auto c_res = parse_usize_val(val_str)
+            if c_res.is_err() {
+                print_err("Invalid context number")
+                return 2
+            }
+            context = c_res.unwrap()
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--context=") {
+            auto val_str = view.substr(10:usize, view.len - 10:usize)
+            auto c_res = parse_usize_val(val_str)
+            if c_res.is_err() {
+                print_err("Invalid context number")
+                return 2
+            }
+            context = c_res.unwrap()
+            i = i + 1
+            continue
+        }
+
+        if view == "--lines" {
+            if i + 1 >= num_args {
+                print_err("Option requires an argument: --lines")
+                return 2
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            auto r_res = parse_range_spec(val_arg.as_str())
+            if r_res.is_err() {
+                print_err(r_res.unwrap_err().as_str())
+                return 2
+            }
+            lines_range = Option<BlockRange>::Some(r_res.unwrap())
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--lines=") {
+            auto val_str = view.substr(8:usize, view.len - 8:usize)
+            auto r_res = parse_range_spec(val_str)
+            if r_res.is_err() {
+                print_err(r_res.unwrap_err().as_str())
+                return 2
+            }
+            lines_range = Option<BlockRange>::Some(r_res.unwrap())
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("-") {
+            auto err# = string::from("Unknown option '")
+            err#.push_str(view)
+            err#.push_str("'")
+            print_err(err.as_str())
+            return 2
+        }
+
+        // Positional argument: path or path:line or line
+        if path_opt.is_none() {
+            auto colon_opt = find_last_colon(view)
+            if colon_opt.is_some() {
+                auto c_idx = colon_opt.unwrap()
+                auto p_slice = view.substr(0, c_idx)
+                auto l_slice = view.substr(c_idx + 1, view.len - c_idx - 1)
+                auto l_res = parse_usize_val(l_slice)
+                if l_res.is_ok() {
+                    path_opt = Option<string>::Some(string::from(p_slice))
+                    line_opt = Option<usize>::Some(l_res.unwrap())
+                    i = i + 1
+                    continue
+                }
+            }
+            path_opt = Option<string>::Some(string::from(view))
+            i = i + 1
+            continue
+        } else if line_opt.is_none() && lines_range.is_none() {
+            auto l_res = parse_usize_val(view)
+            if l_res.is_ok() {
+                line_opt = Option<usize>::Some(l_res.unwrap())
+                i = i + 1
+                continue
+            }
+        }
+
+        auto err# = string::from("Unexpected argument '")
+        err#.push_str(view)
+        err#.push_str("'")
+        print_err(err.as_str())
+        return 2
+    }
+
+    if path_opt.is_none() {
+        print_err("trg view: missing file path")
+        return 2
+    }
+
+    auto opts = ViewOptions(
+        file_path = path_opt.unwrap(),
+        line = line_opt,
+        context = context,
+        block = block,
+        lines_range = lines_range
+    )
+
+    auto res = execute_view_operation(opts)
+    if res.is_err() {
+        print_err(res.unwrap_err().as_str())
+        return 2
+    }
+
+    auto text = res.unwrap()
+    auto write_res = posix_write_stdout(text.as_str())
+    if write_res == 2 {
+        return 2
+    }
+    return 0
+}

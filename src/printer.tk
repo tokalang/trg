@@ -27,6 +27,7 @@ import src/types::{
     scan_pass_name
 }
 import src/posix::{posix_write_stdout, print_err}
+import src/snippet::{format_kwic_snippet}
 
 pub shape EmitOutcome (
     Written = 0 |
@@ -48,7 +49,9 @@ pub shape FormatConfig (
     scope: bool,
     group_by_scope: bool,
     with_filename: bool,
-    max_block_lines: usize
+    max_block_lines: usize,
+    snippet: bool,
+    snippet_chars: usize
 )
 
 impl FormatConfig {
@@ -60,7 +63,9 @@ impl FormatConfig {
             scope = false,
             group_by_scope = false,
             with_filename = true,
-            max_block_lines = 80:usize
+            max_block_lines = 80:usize,
+            snippet = false,
+            snippet_chars = 30:usize
         )
     }
 
@@ -81,7 +86,9 @@ impl FormatConfig {
             scope = opts.scope,
             group_by_scope = opts.group_by_scope,
             with_filename = wf,
-            max_block_lines = opts.max_block_lines
+            max_block_lines = opts.max_block_lines,
+            snippet = opts.snippet,
+            snippet_chars = opts.snippet_chars
         )
     }
 }
@@ -465,6 +472,10 @@ fn render_batch_text(
                             }
                             if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
                                 out#.push_str("[Omitted long matching line]\n")
+                            } else if fmt_cfg.snippet && rec.submatches.len() > 0 {
+                                auto snip = format_kwic_snippet(rec.text.as_str(), rec.submatches, fmt_cfg.snippet_chars)
+                                out#.push_str(snip.as_str())
+                                out#.push_str("\n")
                             } else {
                                 out#.push_str(rec.text.as_str())
                                 out#.push_str("\n")
@@ -548,6 +559,10 @@ fn render_batch_text(
                             }
                             if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
                                 out#.push_str("[Omitted long matching line]\n")
+                            } else if fmt_cfg.snippet && rec.submatches.len() > 0 {
+                                auto snip = format_kwic_snippet(rec.text.as_str(), rec.submatches, fmt_cfg.snippet_chars)
+                                out#.push_str(snip.as_str())
+                                out#.push_str("\n")
                             } else {
                                 out#.push_str(rec.text.as_str())
                                 out#.push_str("\n")

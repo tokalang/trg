@@ -5,8 +5,9 @@ import std/hashmap::{HashMap}
 import std/env as env
 import stdx/serde/json::{JsonNode}
 import std/math::{is_finite, floor}
-import src/types::{CliOptions, OutputFormat, SearchReport, SearchDiagnostic, BudgetState}
-import src/path_norm::{normalize_cwd}
+import src/types::{CliOptions, OutputFormat, SearchReport, SearchDiagnostic, BudgetState, BlockRange}
+import src/path_norm::{normalize_cwd, resolves_to_root, compute_identity_key}
+import src/view::{ViewOptions, execute_view_operation}
 import src/posix::{posix_write_stdout, posix_read_stdin_line}
 import src/cli::{parse_cli_args_from_vec}
 import src/printer::{
@@ -216,7 +217,7 @@ pub fn run_mcp_server() -> i32 {
                     resp#.push_str(id_str.as_str())
                     resp#.push_str(",\"result\":{\"protocolVersion\":\"")
                     resp#.push_str(negotiated.as_str())
-                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.12.0\"}}}\n")
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.13.0\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
@@ -265,9 +266,246 @@ pub fn run_mcp_server() -> i32 {
                                             continue
                                         }
                                     }
-                                    if tool_name.as_str() != "trg_search" {
+                                    if tool_name.as_str() != "trg_search" && tool_name.as_str() != "trg_view" {
                                         send_error(id_str.as_str(), -32602, "Invalid params: Unknown tool")
                                         continue
+                                    }
+
+                                    if tool_name.as_str() == "trg_view" {
+                                        match p_map.try_borrow(string::from("arguments")) {
+                                            auto Option<&JsonNode>::Some(&a_val) => {
+                                                match a_val {
+                                                    auto JsonNode::ObjectNode(&arg_map) => {
+                                                        auto iter# = arg_map.iter()
+                                                        auto unexp_opt# = Option<string>::None
+                                                        loop true {
+                                                            auto nxt = iter#.next_ref()
+                                                            if nxt.is_none() { break }
+                                                            auto entry = nxt.unwrap()
+                                                            auto k = entry.key().as_str()
+                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" {
+                                                                unexp_opt = Option<string>::Some(entry.key().clone())
+                                                                break
+                                                            }
+                                                        }
+                                                        if unexp_opt.is_some() {
+                                                            auto err# = string::from("Invalid params: unexpected property '")
+                                                            err#.push_str(unexp_opt.unwrap().as_str())
+                                                            err#.push_str("'")
+                                                            send_error(id_str.as_str(), -32602, err.as_str())
+                                                            continue
+                                                        }
+
+                                                        auto path_str# = string::new()
+                                                        auto has_path# = false
+                                                        match arg_map.try_borrow(string::from("path")) {
+                                                            auto Option<&JsonNode>::Some(&pn) => {
+                                                                match pn {
+                                                                    auto JsonNode::StrNode(&ps) => {
+                                                                        if ps.len() > 0 {
+                                                                            path_str = ps.clone()
+                                                                            has_path = true
+                                                                        }
+                                                                    }
+                                                                    _ => {}
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if !has_path {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'path' is required and must be a non-empty string")
+                                                            continue
+                                                        }
+
+                                                        if startup_cwd.as_str() == "/" && !path_str.as_str().starts_with("/") {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: relative path cannot be safely resolved when MCP server working directory is root ('/'); please provide an absolute path")
+                                                            continue
+                                                        }
+                                                        if resolves_to_root(startup_cwd.as_str(), path_str.as_str()) {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: target path resolves to filesystem root ('/'); viewing root is not allowed in MCP mode")
+                                                            continue
+                                                        }
+
+                                                        auto line_opt# = Option<usize>::None
+                                                        auto line_err# = false
+                                                        match arg_map.try_borrow(string::from("line")) {
+                                                            auto Option<&JsonNode>::Some(&ln) => {
+                                                                match ln {
+                                                                    auto JsonNode::NumNode(n) => {
+                                                                        if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
+                                                                            line_opt = Option<usize>::Some(n as usize)
+                                                                        } else {
+                                                                            line_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {}
+                                                                    _ => {
+                                                                        line_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if line_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'line' must be an integer >= 1 or null")
+                                                            continue
+                                                        }
+
+                                                        auto context_val# = 10:usize
+                                                        auto context_err# = false
+                                                        match arg_map.try_borrow(string::from("context")) {
+                                                            auto Option<&JsonNode>::Some(&cn) => {
+                                                                match cn {
+                                                                    auto JsonNode::NumNode(n) => {
+                                                                        if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 1000.0 {
+                                                                            context_val = n as usize
+                                                                        } else {
+                                                                            context_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {
+                                                                        context_val = 10:usize
+                                                                    }
+                                                                    _ => {
+                                                                        context_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if context_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'context' must be an integer between 0 and 1000")
+                                                            continue
+                                                        }
+
+                                                        auto block_val# = false
+                                                        auto block_err# = false
+                                                        match arg_map.try_borrow(string::from("block")) {
+                                                            auto Option<&JsonNode>::Some(&bn) => {
+                                                                match bn {
+                                                                    auto JsonNode::BoolNode(b) => {
+                                                                        block_val = b
+                                                                    }
+                                                                    _ => {
+                                                                        block_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if block_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'block' must be a boolean")
+                                                            continue
+                                                        }
+
+                                                        auto lines_range_opt# = Option<BlockRange>::None
+                                                        auto lines_err# = false
+                                                        auto lines_order_err# = false
+                                                        match arg_map.try_borrow(string::from("lines")) {
+                                                            auto Option<&JsonNode>::Some(&lsn) => {
+                                                                match lsn {
+                                                                    auto JsonNode::ArrayNode(&arr) => {
+                                                                        if arr.len() == 2:usize {
+                                                                            auto &item0 = arr.borrow(0)
+                                                                            auto &item1 = arr.borrow(1)
+                                                                            auto s_num# = 0:usize
+                                                                            auto e_num# = 0:usize
+                                                                            auto ok0# = false
+                                                                            auto ok1# = false
+                                                                            match item0 {
+                                                                                auto JsonNode::NumNode(n) => {
+                                                                                    if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
+                                                                                        s_num = n as usize
+                                                                                        ok0 = true
+                                                                                    }
+                                                                                }
+                                                                                _ => {}
+                                                                            }
+                                                                            match item1 {
+                                                                                auto JsonNode::NumNode(n) => {
+                                                                                    if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
+                                                                                        e_num = n as usize
+                                                                                        ok1 = true
+                                                                                    }
+                                                                                }
+                                                                                _ => {}
+                                                                            }
+                                                                            if ok0 && ok1 {
+                                                                                if s_num <= e_num {
+                                                                                    lines_range_opt = Option<BlockRange>::Some(BlockRange(start = s_num, end = e_num))
+                                                                                } else {
+                                                                                    lines_order_err = true
+                                                                                }
+                                                                            } else {
+                                                                                lines_err = true
+                                                                            }
+                                                                        } else {
+                                                                            lines_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {}
+                                                                    _ => {
+                                                                        lines_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if lines_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'lines' must be an array of two positive integers [start, end]")
+                                                            continue
+                                                        }
+                                                        if lines_order_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: start line must be less than or equal to end line in 'lines'")
+                                                            continue
+                                                        }
+
+                                                        if line_opt.is_none() && lines_range_opt.is_none() {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: viewing requires either 'line' or 'lines'")
+                                                            continue
+                                                        }
+                                                        if line_opt.is_some() && lines_range_opt.is_some() {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: cannot specify both 'line' and 'lines'")
+                                                            continue
+                                                        }
+                                                        if block_val && lines_range_opt.is_some() {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with explicit 'lines' range")
+                                                            continue
+                                                        }
+
+                                                        auto target_path = compute_identity_key(startup_cwd.as_str(), path_str.as_str())
+                                                        auto view_opts = ViewOptions(
+                                                            file_path = cede target_path,
+                                                            line = line_opt,
+                                                            context = context_val,
+                                                            block = block_val,
+                                                            lines_range = lines_range_opt
+                                                        )
+                                                        auto view_res = execute_view_operation(view_opts)
+                                                        if view_res.is_err() {
+                                                            send_tool_error(id_str.as_str(), view_res.unwrap_err().as_str())
+                                                            continue
+                                                        }
+                                                        auto text = view_res.unwrap()
+                                                        auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                        resp#.push_str(id_str.as_str())
+                                                        resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+                                                        resp#.push_str(json_escape(text.as_str()).as_str())
+                                                        resp#.push_str("\"}],\"isError\":false}}\n")
+                                                        send_mcp_response(resp.as_str())
+                                                        continue
+                                                    }
+                                                    _ => {
+                                                        send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
+                                                        continue
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
+                                                continue
+                                            }
+                                        }
                                     }
 
                                     match p_map.try_borrow(string::from("arguments")) {

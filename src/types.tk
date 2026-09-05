@@ -278,7 +278,14 @@ pub shape CliOptions (
     with_filename: Option<bool>,
     deduplicate_targets: bool,
     group_by_scope: bool,
-    symbol_variants: bool
+    symbol_variants: bool,
+    snippet: bool,
+    snippet_chars: usize
+)
+
+pub shape BlockDelimiter (
+    Brace = 0 |
+    Paren = 1
 )
 
 pub shape BlockRange (
@@ -405,6 +412,7 @@ pub shape LogicalLine (
     absolute_offset: usize,
     delim_len: usize,
     brace_depth: usize,
+    paren_depth: usize,
     indent_level: usize
 )
 
@@ -500,7 +508,9 @@ pub shape EffectiveQuery (
     def_first: bool,
     deduplicate_targets: bool,
     group_by_scope: bool,
-    symbol_variants: bool
+    symbol_variants: bool,
+    snippet: bool,
+    snippet_chars: usize
 )
 
 impl EffectiveQuery {
@@ -628,7 +638,9 @@ impl EffectiveQuery {
             def_first = opts.def_first,
             deduplicate_targets = opts.deduplicate_targets,
             group_by_scope = opts.group_by_scope,
-            symbol_variants = opts.symbol_variants
+            symbol_variants = opts.symbol_variants,
+            snippet = opts.snippet,
+            snippet_chars = opts.snippet_chars
         )
     }
 }

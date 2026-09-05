@@ -1,7 +1,9 @@
+import std/env as env
 import src/types::{OutputFormat, OutputSink}
 import src/posix::{posix_init_signals, print_err}
 import src/cli::{parse_cli_args}
 import src/mcp::{run_mcp_server}
+import src/view::{execute_view_cli}
 import src/printer::{
     OutputBudgetWriter,
     EmitOutcome,
@@ -14,6 +16,11 @@ import src/executor::{execute_search, finalize_search}
 fn main() -> i32 {
     // Phase -1: Initialize POSIX signals (ignore SIGPIPE to prevent crash on broken pipe)
     posix_init_signals()
+
+    auto raw_args = env::args()
+    if raw_args.len() >= 2:usize && raw_args.borrow(1).as_str() == "view" {
+        return execute_view_cli(raw_args)
+    }
 
     auto cli_res = parse_cli_args()
     if cli_res.is_err() {

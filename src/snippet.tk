@@ -1,0 +1,108 @@
+// KWIC snippet view and match window fusion for trg.
+import core/str::{str}
+import std/vec::{Vec}
+import src/types::{SubMatch}
+
+fn align_utf8_start(line: str, start: usize) -> usize {
+    auto s# = start
+    loop s > 0 && (((line.byte_at(s) as u8) & 0xC0:u8) == 0x80:u8) {
+        s = s - 1
+    }
+    return s
+}
+
+fn align_utf8_end(line: str, end: usize) -> usize {
+    auto e# = end
+    loop e < line.len && (((line.byte_at(e) as u8) & 0xC0:u8) == 0x80:u8) {
+        e = e + 1
+    }
+    return e
+}
+
+pub fn format_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars: usize) -> string {
+    if line.len == 0 {
+        return string::from("")
+    }
+    if submatches.len() == 0 {
+        return string::from(line)
+    }
+
+    auto L = line.len
+    auto raw_starts# = Vec<usize>::new()
+    auto raw_ends# = Vec<usize>::new()
+
+    auto i# = 0:usize
+    loop i < submatches.len() {
+        auto &sm = submatches.borrow(i)
+        auto raw_start# = 0:usize
+        if sm.start > snippet_chars {
+            raw_start = sm.start - snippet_chars
+        }
+        auto raw_end# = L
+        if sm.end + snippet_chars < L {
+            raw_end = sm.end + snippet_chars
+        }
+        auto win_start = align_utf8_start(line, raw_start)
+        auto win_end = align_utf8_end(line, raw_end)
+        raw_starts#.push(win_start)
+        raw_ends#.push(win_end)
+        i = i + 1
+    }
+
+    if raw_starts.len() == 0 {
+        return string::from(line)
+    }
+
+    auto merged_starts# = Vec<usize>::new()
+    auto merged_ends# = Vec<usize>::new()
+
+    auto cur_start# = raw_starts.get(0)
+    auto cur_end# = raw_ends.get(0)
+
+    auto wi# = 1:usize
+    loop wi < raw_starts.len() {
+        auto n_start = raw_starts.get(wi)
+        auto n_end = raw_ends.get(wi)
+        // Fusion rule: win_start_{i+1} <= win_end_i + 10
+        if n_start <= cur_end + 10 {
+            if n_end > cur_end {
+                cur_end = n_end
+            }
+        } else {
+            merged_starts#.push(cur_start)
+            merged_ends#.push(cur_end)
+            cur_start = n_start
+            cur_end = n_end
+        }
+        wi = wi + 1
+    }
+    merged_starts#.push(cur_start)
+    merged_ends#.push(cur_end)
+
+    auto out# = string::from("")
+
+    // Check first window start: if > 0, prefix with "..."
+    if merged_starts.get(0) > 0 {
+        out#.push_str("...")
+    }
+
+    auto mi# = 0:usize
+    loop mi < merged_starts.len() {
+        if mi > 0 {
+            out#.push_str(" [...] ")
+        }
+        auto w_start = merged_starts.get(mi)
+        auto w_end = merged_ends.get(mi)
+        auto slice = line.substr(w_start, w_end - w_start)
+        out#.push_str(slice)
+        mi = mi + 1
+    }
+
+    // Check last window end: if < L, suffix with "..."
+    auto last_end = merged_ends.get(merged_ends.len() - 1)
+    if last_end < L {
+        out#.push_str("...")
+    }
+
+    return out
+}

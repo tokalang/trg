@@ -169,7 +169,7 @@ def extract_mcp_records(sc):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.12.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.13.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -188,7 +188,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined or "trg v0.12.0" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined or "trg v0.12.0" in build_combined or "trg v0.13.0" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -215,25 +215,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.12.0 identity on both binaries
+    # Validate exact 0.13.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.12.0 (Toka)", f"Expected 'trg 0.12.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.13.0 (Toka)", f"Expected 'trg 0.13.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.12.0 (Toka)", f"Expected 'trg 0.12.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.13.0 (Toka)", f"Expected 'trg 0.13.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.12.0
-    log("Test 1: Help & Version flags (exact 0.12.0 release identity)")
+    # Test 1: Help & Version exact 0.13.0
+    log("Test 1: Help & Version flags (exact 0.13.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.12.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.13.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.12.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.13.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -783,7 +783,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.12.0" in r_re_ctx.stdout
+    assert "trg 0.13.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1971,7 +1971,7 @@ def main():
         # Human output
         r_sc = run_cmd([trg, "--scope", "target", str(scope_dir / "service.tk")])
         assert r_sc.returncode == 0
-        assert "[fn compute(x: int)" in r_sc.stdout
+        assert "[fn compute()]" in r_sc.stdout
 
         # JSON output
         r_sc_j = run_cmd([trg, "--scope", "--json", "target", str(scope_dir / "service.tk")])
@@ -2026,7 +2026,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.12.0"
+        assert resp1["result"]["serverInfo"]["version"] == "0.13.0"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -2038,6 +2038,7 @@ def main():
         assert resps[1]["id"] == 3
         tools = resps[1]["result"]["tools"]
         assert any(t["name"] == "trg_search" for t in tools)
+        assert any(t["name"] == "trg_view" for t in tools)
 
         # 3. tools/call with --block
         call_req = json.dumps({
@@ -2239,7 +2240,7 @@ def main():
         call_text = resp_call["result"]["content"][0]["text"]
         assert "def execute(self)" in call_text
         assert "return 42" in call_text
-        assert "[def execute(self)]" in call_text
+        assert "[def execute()]" in call_text
         assert resp_call["result"]["_meta"]["summary"]["complete"] is True
         assert resp_call["result"]["_meta"]["summary"]["truncated"] is False
     finally:
@@ -4350,9 +4351,9 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         assert r_json.returncode == 0
         j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
         matches = [ev for ev in j_lines if ev.get("type") == "match"]
-        assert len(matches) == 1
+        m_data = matches[0]["data"]
         br = m_data.get("block_range")
-        assert br == [1, 6], f"Expected block_range [1, 6], got {br}"
+        assert br is None, f"Expected block_range None upon truncation (fail-closed), got {br}"
         summary_ev = next(ev for ev in j_lines if ev.get("type") == "summary")
         assert summary_ev["data"]["stats"]["block_contexts_truncated"] >= 1
         assert summary_ev["data"]["block_truncated"] is True
@@ -4522,11 +4523,13 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         lines = [json.loads(l) for l in s_out.strip().split("\n") if l.strip()]
         assert len(lines) == 3
         # 1. initialize
-        assert lines[0]["result"]["serverInfo"]["version"] == "0.12.0"
-        # 2. tools/list schema contains group_by_scope and symbol_variants
+        assert lines[0]["result"]["serverInfo"]["version"] == "0.13.0"
+        # 2. tools/list schema contains group_by_scope, symbol_variants, snippet, snippet_chars
         tool_schema = lines[1]["result"]["tools"][0]["inputSchema"]["properties"]
         assert "group_by_scope" in tool_schema
         assert "symbol_variants" in tool_schema
+        assert "snippet" in tool_schema
+        assert "snippet_chars" in tool_schema
         # 3. tools/call response
         call_res = lines[2]["result"]["structuredContent"]
         assert call_res.get("schema") == "trg-mcp-result-v2"
@@ -4539,8 +4542,500 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
             assert r.get("block_range") == [1, 4]
             assert "perform_task" in r.get("scope", "")
 
+    # Test 136: Scope balanced parens & signature normalization
+    log("Test 136: Scope balanced parens & signature normalization")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "sample.tk"
+        test_file.write_text(
+            "pub async fn duplex_loop(a: i32, b: string) -> Result<bool, string> {\n"
+            "    auto x = 1\n"
+            "    return Result<bool, string>::Ok(true)\n"
+            "}\n"
+            "\n"
+            "pub class NetworkManager {\n"
+            "    pub fn send_packet(data: &[u8]) -> bool {\n"
+            "        auto flag = true\n"
+            "        return flag\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8"
+        )
+        r_sc = run_cmd([trg, "--scope", "flag", str(test_file)])
+        assert r_sc.returncode == 0
+        assert "[pub fn send_packet()]" in r_sc.stdout
+        assert "data:" not in r_sc.stdout
+
+        r_sc2 = run_cmd([trg, "--scope", "auto x", str(test_file)])
+        assert r_sc2.returncode == 0
+        assert "[pub async fn duplex_loop()]" in r_sc2.stdout
+        assert "a: i32" not in r_sc2.stdout
+
+    # Test 137: Single-match KWIC snippet with '...' boundaries
+    log("Test 137: Single-match KWIC snippet with '...' boundaries")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "long_line.txt"
+        prefix = "AAAAA" * 15
+        suffix = "ZZZZZ" * 15
+        test_file.write_text(f"{prefix}TARGET_IDENTIFIER{suffix}\n", encoding="utf-8")
+
+        r_snip = run_cmd([trg, "--snippet", "--snippet-chars", "15", "TARGET_IDENTIFIER", str(test_file)])
+        assert r_snip.returncode == 0
+        out = r_snip.stdout.strip()
+        assert "TARGET_IDENTIFIER" in out
+        assert out.startswith("...") or "..." in out
+        assert len(out.split(":")[-1].strip()) < 80
+        assert out.endswith("...")
+
+    # Test 138: Adjacent double-match window fusion (< 10 chars gap)
+    log("Test 138: Adjacent double-match window fusion (< 10 chars gap)")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "adjacent.txt"
+        lead = "x" * 50
+        tail = "y" * 50
+        test_file.write_text(f"{lead}HIT_ALPHA 1234 HIT_ALPHA{tail}\n", encoding="utf-8")
+
+        r_fuse = run_cmd([trg, "--snippet", "--snippet-chars", "10", "HIT_ALPHA", str(test_file)])
+        assert r_fuse.returncode == 0
+        out = r_fuse.stdout.strip()
+        line_part = out.split(":")[-1].strip()
+        assert "[...]" not in line_part
+        assert "HIT_ALPHA 1234 HIT_ALPHA" in line_part
+        assert line_part.startswith("...")
+        assert line_part.endswith("...")
+
+    # Test 139: Distant double-match '[...]' bridging
+    log("Test 139: Distant double-match '[...]' bridging")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "distant.txt"
+        lead = "x" * 50
+        gap = "M" * 80
+        tail = "y" * 50
+        test_file.write_text(f"{lead}DISTANT_HIT{gap}DISTANT_HIT{tail}\n", encoding="utf-8")
+
+        r_bridge = run_cmd([trg, "--snippet", "--snippet-chars", "10", "DISTANT_HIT", str(test_file)])
+        assert r_bridge.returncode == 0
+        out = r_bridge.stdout.strip()
+        line_part = out.split(":")[-1].strip()
+        assert " [...] " in line_part
+        assert line_part.count("DISTANT_HIT") == 2
+
+    # Test 140: Short line / bounds safety with --snippet
+    log("Test 140: Short line / bounds safety with --snippet")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "short.txt"
+        test_file.write_text("short MATCH here\n", encoding="utf-8")
+
+        r_short = run_cmd([trg, "--snippet", "--snippet-chars", "30", "MATCH", str(test_file)])
+        assert r_short.returncode == 0
+        line_part = r_short.stdout.strip().split(":")[-1].strip()
+        assert "short MATCH here" == line_part
+        assert "..." not in line_part
+
+    # Test 141: trg view <path>:<line> [-C N] line hydration
+    log("Test 141: trg view <path>:<line> [-C N] line hydration")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "lines.txt"
+        lines_content = "\n".join([f"Line {i}" for i in range(1, 31)]) + "\n"
+        test_file.write_text(lines_content, encoding="utf-8")
+
+        r_view = run_cmd([trg, "view", f"{test_file}:15", "-C", "3"])
+        assert r_view.returncode == 0
+        view_lines = r_view.stdout.strip().split("\n")
+        assert len(view_lines) == 7
+        assert "15:Line 15" in view_lines
+        assert "12-Line 12" in view_lines
+        assert "18-Line 18" in view_lines
+        assert "11-Line 11" not in r_view.stdout
+        assert "19-Line 19" not in r_view.stdout
+
+    # Test 142: trg view <path>:<line> --block block hydration
+    log("Test 142: trg view <path>:<line> --block block hydration")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "code.tk"
+        code = (
+            "// Top comment\n"
+            "fn compute_sum(a: i32, b: i32) -> i32 {\n"
+            "    auto temp = a + b\n"
+            "    auto result = temp * 2\n"
+            "    return result\n"
+            "}\n"
+            "// Bottom comment\n"
+        )
+        test_file.write_text(code, encoding="utf-8")
+
+        r_block = run_cmd([trg, "view", f"{test_file}:4", "--block"])
+        assert r_block.returncode == 0
+        assert "[block: L2-L6]" in r_block.stdout
+        lines = r_block.stdout.strip().split("\n")
+        assert lines[0] == "[block: L2-L6]"
+        assert "2-fn compute_sum" in lines[1]
+        assert "4:    auto result = temp * 2" in r_block.stdout
+        assert "6-}" in lines[-1]
+
+    # Test 143: trg view <path> --lines M-N physical range slice
+    log("Test 143: trg view <path> --lines M-N physical range slice")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "range.txt"
+        test_file.write_text("\n".join([f"Record {i}" for i in range(1, 51)]) + "\n", encoding="utf-8")
+
+        r_range = run_cmd([trg, "view", str(test_file), "--lines", "10-14"])
+        assert r_range.returncode == 0
+        lines = r_range.stdout.strip().split("\n")
+        assert len(lines) == 5
+        assert lines[0] == "10:Record 10"
+        assert lines[1] == "11:Record 11"
+        assert lines[2] == "12:Record 12"
+        assert lines[3] == "13:Record 13"
+        assert lines[4] == "14:Record 14"
+
+    # Test 144: trg view invalid arguments & error handling
+    log("Test 144: trg view invalid arguments & error handling")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        test_file = tdp / "small.txt"
+        test_file.write_text("Line 1\nLine 2\nLine 3\n", encoding="utf-8")
+
+        # Line out of bounds
+        r_oob = run_cmd([trg, "view", f"{test_file}:99"], check=False)
+        assert r_oob.returncode == 2
+        assert "out of bounds" in r_oob.stderr
+
+        # Non-existent file
+        r_no = run_cmd([trg, "view", f"{tdp / 'non_existent.txt'}:1"], check=False)
+        assert r_no.returncode == 2
+        assert "Failed to open file" in r_no.stderr
+
+        # Inverted range start > end
+        r_inv = run_cmd([trg, "view", str(test_file), "--lines", "10-5"], check=False)
+        assert r_inv.returncode == 2
+        assert "Invalid line range: start must be >= 1 and <= end" in r_inv.stderr
+
+        # Missing path
+        r_mis = run_cmd([trg, "view"], check=False)
+        assert r_mis.returncode == 2
+
+    # Test 145: MCP trg_view and trg_search snippet end-to-end
+    log("Test 145: MCP trg_view and trg_search snippet end-to-end")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        sample_file = tdp / "agent_test.tk"
+        sample_file.write_text(
+            "fn run_agent() {\n"
+            "    auto x = 100\n"
+            "    auto long_line = \"START \" + (\"mid \" * 20) + \"TARGET_KEYWORD\" + (\" mid\" * 20) + \" END\"\n"
+            "    return x\n"
+            "}\n",
+            encoding="utf-8"
+        )
+
+        init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
+        notif_init = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+        tools_list = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n"
+
+        # trg_search with snippet=True
+        search_call = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "TARGET_KEYWORD",
+                    "path": str(sample_file),
+                    "snippet": True,
+                    "snippet_chars": 15
+                }
+            }
+        }) + "\n"
+
+        # trg_view line hydration
+        view_call = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(sample_file),
+                    "line": 2,
+                    "context": 1
+                }
+            }
+        }) + "\n"
+
+        # trg_view block hydration
+        block_call = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(sample_file),
+                    "line": 3,
+                    "block": True
+                }
+            }
+        }) + "\n"
+
+        # trg_view lines range
+        lines_call = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(sample_file),
+                    "lines": [1, 3]
+                }
+            }
+        }) + "\n"
+
+        input_payload = init_req + notif_init + tools_list + search_call + view_call + block_call + lines_call
+        r_mcp = run_cmd([trg, "--mcp"], input_data=input_payload)
+        assert r_mcp.returncode == 0
+        resps = [json.loads(l) for l in r_mcp.stdout.strip().split("\n") if l.strip()]
+        assert len(resps) == 6
+
+        # 1. initialize
+        assert resps[0]["result"]["serverInfo"]["version"] == "0.13.0"
+
+        # 2. tools/list
+        tool_names = [t["name"] for t in resps[1]["result"]["tools"]]
+        assert "trg_search" in tool_names
+        assert "trg_view" in tool_names
+
+        # 3. search with snippet
+        search_res = resps[2]["result"]
+        assert search_res.get("isError") is False
+        assert search_res.get("structuredContent", {}).get("effective_query", {}).get("snippet") is True
+        search_text = search_res["content"][0]["text"]
+        assert "TARGET_KEYWORD" in search_text
+        assert "..." in search_text
+
+        # 4. trg_view point hydration
+        view_res = resps[3]["result"]
+        assert view_res.get("isError") is False
+        v_text = view_res["content"][0]["text"]
+        assert "2:    auto x = 100" in v_text
+        assert "1-fn run_agent() {" in v_text
+
+        # 5. trg_view block hydration
+        block_res = resps[4]["result"]
+        assert block_res.get("isError") is False
+        b_text = block_res["content"][0]["text"]
+        assert "[block: L1-L5]" in b_text
+        assert "3:    auto long_line" in b_text
+
+        # 6. trg_view lines range
+        lines_res = resps[5]["result"]
+        assert lines_res.get("isError") is False
+        l_text = lines_res["content"][0]["text"]
+        assert "1:fn run_agent() {" in l_text
+        assert "3:    auto long_line" in l_text
+
+    # Test 146: Toka shape (...) delimiter pairing (exact closure at ')')
+    log("Test 146: Toka shape (...) delimiter pairing (exact closure at ')')")
+    with tempfile.TemporaryDirectory(prefix="trg_test_146_") as td:
+        tdp = pathlib.Path(td)
+        toka_code = (
+            "// Line 1\n"
+            "// Line 2\n"
+            "// Line 3\n"
+            "// Line 4\n"
+            "pub shape OutputMode (\n"
+            "    Plain = 0 |\n"
+            "    Grouped = 1\n"
+            ")\n"
+            "\n"
+            "pub shape PathStyle (\n"
+            "    Full = 0 |\n"
+            "    Relative = 1\n"
+            ")\n"
+            "\n"
+            "pub fn dummy_func() -> void {\n"
+            "    return;\n"
+            "}\n"
+        )
+        toka_file = tdp / "types.tk"
+        toka_file.write_text(toka_code, encoding="utf-8")
+
+        # 1. Search for OutputMode (definition line match) with --block --json
+        r_json = run_cmd([trg, "--json", "--block", "OutputMode", str(toka_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 1
+        br = matches[0]["data"].get("block_range")
+        assert br == [5, 8], f"Expected block_range [5, 8], got {br}"
+
+        # 2. Search for Grouped (internal field match) with --block --json
+        r_json2 = run_cmd([trg, "--json", "--block", "Grouped", str(toka_file)])
+        assert r_json2.returncode == 0
+        j_lines2 = [json.loads(l) for l in r_json2.stdout.strip().split("\n") if l.strip()]
+        matches2 = [ev for ev in j_lines2 if ev.get("type") == "match"]
+        assert len(matches2) == 1
+        br2 = matches2[0]["data"].get("block_range")
+        assert br2 == [5, 8], f"Expected block_range [5, 8] for internal match, got {br2}"
+
+        # 3. trg view <path>:5 --block and <path>:7 --block
+        r_v5 = run_cmd([trg, "view", f"{toka_file}:5", "--block"])
+        assert r_v5.returncode == 0
+        assert "[block: L5-L8]" in r_v5.stdout
+        assert "5:pub shape OutputMode (" in r_v5.stdout
+        assert "8-)" in r_v5.stdout
+
+        r_v7 = run_cmd([trg, "view", f"{toka_file}:7", "--block"])
+        assert r_v7.returncode == 0
+        assert "[block: L5-L8]" in r_v7.stdout
+        assert "7:    Grouped = 1" in r_v7.stdout
+
+    # Test 147: Multi-line function parameters keyword-strict Brace binding
+    log("Test 147: Multi-line function parameters keyword-strict Brace binding")
+    with tempfile.TemporaryDirectory(prefix="trg_test_147_") as td:
+        tdp = pathlib.Path(td)
+        func_code = (
+            "pub fn complex_signature(\n"
+            "    arg1: String,\n"
+            "    arg2: i32\n"
+            ") -> bool {\n"
+            "    auto target_inner_var = true;\n"
+            "    return target_inner_var;\n"
+            "}\n"
+        )
+        func_file = tdp / "func.tk"
+        func_file.write_text(func_code, encoding="utf-8")
+
+        r_json = run_cmd([trg, "--json", "--block", "complex_signature", str(func_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 1
+        br = matches[0]["data"].get("block_range")
+        assert br == [1, 7], f"Expected block_range [1, 7], got {br}"
+
+        # trg view
+        r_v = run_cmd([trg, "view", f"{func_file}:1", "--block"])
+        assert r_v.returncode == 0
+        assert "[block: L1-L7]" in r_v.stdout
+        assert "7-}" in r_v.stdout
+
+    # Test 148: Single-line block immediate self-closure
+    log("Test 148: Single-line block immediate self-closure")
+    with tempfile.TemporaryDirectory(prefix="trg_test_148_") as td:
+        tdp = pathlib.Path(td)
+        single_code = (
+            "pub shape EmptyShape ()\n"
+            "pub fn noop() -> void {}\n"
+            "pub fn next_target() -> void {\n"
+            "    return;\n"
+            "}\n"
+        )
+        single_file = tdp / "single.tk"
+        single_file.write_text(single_code, encoding="utf-8")
+
+        # 1. EmptyShape single line
+        r_json = run_cmd([trg, "--json", "--block", "EmptyShape", str(single_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 1
+        assert matches[0]["data"].get("block_range") == [1, 1], f"Expected [1, 1], got {matches[0]['data'].get('block_range')}"
+
+        # 2. noop single line
+        r_json2 = run_cmd([trg, "--json", "--block", "noop", str(single_file)])
+        assert r_json2.returncode == 0
+        j_lines2 = [json.loads(l) for l in r_json2.stdout.strip().split("\n") if l.strip()]
+        matches2 = [ev for ev in j_lines2 if ev.get("type") == "match"]
+        assert len(matches2) == 1
+        assert matches2[0]["data"].get("block_range") == [2, 2], f"Expected [2, 2], got {matches2[0]['data'].get('block_range')}"
+
+        # 3. Verify next_target is NOT affected
+        r_json3 = run_cmd([trg, "--json", "--block", "next_target", str(single_file)])
+        assert r_json3.returncode == 0
+        j_lines3 = [json.loads(l) for l in r_json3.stdout.strip().split("\n") if l.strip()]
+        matches3 = [ev for ev in j_lines3 if ev.get("type") == "match"]
+        assert len(matches3) == 1
+        assert matches3[0]["data"].get("block_range") == [3, 5], f"Expected [3, 5], got {matches3[0]['data'].get('block_range')}"
+
+        # 4. trg view on single-line
+        r_v = run_cmd([trg, "view", f"{single_file}:1", "--block"])
+        assert r_v.returncode == 0
+        assert "[block: L1-L1]" in r_v.stdout
+
+    # Test 149: Runaway Guard fail-closed verification
+    log("Test 149: Runaway Guard fail-closed verification (unclosed definition)")
+    with tempfile.TemporaryDirectory(prefix="trg_test_149_") as td:
+        tdp = pathlib.Path(td)
+        broken_code = (
+            "pub shape BrokenShape (\n"
+            "    FieldA = 1 |\n"
+            "    FieldB = 2\n"
+            "\n"
+            "pub shape SiblingShape (\n"
+            "    FieldX = 1\n"
+            ")\n"
+        )
+        broken_file = tdp / "broken.tk"
+        broken_file.write_text(broken_code, encoding="utf-8")
+
+        # In JSON: block_range MUST be null/None (Fail-Closed)
+        r_json = run_cmd([trg, "--json", "--block", "BrokenShape", str(broken_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 1
+        assert matches[0]["data"].get("block_range") is None, f"Expected null block_range, got {matches[0]['data'].get('block_range')}"
+
+        # In text mode: NO [block: ...] header emitted!
+        r_txt = run_cmd([trg, "--block", "BrokenShape", str(broken_file)])
+        assert r_txt.returncode == 0
+        assert "[block: L" not in r_txt.stdout
+
+        # trg view on unclosed block fails closed
+        r_v = run_cmd([trg, "view", f"{broken_file}:1", "--block"], check=False)
+        assert r_v.returncode != 0 or "[block: L" not in r_v.stdout
+
+    # Test 150: --max-block-lines truncation Fail-Closed verification
+    log("Test 150: --max-block-lines truncation Fail-Closed verification")
+    with tempfile.TemporaryDirectory(prefix="trg_test_150_") as td:
+        tdp = pathlib.Path(td)
+        huge_code = (
+            "fn huge_function() {\n" +
+            "".join([f"    int step_{i} = {i};\n" for i in range(1, 30)]) +
+            "    int target_pivot = 999;\n" +
+            "".join([f"    int rest_{i} = {i};\n" for i in range(1, 30)]) +
+            "}\n"
+        )
+        huge_file = tdp / "huge.c"
+        huge_file.write_text(huge_code, encoding="utf-8")
+
+        r_json = run_cmd([trg, "--json", "--block", "--max-block-lines", "10", "target_pivot", str(huge_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 1
+        # Truncation MUST fail-closed on block_range (null) while marking block_truncated: true
+        assert any(ev.get("data", {}).get("block_truncated") is True for ev in j_lines if ev.get("type") == "context")
+        assert matches[0]["data"].get("block_range") is None, f"Expected block_range None upon truncation, got {matches[0]['data'].get('block_range')}"
+
+        # Text mode should show truncation indicator and NO [block: ...]
+        r_txt = run_cmd([trg, "--block", "--max-block-lines", "10", "target_pivot", str(huge_file)])
+        assert r_txt.returncode == 0
+        assert "[block context truncated by --max-block-lines 10]" in r_txt.stdout
+        assert "[block: L" not in r_txt.stdout
+
     log("=" * 60)
-    log("ALL 135 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.12.0)!")
+    log("ALL 150 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.13.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

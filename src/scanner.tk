@@ -21,7 +21,8 @@ import src/types::{
     SearchDiagnostic,
     ResolvedPath,
     InternedRecord,
-    BlockRange
+    BlockRange,
+    BlockDelimiter
 }
 import src/path_norm::{resolve_path, normalize_cwd}
 import src/matcher::{SearchPlan}
@@ -45,10 +46,15 @@ import src/syntax::{
     detect_syntax_family,
     compute_line_indent,
     update_brace_depth,
+    update_delimiter_depths,
+    DelimiterDepths,
     detect_declaration_scope,
     is_defining_symbol,
     extract_declared_identifier,
     utf8_truncate_len,
+    detect_block_delimiter,
+    check_is_runaway_definition,
+    check_is_self_closed_line,
     ScopeTracker
 }
 import src/context::{
@@ -88,6 +94,7 @@ fn is_binary_chunk(content: str) -> bool {
 fn flush_block_window(
     state#: ContextState,
     end_line: usize,
+    block_range_valid: bool,
     writer#: OutputBudgetWriter,
     budget_state#: BudgetState,
     frame_state#: FileFrameState,
@@ -102,13 +109,16 @@ fn flush_block_window(
         actual_end = start_line
     }
 
-    auto br = BlockRange(start = start_line, end = actual_end)
     auto recs# = Vec<InternedRecord>::new()
     auto i# = 0:usize
     loop i < state.block_window.len() {
         auto rec# = state.block_window.borrow(i).clone()
         if rec.kind == "match" {
-            rec.block_range = Option<BlockRange>::Some(br.clone())
+            if block_range_valid {
+                rec.block_range = Option<BlockRange>::Some(BlockRange(start = start_line, end = actual_end))
+            } else {
+                rec.block_range = Option<BlockRange>::None
+            }
         }
         recs#.push(cede rec)
         i = i + 1
@@ -159,51 +169,85 @@ fn process_logical_line(
 
         // Multi-Match Block Collapse: if block_active is already true in active block window
         if opts.context_block && state.block_active {
-            auto cur_gid = state.current_group_id
-            auto submatches# = Vec<SubMatch>::new()
-            if opts.json_mode || opts.only_matching || opts.mcp_mode {
-                if !opts.invert_match {
-                    auto s_idx# = 0:usize
-                    loop s_idx < ranges.len() {
-                        auto r = ranges.get(s_idx)
-                        if r.end >= r.start && r.end <= line.text.len() {
-                            auto match_text = string::from(line.text.as_str().substr(r.start, r.end - r.start))
-                            submatches#.push(SubMatch(
-                                match_text = cede match_text,
-                                start = r.start,
-                                end = r.end
-                            ))
+            // Check Runaway Guard on match line: if match line is a sibling definition, fail closed!
+            if state.block_archetype == SyntaxFamily::Brace && check_is_runaway_definition(line.text.as_str(), line.brace_depth, state.block_delim, state.block_target_depth) {
+                state.block_active = false
+                auto last_emitted = state.last_emitted_line_num
+                auto flush_outcome = flush_block_window(
+                    state#,
+                    last_emitted,
+                    false, // Fail-Closed!
+                    writer#,
+                    budget_state#,
+                    frame_state#,
+                    resolved_path
+                )
+                if flush_outcome != LineProcessOutcome::Continue {
+                    return flush_outcome
+                }
+            } else {
+                auto cur_gid = state.current_group_id
+                auto submatches# = Vec<SubMatch>::new()
+                if opts.json_mode || opts.only_matching || opts.mcp_mode || opts.snippet {
+                    if !opts.invert_match {
+                        auto s_idx# = 0:usize
+                        loop s_idx < ranges.len() {
+                            auto r = ranges.get(s_idx)
+                            if r.end >= r.start && r.end <= line.text.len() {
+                                auto match_text = string::from(line.text.as_str().substr(r.start, r.end - r.start))
+                                submatches#.push(SubMatch(
+                                    match_text = cede match_text,
+                                    start = r.start,
+                                    end = r.end
+                                ))
+                            }
+                            s_idx = s_idx + 1:usize
                         }
-                        s_idx = s_idx + 1:usize
                     }
                 }
-            }
-            auto submatch_count = submatches.len()
-            auto sc_opt# = Option<string>::None
-            if scope_name.len() > 0 {
-                sc_opt = Option<string>::Some(string::from(scope_name))
-            }
+                auto submatch_count = submatches.len()
+                auto sc_opt# = Option<string>::None
+                if scope_name.len() > 0 {
+                    sc_opt = Option<string>::Some(string::from(scope_name))
+                }
 
-            state.block_window#.push(InternedRecord(
-                kind = string::from("match"),
-                group_id = cur_gid,
-                line_number = line.line_number,
-                absolute_offset = line.absolute_offset,
-                text = line.text.clone(),
-                submatches = cede submatches,
-                scope = cede sc_opt,
-                block_truncated = false,
-                block_range = Option<BlockRange>::None
-            ))
+                state.block_window#.push(InternedRecord(
+                    kind = string::from("match"),
+                    group_id = cur_gid,
+                    line_number = line.line_number,
+                    absolute_offset = line.absolute_offset,
+                    text = line.text.clone(),
+                    submatches = cede submatches,
+                    scope = cede sc_opt,
+                    block_truncated = false,
+                    block_range = Option<BlockRange>::None
+                ))
 
-            auto is_first_emitted = !file_has_emitted_match
-            budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
-            file_has_emitted_match = true
-            file_matched_lines_emitted = file_matched_lines_emitted + 1
-            state.last_emitted_line_num = line.line_number
-            state.pending_after = opts.after_context
-            state.had_emitted_group = true
-            return LineProcessOutcome::Continue
+                auto is_first_emitted = !file_has_emitted_match
+                budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
+                file_has_emitted_match = true
+                file_matched_lines_emitted = file_matched_lines_emitted + 1
+                state.last_emitted_line_num = line.line_number
+                state.pending_after = opts.after_context
+                state.had_emitted_group = true
+
+                // Trap 3: Check if this subsequent match line closes the block!
+                if check_is_self_closed_line(line.text.as_str(), state.block_delim, line.brace_depth, line.paren_depth, state.block_target_depth) {
+                    state.block_active = false
+                    auto flush_outcome = flush_block_window(
+                        state#,
+                        line.line_number,
+                        true, // naturally closed!
+                        writer#,
+                        budget_state#,
+                        frame_state#,
+                        resolved_path
+                    )
+                    return flush_outcome
+                }
+
+                return LineProcessOutcome::Continue
+            }
         }
 
         // Flush any previously unclosed block window
@@ -212,6 +256,7 @@ fn process_logical_line(
             auto flush_outcome = flush_block_window(
                 state#,
                 last_emitted,
+                false, // unclosed prior block -> fail-closed
                 writer#,
                 budget_state#,
                 frame_state#,
@@ -278,11 +323,20 @@ fn process_logical_line(
 
         if opts.context_block {
             state.block_start_line = line.line_number
+            auto start_text# = line.text.as_str()
             if num_ring > 0 && emit_start_idx < num_ring {
                 auto actual_first_idx = (state.ring.head + emit_start_idx) % state.ring.capacity
-                state.block_start_line = state.ring.lines.borrow(actual_first_idx).line_number
+                auto &r_first = state.ring.lines.borrow(actual_first_idx)
+                state.block_start_line = r_first.line_number
+                start_text = r_first.text.as_str()
             }
             state.block_separator_needed = separator_needed
+
+            auto delim = detect_block_delimiter(start_text)
+            state.block_delim = delim
+            if delim == BlockDelimiter::Paren {
+                state.block_target_depth = 0:usize
+            }
         }
 
         auto records# = Vec<InternedRecord>::new()
@@ -316,7 +370,7 @@ fn process_logical_line(
 
         // 3. Match record
         auto submatches# = Vec<SubMatch>::new()
-        if opts.json_mode || opts.only_matching || opts.mcp_mode {
+        if opts.json_mode || opts.only_matching || opts.mcp_mode || opts.snippet {
             if !opts.invert_match {
                 auto s_idx# = 0:usize
                 loop s_idx < ranges.len() {
@@ -360,6 +414,22 @@ fn process_logical_line(
             state.last_emitted_line_num = line.line_number
             state.pending_after = opts.after_context
             state.had_emitted_group = true
+
+            // Trap 3: Immediate single-line block closure check!
+            if check_is_self_closed_line(line.text.as_str(), state.block_delim, line.brace_depth, line.paren_depth, state.block_target_depth) {
+                state.block_active = false
+                auto flush_outcome = flush_block_window(
+                    state#,
+                    line.line_number,
+                    true, // naturally closed!
+                    writer#,
+                    budget_state#,
+                    frame_state#,
+                    resolved_path
+                )
+                return flush_outcome
+            }
+
             return LineProcessOutcome::Continue
         } else {
             records#.push(cede m_rec)
@@ -391,9 +461,30 @@ fn process_logical_line(
 
     // Non-matching line in block context
     if state.block_active {
+        // Runaway Guard: check if this non-matching line is an unclosed sibling definition!
+        if state.block_archetype == SyntaxFamily::Brace && check_is_runaway_definition(line.text.as_str(), line.brace_depth, state.block_delim, state.block_target_depth) {
+            state.block_active = false
+            auto last_emitted = state.last_emitted_line_num
+            auto flush_outcome = flush_block_window(
+                state#,
+                last_emitted,
+                false, // Runaway -> Fail-Closed!
+                writer#,
+                budget_state#,
+                frame_state#,
+                resolved_path
+            )
+            if flush_outcome != LineProcessOutcome::Continue {
+                return flush_outcome
+            }
+        }
+    }
+
+    if state.block_active {
         state.block_lines_emitted = state.block_lines_emitted + 1
         auto terminate_block# = false
         auto is_block_truncated# = false
+        auto block_closed_naturally# = false
 
         if state.block_lines_emitted >= opts.max_block_lines {
             terminate_block = true
@@ -410,6 +501,7 @@ fn process_logical_line(
                             auto flush_outcome = flush_block_window(
                                 state#,
                                 last_emitted,
+                                true, // Indent closed naturally
                                 writer#,
                                 budget_state#,
                                 frame_state#,
@@ -422,8 +514,19 @@ fn process_logical_line(
                     }
                 }
                 auto SyntaxFamily::Brace => {
-                    if line.brace_depth <= state.block_target_depth && line.text.as_str().index_of('}' as char).is_some() {
-                        terminate_block = true
+                    match state.block_delim {
+                        auto BlockDelimiter::Paren => {
+                            if line.paren_depth <= state.block_target_depth && line.text.as_str().index_of(')' as char).is_some() {
+                                terminate_block = true
+                                block_closed_naturally = true
+                            }
+                        }
+                        auto BlockDelimiter::Brace => {
+                            if line.brace_depth <= state.block_target_depth && line.text.as_str().index_of('}' as char).is_some() {
+                                terminate_block = true
+                                block_closed_naturally = true
+                            }
+                        }
                     }
                 }
             }
@@ -451,6 +554,7 @@ fn process_logical_line(
                 auto flush_outcome = flush_block_window(
                     state#,
                     line.line_number,
+                    block_closed_naturally,
                     writer#,
                     budget_state#,
                     frame_state#,
@@ -539,6 +643,7 @@ fn scan_and_process_line(
     abs_offset: usize,
     delim_len: usize,
     line_brace_depth: usize,
+    line_paren_depth: usize,
     line_indent: usize,
     scope_tracker: ScopeTracker,
     pass_mode: ScanPass,
@@ -556,7 +661,7 @@ fn scan_and_process_line(
     auto ranges# = Vec<MatchRange>::new()
 
     if !max_count_reached {
-        if opts.json_mode || opts.only_matching || opts.mcp_mode {
+        if opts.json_mode || opts.only_matching || opts.mcp_mode || opts.snippet {
             auto decision = plan.find_matches(line_text)
             if !opts.invert_match {
                 line_matches = decision.matched
@@ -641,6 +746,7 @@ fn scan_and_process_line(
             absolute_offset = abs_offset,
             delim_len = delim_len,
             brace_depth = line_brace_depth,
+            paren_depth = line_paren_depth,
             indent_level = line_indent
         )
         auto cur_scope = scope_tracker.current_scope()
@@ -802,7 +908,7 @@ pub fn scan_file_stream_with_pass(
         }
         auto context_state# = make_context_state(before_cap, family)
         auto scope_tracker# = ScopeTracker::new()
-        auto cur_brace_depth# = 0:usize
+        auto cur_depths# = DelimiterDepths(brace_depth = 0:usize, paren_depth = 0:usize)
         auto line_num# = 1:usize
         auto abs_offset# = 0:usize
         auto line_buf# = string::new()
@@ -864,14 +970,15 @@ pub fn scan_file_stream_with_pass(
                         advance_len = nl_idx + 1:usize
 
                         auto line_indent = compute_line_indent(line_text)
-                        update_brace_depth(line_text, cur_brace_depth#)
-                        auto line_brace_depth = cur_brace_depth
+                        update_delimiter_depths(line_text, cur_depths#)
+                        auto line_brace_depth = cur_depths.brace_depth
+                        auto line_paren_depth = cur_depths.paren_depth
                         scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                         outcome = scan_and_process_line(
                             plan, opts, context_state#, resolved_path, multiple_files,
                             line_text, line_num, abs_offset, delim_len,
-                            line_brace_depth, line_indent, scope_tracker, pass_mode,
+                            line_brace_depth, line_paren_depth, line_indent, scope_tracker, pass_mode,
                             matches_count#, has_match#, max_count_reached#,
                             writer#, budget_state#, frame_state#,
                             file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
@@ -890,14 +997,15 @@ pub fn scan_file_stream_with_pass(
                             }
 
                             auto line_indent = compute_line_indent(line_text)
-                            update_brace_depth(line_text, cur_brace_depth#)
-                            auto line_brace_depth = cur_brace_depth
+                            update_delimiter_depths(line_text, cur_depths#)
+                            auto line_brace_depth = cur_depths.brace_depth
+                            auto line_paren_depth = cur_depths.paren_depth
                             scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                             outcome = scan_and_process_line(
                                 plan, opts, context_state#, resolved_path, multiple_files,
                                 line_text, line_num, abs_offset, delim_len,
-                                line_brace_depth, line_indent, scope_tracker, pass_mode,
+                                line_brace_depth, line_paren_depth, line_indent, scope_tracker, pass_mode,
                                 matches_count#, has_match#, max_count_reached#,
                                 writer#, budget_state#, frame_state#,
                                 file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
@@ -957,14 +1065,15 @@ pub fn scan_file_stream_with_pass(
                     advance_len = line_text.len + delim_len
 
                     auto line_indent = compute_line_indent(line_text)
-                    update_brace_depth(line_text, cur_brace_depth#)
-                    auto line_brace_depth = cur_brace_depth
+                    update_delimiter_depths(line_text, cur_depths#)
+                    auto line_brace_depth = cur_depths.brace_depth
+                    auto line_paren_depth = cur_depths.paren_depth
                     scope_tracker#.update(line_text, line_brace_depth, line_indent, family)
 
                     outcome = scan_and_process_line(
                         plan, opts, context_state#, resolved_path, multiple_files,
                         line_text, line_num, abs_offset, delim_len,
-                        line_brace_depth, line_indent, scope_tracker, pass_mode,
+                        line_brace_depth, line_paren_depth, line_indent, scope_tracker, pass_mode,
                         matches_count#, has_match#, max_count_reached#,
                         writer#, budget_state#, frame_state#,
                         file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
@@ -988,9 +1097,11 @@ pub fn scan_file_stream_with_pass(
         // Flush any lingering block window at EOF
         if !is_binary && !had_error && !is_broken_pipe && !budget_state.is_truncated && opts.context_block && context_state.block_window.len() > 0 {
             auto end_line = context_state.last_emitted_line_num
+            auto is_valid = !context_state.block_active
             auto flush_outcome = flush_block_window(
                 context_state#,
                 end_line,
+                is_valid,
                 writer#,
                 budget_state#,
                 frame_state#,

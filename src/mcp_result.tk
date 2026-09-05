@@ -124,6 +124,10 @@ pub fn format_effective_query(opts: CliOptions) -> string {
     if eq.group_by_scope { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str(",\"symbol_variants\":")
     if eq.symbol_variants { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"snippet\":")
+    if eq.snippet { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"snippet_chars\":")
+    s#.push_str(u64_to_string(eq.snippet_chars as u64).as_str())
     s#.push_str("}")
     return cede s
 }
