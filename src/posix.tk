@@ -20,6 +20,7 @@ extern fn read(fd: i32, *buf: void, count: usize) -> isize
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
 extern fn signal(sig: i32, handler: usize) -> usize
 extern fn readlink(*path: char, *buf: char, bufsiz: usize) -> isize
+extern fn realpath(*path: char, *resolved_path: char) -> Addr
 extern fn ferror(*stream: void) -> i32
 
 pub shape StatInfo (
@@ -220,5 +221,28 @@ pub fn posix_read_stdin_line() -> Option<string> {
         }
     }
     return Option<string>::None
+}
+
+pub fn posix_realpath(path: string) -> Option<string> {
+    auto *cpath = path.c_str()
+    auto buf = [0:char; 4096]
+    unsafe {
+        auto *buf_ptr = &buf[0] as *char
+        auto res = realpath(*cpath, *buf_ptr)
+        if res == ADDR0 {
+            return Option<string>::None
+        }
+        auto len# = 0:usize
+        loop len < 4096:usize && buf[len] != 0:char {
+            len = len + 1
+        }
+        auto s# = string::new()
+        auto i# = 0:usize
+        loop i < len {
+            s#.push_char(buf[i])
+            i = i + 1
+        }
+        return Option<string>::Some(cede s)
+    }
 }
 

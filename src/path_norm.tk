@@ -1,7 +1,7 @@
-// Component-aware lexical path normalization and ResolvedPath identity resolution for trg.
 import core/str::{str}
 import std/vec::{Vec}
 import src/types::{PathStyle, PathKind, ResolvedPath}
+import src/posix::{posix_realpath}
 
 fn is_slash(b: u8) -> bool {
     return b == 47:u8 // '/'
@@ -178,4 +178,37 @@ pub fn resolve_path(
             )
         }
     }
+}
+
+pub fn join_raw_abs_path(startup_cwd: str, target_path: str) -> string {
+    if target_path.len > 0 && is_slash(target_path.byte_at(0)) {
+        return string::from(target_path)
+    }
+    auto full# = string::from(startup_cwd)
+    if startup_cwd.len == 0 || !is_slash(startup_cwd.byte_at(startup_cwd.len - 1)) {
+        full#.push_str("/")
+    }
+    full#.push_str(target_path)
+    return cede full
+}
+
+pub fn resolves_to_root(startup_cwd: str, target_path: str) -> bool {
+    // 1. Physical resolution (handles symlinks + .. without pre-collapsing)
+    auto raw_abs = join_raw_abs_path(startup_cwd, target_path)
+    match posix_realpath(raw_abs) {
+        auto Option<string>::Some(&canon) => {
+            if canon.as_str() == "/" {
+                return true
+            }
+        }
+        _ => {}
+    }
+
+    // 2. Lexical resolution fallback (handles root aliases //, /./, /Users/..)
+    auto lex_id = compute_identity_key(startup_cwd, target_path)
+    if lex_id.as_str() == "/" {
+        return true
+    }
+
+    return false
 }

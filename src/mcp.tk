@@ -216,7 +216,7 @@ pub fn run_mcp_server() -> i32 {
                     resp#.push_str(id_str.as_str())
                     resp#.push_str(",\"result\":{\"protocolVersion\":\"")
                     resp#.push_str(negotiated.as_str())
-                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.11.0\"}}}\n")
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.11.1\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
@@ -272,7 +272,7 @@ pub fn run_mcp_server() -> i32 {
 
                                     match p_map.try_borrow(string::from("arguments")) {
                                         auto Option<&JsonNode>::Some(&a_val) => {
-                                            auto build_res = build_mcp_cli_args(a_val)
+                                            auto build_res = build_mcp_cli_args(a_val, startup_cwd.as_str())
                                             if build_res.is_err() {
                                                 send_error(id_str.as_str(), -32602, build_res.unwrap_err().as_str())
                                                 continue
@@ -284,7 +284,7 @@ pub fn run_mcp_server() -> i32 {
                                                         continue
                                                     }
                                                     auto search_opts = opts_res.unwrap()
-                                                    auto val_res = validate_mcp_cli_options(search_opts)
+                                                    auto val_res = validate_mcp_cli_options(search_opts, startup_cwd.as_str())
                                                     if val_res.is_err() {
                                                         send_error(id_str.as_str(), -32602, val_res.unwrap_err().as_str())
                                                         continue

@@ -9,6 +9,7 @@ import std/math::{is_finite, floor}
 import src/parse::{parse_size_bytes_strict}
 import src/printer::{u64_to_string}
 import src/types::{CliOptions}
+import src/path_norm::{resolves_to_root}
 
 pub const MCP_MAX_SAFE_INTEGER: usize = 9007199254740991:usize
 
@@ -604,6 +605,12 @@ fn parse_vec_string_param(node: JsonNode, key: str, min_items: usize) -> Result<
                 auto &item = arr.borrow(i)
                 match item {
                     auto JsonNode::StrNode(&s) => {
+                        if s.len() == 0 {
+                            auto err# = string::from("Invalid params: '")
+                            err#.push_str(key)
+                            err#.push_str("' items must be non-empty strings")
+                            return Result<ParamVecState, string>::Err(cede err)
+                        }
                         res#.push(s.clone())
                     }
                     _ => {
@@ -664,7 +671,7 @@ fn parse_nullable_size_param(node: JsonNode, key: str) -> Result<ParamStringStat
     }
 }
 
-pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
+pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<string>, string> {
     match args_node {
         auto JsonNode::ObjectNode(&map) => {
             auto pattern# = ParamStringState(state = 0:u8, value = string::new())
@@ -874,7 +881,12 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
                 return Result<Vec<string>, string>::Err(string::from("Invalid params: 'pattern' is required"))
             }
 
-            // 6. Check for stdin path
+            // 6. Check for non-empty path
+            if path.state == 2:u8 && path.value.len() == 0 {
+                return Result<Vec<string>, string>::Err(string::from("Invalid params: 'path' must be a non-empty string"))
+            }
+
+            // 7. Check for stdin path
             if path.state == 2:u8 && path.value.as_str() == "-" {
                 return Result<Vec<string>, string>::Err(string::from("Invalid params: stdin path/pattern source '-' is unavailable in MCP stdio mode"))
             }
@@ -888,12 +900,52 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
                 }
             }
 
-            // 7. Classify raw args
+            // 8. Classify raw args
             auto families_res = classify_args(raw_args.clone(), has_typed_pattern)
             if families_res.is_err() {
                 return Result<Vec<string>, string>::Err(families_res.unwrap_err())
             }
             auto families = families_res.unwrap()
+
+            // 9. Root CWD fallback and relative path validation
+            if startup_cwd == "/" {
+                auto has_any_path = path.state == 2:u8 || paths.state == 2:u8 || has_family(families, OptionFamily::Path)
+                if !has_any_path {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: 'path' or 'paths' must be explicitly specified with an absolute directory path when MCP server working directory is root ('/')"))
+                }
+                if path.state == 2:u8 && !path.value.as_str().starts_with("/") {
+                    auto err# = string::from("Invalid params: relative path '")
+                    err#.push_str(path.value.as_str())
+                    err#.push_str("' cannot be safely resolved when MCP server working directory is root ('/'); please provide an absolute path")
+                    return Result<Vec<string>, string>::Err(cede err)
+                }
+                if paths.state == 2:u8 {
+                    auto pi# = 0:usize
+                    loop pi < paths.value.len() {
+                        auto &p_str = paths.value.borrow(pi)
+                        if !p_str.as_str().starts_with("/") {
+                            auto err# = string::from("Invalid params: relative path '")
+                            err#.push_str(p_str.as_str())
+                            err#.push_str("' cannot be safely resolved when MCP server working directory is root ('/'); please provide an absolute path")
+                            return Result<Vec<string>, string>::Err(cede err)
+                        }
+                        pi = pi + 1
+                    }
+                }
+                auto fi# = 0:usize
+                loop fi < families.len() {
+                    auto &ot = families.borrow(fi)
+                    if ot.family == OptionFamily::Path {
+                        if !ot.token.as_str().starts_with("/") {
+                            auto err# = string::from("Invalid params: relative path '")
+                            err#.push_str(ot.token.as_str())
+                            err#.push_str("' cannot be safely resolved when MCP server working directory is root ('/'); please provide an absolute path")
+                            return Result<Vec<string>, string>::Err(cede err)
+                        }
+                    }
+                    fi = fi + 1
+                }
+            }
 
             // 8. Strictly reject any pattern source in raw args
             auto tok_ps = find_family_token(families, OptionFamily::PatternSource)
@@ -1239,11 +1291,21 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
                 cli_args#.push(string::from("--heading"))
             }
 
-            // Pass-through raw args
+            // Pass-through raw args and detect existing "--"
             auto ri# = 0:usize
+            auto raw_has_dashdash# = false
             loop ri < raw_args.len() {
+                if raw_args.borrow(ri).as_str() == "--" {
+                    raw_has_dashdash = true
+                }
                 cli_args#.push(raw_args.borrow(ri).clone())
                 ri = ri + 1
+            }
+
+            // Insert positional barrier "--" before appending typed path(s), only if not already present
+            auto has_typed_paths = path.state == 2:u8 || paths.state == 2:u8
+            if !raw_has_dashdash && has_typed_paths {
+                cli_args#.push(string::from("--"))
             }
 
             // Paths
@@ -1267,7 +1329,18 @@ pub fn build_mcp_cli_args(args_node: JsonNode) -> Result<Vec<string>, string> {
     }
 }
 
-pub fn validate_mcp_cli_options(opts: CliOptions) -> Result<(), string> {
+pub fn validate_mcp_cli_options(opts: CliOptions, startup_cwd: str) -> Result<(), string> {
+    auto pi# = 0:usize
+    loop pi < opts.paths.len() {
+        auto &target_path = opts.paths.borrow(pi)
+        if resolves_to_root(startup_cwd, target_path.as_str()) {
+            auto err# = string::from("Invalid params: target path '")
+            err#.push_str(target_path.as_str())
+            err#.push_str("' resolves to filesystem root ('/'); searching root is not allowed in MCP mode")
+            return Result<(), string>::Err(cede err)
+        }
+        pi = pi + 1
+    }
     if opts.budget_limits.max_total_matches_enabled && opts.budget_limits.max_total_matches > MCP_MAX_SAFE_INTEGER {
         return Result<(), string>::Err(string::from("Invalid params: 'max_total_matches' exceeds MCP maximum safe integer (9007199254740991)"))
     }

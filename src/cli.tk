@@ -13,7 +13,7 @@ import src/posix::{posix_ferror}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
 
 pub fn print_help() {
-    println("trg 0.11.0 - Fast, agent-friendly code search tool")
+    println("trg 0.11.1 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -81,7 +81,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.11.0 (Toka)")
+    println("trg 0.11.1 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {

@@ -169,7 +169,7 @@ def extract_mcp_records(sc):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.11.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.11.1 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -188,7 +188,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -215,25 +215,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.11.0 identity on both binaries
+    # Validate exact 0.11.1 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.11.0 (Toka)", f"Expected 'trg 0.11.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.11.1 (Toka)", f"Expected 'trg 0.11.1 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.11.0 (Toka)", f"Expected 'trg 0.11.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.11.1 (Toka)", f"Expected 'trg 0.11.1 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.11.0
-    log("Test 1: Help & Version flags (exact 0.11.0 release identity)")
+    # Test 1: Help & Version exact 0.11.1
+    log("Test 1: Help & Version flags (exact 0.11.1 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.11.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.11.1 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.11.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.11.1 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -783,7 +783,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.11.0" in r_re_ctx.stdout
+    assert "trg 0.11.1" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -2024,7 +2024,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.11.0"
+        assert resp1["result"]["serverInfo"]["version"] == "0.11.1"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -4055,8 +4055,175 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     m_event = next(e for e in j_events if e.get("type") == "match")
     assert m_event["data"]["path"]["text"] == "<stdin>", f"Expected path '<stdin>', got: {m_event['data']['path']}"
 
+    # Test 125: MCP Root Directory Traversal Guard & Relative Path Safety
+    log("Test 125: MCP Root Directory Traversal Guard & Relative Path Safety")
+
+    def run_mcp_call(cmd, args_payload, cwd="/", timeout=5.0):
+        req = (
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "trg_search", "arguments": args_payload}}) + "\n"
+        )
+        proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            stdout, _ = proc.communicate(input=req, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            raise AssertionError(f"MCP command timed out (hard {timeout}s limit exceeded) for payload: {args_payload}")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+        lines = [json.loads(l) for l in stdout.strip().split("\n") if l.strip()]
+        assert len(lines) >= 2, f"Expected at least 2 responses, got {len(lines)}: {lines}"
+        assert lines[0]["id"] == 1
+        assert lines[1]["id"] == 2
+        return lines[1]
+
+    # Part 1: Server CWD = "/" (root daemon environment)
+    # 1.1 Missing path must be rejected
+    r_no_path = run_mcp_call([trg, "--mcp"], {"pattern": "main"}, cwd="/")
+    assert r_no_path.get("error", {}).get("code") == -32602
+    assert "when MCP server working directory is root ('/')" in r_no_path["error"]["message"]
+
+    # 1.2 Relative paths must be rejected under root CWD
+    for rel in ["src", ".", "..", "./tests", "-dashdir"]:
+        r_rel = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": rel}, cwd="/")
+        assert r_rel.get("error", {}).get("code") == -32602
+        assert "cannot be safely resolved when MCP server working directory is root ('/')" in r_rel["error"]["message"]
+
+    # 1.3 Literal root and lexical root aliases must be rejected
+    for root_alias in ["/", "//", "/./", "/Users/.."]:
+        r_root = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": root_alias}, cwd="/")
+        assert r_root.get("error", {}).get("code") == -32602
+        assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_root["error"]["message"]
+
+    # 1.4 Symlink directly to root
+    with tempfile.TemporaryDirectory(prefix="trg_test_root_link_") as td:
+        root_link = pathlib.Path(td) / "link_to_root"
+        os.symlink("/", root_link)
+        r_sym = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": str(root_link)}, cwd="/")
+        assert r_sym.get("error", {}).get("code") == -32602
+        assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_sym["error"]["message"]
+
+    # 1.5 Symlink followed by .. (P1 requirement)
+    with tempfile.TemporaryDirectory(prefix="trg_test_users_link_") as td:
+        users_link = pathlib.Path(td) / "link_to_users"
+        os.symlink("/Users", users_link)
+        r_sym_dotdot = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": str(users_link / "..")}, cwd="/")
+        assert r_sym_dotdot.get("error", {}).get("code") == -32602
+        assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_sym_dotdot["error"]["message"]
+
+    # 1.6 Poisoned multi-path arrays (safe path + unsafe tail)
+    r_pois_root = run_mcp_call([trg, "--mcp"], {"pattern": "main", "paths": [str(fixtures_dir), "/"]}, cwd="/")
+    assert r_pois_root.get("error", {}).get("code") == -32602
+    assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_pois_root["error"]["message"]
+
+    r_pois_rel = run_mcp_call([trg, "--mcp"], {"pattern": "main", "paths": [str(fixtures_dir), "relative_child"]}, cwd="/")
+    assert r_pois_rel.get("error", {}).get("code") == -32602
+    assert "cannot be safely resolved when MCP server working directory is root ('/')" in r_pois_rel["error"]["message"]
+
+    # 1.7 Raw positionals in args
+    r_raw_root = run_mcp_call([trg, "--mcp"], {"pattern": "main", "args": ["/"]}, cwd="/")
+    assert r_raw_root.get("error", {}).get("code") == -32602
+    assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_raw_root["error"]["message"]
+
+    r_raw_rel = run_mcp_call([trg, "--mcp"], {"pattern": "main", "args": ["src"]}, cwd="/")
+    assert r_raw_rel.get("error", {}).get("code") == -32602
+    assert "cannot be safely resolved when MCP server working directory is root ('/')" in r_raw_rel["error"]["message"]
+
+    # 1.8 Null and empty edge cases
+    r_empty_p = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": ""}, cwd="/")
+    assert r_empty_p.get("error", {}).get("code") == -32602
+    assert "'path' must be a non-empty string" in r_empty_p["error"]["message"]
+
+    r_null_p = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": None}, cwd="/")
+    assert r_null_p.get("error", {}).get("code") == -32602
+
+    r_empty_arr = run_mcp_call([trg, "--mcp"], {"pattern": "main", "paths": []}, cwd="/")
+    assert r_empty_arr.get("error", {}).get("code") == -32602
+
+    r_null_arr = run_mcp_call([trg, "--mcp"], {"pattern": "main", "paths": None}, cwd="/")
+    assert r_null_arr.get("error", {}).get("code") == -32602
+
+    r_empty_item = run_mcp_call([trg, "--mcp"], {"pattern": "main", "paths": [""]}, cwd="/")
+    assert r_empty_item.get("error", {}).get("code") == -32602
+    assert "items must be non-empty strings" in r_empty_item["error"]["message"]
+
+    # 1.9 Valid absolute path succeeds under CWD="/"
+    r_valid_abs = run_mcp_call([trg, "--mcp"], {"pattern": "execute", "path": str(fixtures_dir)}, cwd="/")
+    assert "result" in r_valid_abs
+    assert r_valid_abs.get("isError", False) is False
+
+    # Part 2: Server CWD = normal workspace directory
+    # 2.1 Multi-level parent traversal resolving to root
+    r_norm_up = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": "../../../../../../../../../.."}, cwd=str(fixtures_dir))
+    assert r_norm_up.get("error", {}).get("code") == -32602
+    assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_norm_up["error"]["message"]
+
+    # 2.2 Explicit root under normal CWD
+    r_norm_root = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": "/"}, cwd=str(fixtures_dir))
+    assert r_norm_root.get("error", {}).get("code") == -32602
+    assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_norm_root["error"]["message"]
+
+    # 2.3 Symlink to root under normal CWD
+    with tempfile.TemporaryDirectory(prefix="trg_test_norm_sym_") as td:
+        norm_sym = pathlib.Path(td) / "link_to_root"
+        os.symlink("/", norm_sym)
+        r_norm_sym = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": str(norm_sym)}, cwd=td)
+        assert r_norm_sym.get("error", {}).get("code") == -32602
+        assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_norm_sym["error"]["message"]
+
+    # 2.4 Missing path under normal CWD defaults to "." and succeeds
+    r_norm_def = run_mcp_call([trg, "--mcp"], {"pattern": "execute"}, cwd=str(fixtures_dir))
+    assert "result" in r_norm_def
+
+    # 2.5 Leading dash path under normal CWD
+    with tempfile.TemporaryDirectory(prefix="trg_test_dash_") as td:
+        tdp = pathlib.Path(td)
+        dash_dir = tdp / "-dashdir"
+        dash_dir.mkdir()
+        (dash_dir / "target.txt").write_text("hello dash target\n")
+
+        r_dash = run_mcp_call([trg, "--mcp"], {"pattern": "hello", "path": str(dash_dir)}, cwd=td)
+        assert "result" in r_dash
+        assert "hello dash target" in r_dash["result"]["content"][0]["text"]
+
+        # 2.6 Combination with existing "--" in args
+        r_dash_dash = run_mcp_call([trg, "--mcp"], {"pattern": "hello", "args": ["--"], "path": str(dash_dir)}, cwd=td)
+        assert "result" in r_dash_dash
+        assert "hello dash target" in r_dash_dash["result"]["content"][0]["text"]
+
+    # Part 3: Persistent Session Stream Preservation
+    sess_input = (
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "trg_search", "arguments": {"pattern": "main", "path": "/"}}}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "trg_search", "arguments": {"pattern": "execute", "path": str(fixtures_dir)}}}) + "\n" +
+        json.dumps({"jsonrpc": "2.0", "id": 4, "method": "ping"}) + "\n"
+    )
+    p_sess = subprocess.Popen([trg, "--mcp"], cwd="/", stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        s_out, _ = p_sess.communicate(input=sess_input, timeout=5.0)
+    except subprocess.TimeoutExpired:
+        p_sess.kill()
+        p_sess.communicate()
+        raise AssertionError("Persistent MCP session timed out (5s limit)")
+    finally:
+        if p_sess.poll() is None:
+            p_sess.kill()
+            p_sess.communicate()
+
+    sess_lines = [json.loads(l) for l in s_out.strip().split("\n") if l.strip()]
+    assert len(sess_lines) == 4, f"Expected 4 responses, got {len(sess_lines)}: {sess_lines}"
+    assert sess_lines[0]["id"] == 1 and "result" in sess_lines[0]
+    assert sess_lines[1]["id"] == 2 and sess_lines[1]["error"]["code"] == -32602
+    assert sess_lines[2]["id"] == 3 and "result" in sess_lines[2]
+    assert sess_lines[3]["id"] == 4 and "result" in sess_lines[3]
+
     log("=" * 60)
-    log("ALL 124 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.11.0)!")
+    log("ALL 125 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.11.1)!")
     log("=" * 60)
 
 if __name__ == "__main__":

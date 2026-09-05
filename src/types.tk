@@ -31,7 +31,6 @@ pub fn path_kind_name(kind: PathKind) -> str {
         auto PathKind::Absolute => { return "absolute" }
         auto PathKind::Stdin => { return "stdin" }
     }
-    return ""
 }
 
 pub fn scan_pass_name(p: ScanPass) -> str {
@@ -40,7 +39,6 @@ pub fn scan_pass_name(p: ScanPass) -> str {
         auto ScanPass::DefinitionsOnly => { return "definitions" }
         auto ScanPass::UsagesOnly => { return "usages" }
     }
-    return ""
 }
 
 pub shape ResolvedPath (
