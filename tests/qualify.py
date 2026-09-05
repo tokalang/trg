@@ -4094,7 +4094,7 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         assert "cannot be safely resolved when MCP server working directory is root ('/')" in r_rel["error"]["message"]
 
     # 1.3 Literal root and lexical root aliases must be rejected
-    for root_alias in ["/", "//", "/./", "/Users/.."]:
+    for root_alias in ["/", "//", "/./", "/usr/.."]:
         r_root = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": root_alias}, cwd="/")
         assert r_root.get("error", {}).get("code") == -32602
         assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_root["error"]["message"]
@@ -4108,10 +4108,11 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_sym["error"]["message"]
 
     # 1.5 Symlink followed by .. (P1 requirement)
-    with tempfile.TemporaryDirectory(prefix="trg_test_users_link_") as td:
-        users_link = pathlib.Path(td) / "link_to_users"
-        os.symlink("/Users", users_link)
-        r_sym_dotdot = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": str(users_link / "..")}, cwd="/")
+    target_top_dir = "/usr" if os.path.isdir("/usr") else ("/etc" if os.path.isdir("/etc") else "/var")
+    with tempfile.TemporaryDirectory(prefix="trg_test_sym_dotdot_") as td:
+        dir_link = pathlib.Path(td) / "link_to_top_dir"
+        os.symlink(target_top_dir, dir_link)
+        r_sym_dotdot = run_mcp_call([trg, "--mcp"], {"pattern": "main", "path": str(dir_link / "..")}, cwd="/")
         assert r_sym_dotdot.get("error", {}).get("code") == -32602
         assert "resolves to filesystem root ('/'); searching root is not allowed in MCP mode" in r_sym_dotdot["error"]["message"]
 
