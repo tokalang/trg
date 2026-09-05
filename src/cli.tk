@@ -11,9 +11,10 @@ import src/glob::{parse_glob_rule}
 import src/file_types::{lookup_type_extensions}
 import src/posix::{posix_ferror}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
+import src/symbol::{is_valid_identifier, generate_symbol_variants}
 
 pub fn print_help() {
-    println("trg 0.11.1 - Fast, agent-friendly code search tool")
+    println("trg 0.12.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -63,6 +64,8 @@ pub fn print_help() {
     println("      --context-block        Expand context to enclose syntactic code block")
     println("      --max-block-lines <NUM> Maximum lines for syntactic block context (default: 80)")
     println("      --scope                Show enclosing symbol scope (human: [scope], JSON: scope field)")
+    println("      --group-by-scope       Group matches by enclosing scope hierarchy")
+    println("      --symbol-variants      Expand search pattern to naming variants (snake, camel, pascal, etc.)")
     println("      --def-first            Prioritize definition matches before usages under budgets")
     println("      --mcp                  Run as a native Model Context Protocol (MCP) stdio server")
     println("  -g, --glob <GLOB>          Include or exclude files matching GLOB (last match wins)")
@@ -81,7 +84,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.11.1 (Toka)")
+    println("trg 0.12.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
@@ -296,6 +299,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     auto context_block# = false
     auto max_block_lines# = 80:usize
     auto scope# = false
+    auto group_by_scope# = false
+    auto symbol_variants# = false
     auto def_first# = false
     auto mcp_mode# = false
     auto path_style# = PathStyle::AsGiven
@@ -1187,6 +1192,18 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             continue
         }
 
+        if view == "--group-by-scope" {
+            group_by_scope = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--symbol-variants" {
+            symbol_variants = true
+            i = i + 1
+            continue
+        }
+
         if view == "--def-first" {
             def_first = true
             i = i + 1
@@ -1325,7 +1342,9 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             path_style = PathStyle::AsGiven,
             text_layout = TextLayout::Auto,
             with_filename = Option<bool>::None,
-            deduplicate_targets = false
+            deduplicate_targets = false,
+            group_by_scope = false,
+            symbol_variants = false
         ))
     }
 
@@ -1363,6 +1382,17 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     // Mutual exclusion: -E and -F cannot be combined
     if fixed_strings && regexp {
         return Result<CliOptions, string>::Err(string::from("Flag -E (--extended-regexp) cannot be combined with -F (--fixed-strings)"))
+    }
+
+    if symbol_variants {
+        if regexp {
+            return Result<CliOptions, string>::Err(string::from("Flag --symbol-variants cannot be combined with -E (--extended-regexp)"))
+        }
+        if patterns.len() != 1 || !is_valid_identifier(patterns.borrow(0).as_str()) {
+            return Result<CliOptions, string>::Err(string::from("Flag --symbol-variants requires a single valid identifier"))
+        }
+        auto ignore_case = (case_mode == CaseMode::Insensitive)
+        patterns = generate_symbol_variants(patterns.borrow(0).as_str(), ignore_case)
     }
 
     // Flag conflict validation: --json cannot be combined with -l, -c, or --files
@@ -1449,6 +1479,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         path_style = path_style,
         text_layout = text_layout,
         with_filename = with_filename,
-        deduplicate_targets = deduplicate_targets
+        deduplicate_targets = deduplicate_targets,
+        group_by_scope = group_by_scope,
+        symbol_variants = symbol_variants
     ))
 }

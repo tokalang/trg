@@ -10,6 +10,7 @@ import src/parse::{parse_size_bytes_strict}
 import src/printer::{u64_to_string}
 import src/types::{CliOptions}
 import src/path_norm::{resolves_to_root}
+import src/symbol::{is_valid_identifier}
 
 pub const MCP_MAX_SAFE_INTEGER: usize = 9007199254740991:usize
 
@@ -41,7 +42,9 @@ pub shape OptionFamily (
     MaxBlockLines = 24 |    // --max-block-lines, --max-block-lines=*
     Heading = 25 |          // --heading, --no-heading
     PathStyle = 26 |        // --path-style, --path-style=*
-    DeduplicateTargets = 27 // --deduplicate-targets, --no-deduplicate-targets
+    DeduplicateTargets = 27 | // --deduplicate-targets, --no-deduplicate-targets
+    GroupByScope = 28 |     // --group-by-scope
+    SymbolVariants = 29     // --symbol-variants
 )
 
 pub shape OptionToken (
@@ -252,6 +255,16 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
             }
             if view == "--deduplicate-targets" || view == "--no-deduplicate-targets" {
                 families#.push(OptionToken(family = OptionFamily::DeduplicateTargets, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--group-by-scope" {
+                families#.push(OptionToken(family = OptionFamily::GroupByScope, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--symbol-variants" {
+                families#.push(OptionToken(family = OptionFamily::SymbolVariants, token = string::from(view)))
                 i = i + 1
                 continue
             }
@@ -517,6 +530,12 @@ pub fn find_family_token(tokens: Vec<OptionToken>, target: OptionFamily) -> Opti
             auto OptionFamily::DeduplicateTargets => {
                 match target { auto OptionFamily::DeduplicateTargets => { matched = true } _ => {} }
             }
+            auto OptionFamily::GroupByScope => {
+                match target { auto OptionFamily::GroupByScope => { matched = true } _ => {} }
+            }
+            auto OptionFamily::SymbolVariants => {
+                match target { auto OptionFamily::SymbolVariants => { matched = true } _ => {} }
+            }
         }
         if matched {
             return Option<string>::Some(ot.token.clone())
@@ -690,6 +709,8 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
             auto block# = ParamBoolState(state = 0:u8, value = false)
             auto max_block_lines# = ParamUsizeState(state = 0:u8, value = 0:usize)
             auto scope# = ParamBoolState(state = 0:u8, value = false)
+            auto group_by_scope# = ParamBoolState(state = 0:u8, value = false)
+            auto symbol_variants# = ParamBoolState(state = 0:u8, value = false)
             auto max_total_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
             auto max_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
             auto max_result_bytes# = ParamStringState(state = 0:u8, value = string::new())
@@ -773,6 +794,14 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
                     auto r = parse_bool_param(node, "scope")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     scope = r.unwrap()
+                } else if k == "group_by_scope" {
+                    auto r = parse_bool_param(node, "group_by_scope")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    group_by_scope = r.unwrap()
+                } else if k == "symbol_variants" {
+                    auto r = parse_bool_param(node, "symbol_variants")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    symbol_variants = r.unwrap()
                 } else if k == "max_total_matches" {
                     auto r = parse_nullable_usize_param(node, "max_total_matches", 0:usize, 9007199254740991:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
@@ -1115,6 +1144,49 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
                 return Result<Vec<string>, string>::Err(cede err)
             }
 
+            auto tok_gbs = find_family_token(families, OptionFamily::GroupByScope)
+            if tok_gbs.is_some() && group_by_scope.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'group_by_scope' conflicts with args option '")
+                err#.push_str(tok_gbs.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto tok_sv = find_family_token(families, OptionFamily::SymbolVariants)
+            if tok_sv.is_some() && symbol_variants.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'symbol_variants' conflicts with args option '")
+                err#.push_str(tok_sv.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
+            auto is_symbol_variants_active = (symbol_variants.state == 2:u8 && symbol_variants.value) || tok_sv.is_some()
+            if is_symbol_variants_active {
+                auto is_regex_active# = false
+                if mode.state == 2:u8 && mode.value.as_str() == "regex" {
+                    is_regex_active = true
+                } else {
+                    auto tok_pm = find_family_token(families, OptionFamily::PatternMode)
+                    if tok_pm.is_some() {
+                        auto pmt = tok_pm.unwrap()
+                        if pmt.as_str() == "-E" || pmt.as_str() == "--extended-regexp" || pmt.as_str() == "--regex-mode" {
+                            is_regex_active = true
+                        }
+                    }
+                }
+                if is_regex_active {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: --symbol-variants cannot be combined with -E (--extended-regexp)"))
+                }
+                if patterns.state == 2:u8 {
+                    return Result<Vec<string>, string>::Err(string::from("Invalid params: --symbol-variants requires a single valid identifier"))
+                }
+                if pattern.state == 2:u8 {
+                    if !is_valid_identifier(pattern.value.as_str()) {
+                        return Result<Vec<string>, string>::Err(string::from("Invalid params: --symbol-variants requires a single valid identifier"))
+                    }
+                }
+            }
+
             // 8. Build final CLI argument vector
             auto cli_args# = Vec<string>::new()
             cli_args#.push(string::from("trg"))
@@ -1195,6 +1267,16 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
             // Scope
             if scope.state == 2:u8 && scope.value {
                 cli_args#.push(string::from("--scope"))
+            }
+
+            // Group by scope
+            if group_by_scope.state == 2:u8 && group_by_scope.value {
+                cli_args#.push(string::from("--group-by-scope"))
+            }
+
+            // Symbol variants
+            if symbol_variants.state == 2:u8 && symbol_variants.value {
+                cli_args#.push(string::from("--symbol-variants"))
             }
 
             // Context

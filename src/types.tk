@@ -276,8 +276,24 @@ pub shape CliOptions (
     path_style: PathStyle,
     text_layout: TextLayout,
     with_filename: Option<bool>,
-    deduplicate_targets: bool
+    deduplicate_targets: bool,
+    group_by_scope: bool,
+    symbol_variants: bool
 )
+
+pub shape BlockRange (
+    start: usize,
+    end: usize
+)
+
+impl BlockRange {
+    pub fn clone(self) -> BlockRange {
+        return BlockRange(
+            start = self.start,
+            end = self.end
+        )
+    }
+}
 
 pub shape ScopeFrame (
     name: string,
@@ -318,7 +334,8 @@ pub shape InternedRecord (
     text: string,
     submatches: Vec<SubMatch>,
     scope: Option<string>,
-    block_truncated: bool
+    block_truncated: bool,
+    block_range: Option<BlockRange>
 )
 
 impl InternedRecord {
@@ -336,6 +353,13 @@ impl InternedRecord {
             }
             _ => {}
         }
+        auto br_opt# = Option<BlockRange>::None
+        match self.block_range {
+            auto Option<BlockRange>::Some(&br) => {
+                br_opt = Option<BlockRange>::Some(br.clone())
+            }
+            _ => {}
+        }
         return InternedRecord(
             kind = self.kind.clone(),
             group_id = self.group_id,
@@ -344,7 +368,8 @@ impl InternedRecord {
             text = self.text.clone(),
             submatches = cede subs,
             scope = cede sc,
-            block_truncated = self.block_truncated
+            block_truncated = self.block_truncated,
+            block_range = cede br_opt
         )
     }
 }
@@ -473,7 +498,9 @@ pub shape EffectiveQuery (
     max_block_lines: Option<usize>,
     scope: bool,
     def_first: bool,
-    deduplicate_targets: bool
+    deduplicate_targets: bool,
+    group_by_scope: bool,
+    symbol_variants: bool
 )
 
 impl EffectiveQuery {
@@ -599,7 +626,9 @@ impl EffectiveQuery {
             max_block_lines = mbl_opt,
             scope = opts.scope,
             def_first = opts.def_first,
-            deduplicate_targets = opts.deduplicate_targets
+            deduplicate_targets = opts.deduplicate_targets,
+            group_by_scope = opts.group_by_scope,
+            symbol_variants = opts.symbol_variants
         )
     }
 }

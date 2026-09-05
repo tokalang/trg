@@ -46,6 +46,7 @@ pub shape FormatConfig (
     only_matching: bool,
     max_columns: usize,
     scope: bool,
+    group_by_scope: bool,
     with_filename: bool,
     max_block_lines: usize
 )
@@ -57,6 +58,7 @@ impl FormatConfig {
             only_matching = false,
             max_columns = 0:usize,
             scope = false,
+            group_by_scope = false,
             with_filename = true,
             max_block_lines = 80:usize
         )
@@ -77,6 +79,7 @@ impl FormatConfig {
             only_matching = opts.only_matching,
             max_columns = opts.max_columns,
             scope = opts.scope,
+            group_by_scope = opts.group_by_scope,
             with_filename = wf,
             max_block_lines = opts.max_block_lines
         )
@@ -160,6 +163,16 @@ pub fn format_interned_record_json(rec: InternedRecord) -> string {
         }
         s#.push_str(",\"block_truncated\":")
         if rec.block_truncated { s#.push_str("true") } else { s#.push_str("false") }
+        match rec.block_range {
+            auto Option<BlockRange>::Some(&br) => {
+                s#.push_str(",\"block_range\":[")
+                s#.push_str(u64_to_string(br.start as u64).as_str())
+                s#.push_str(",")
+                s#.push_str(u64_to_string(br.end as u64).as_str())
+                s#.push_str("]")
+            }
+            _ => {}
+        }
     } else {
         s#.push_str(",\"block_truncated\":")
         if rec.block_truncated { s#.push_str("true") } else { s#.push_str("false") }
@@ -208,12 +221,23 @@ pub fn format_json_match_interned(path: str, rec: InternedRecord) -> string {
             match_json#.push_str("],\"scope\":{\"text\":\"")
             auto esc_scope = json_escape(sc.as_str())
             match_json#.push_str(esc_scope.as_str())
-            match_json#.push_str("\"}}}\n")
+            match_json#.push_str("\"}")
         }
         _ => {
-            match_json#.push_str("]}}\n")
+            match_json#.push_str("]")
         }
     }
+    match rec.block_range {
+        auto Option<BlockRange>::Some(&br) => {
+            match_json#.push_str(",\"block_range\":[")
+            match_json#.push_str(u64_to_string(br.start as u64).as_str())
+            match_json#.push_str(",")
+            match_json#.push_str(u64_to_string(br.end as u64).as_str())
+            match_json#.push_str("]")
+        }
+        _ => {}
+    }
+    match_json#.push_str("}}\n")
     return cede match_json
 }
 
@@ -258,6 +282,16 @@ pub fn format_json_match_compact_interned(path: str, rec: InternedRecord) -> str
         }
         _ => {}
     }
+    match rec.block_range {
+        auto Option<BlockRange>::Some(&br) => {
+            res#.push_str(",\"block_range\":[")
+            res#.push_str(u64_to_string(br.start as u64).as_str())
+            res#.push_str(",")
+            res#.push_str(u64_to_string(br.end as u64).as_str())
+            res#.push_str("]")
+        }
+        _ => {}
+    }
     res#.push_str("}\n")
     return cede res
 }
@@ -288,11 +322,26 @@ fn render_batch_text(
     records: Vec<InternedRecord>,
     separator_needed: bool,
     needs_heading: bool,
-    has_emitted_heading: bool
+    has_emitted_heading: bool,
+    last_scope#: Option<string>
 ) -> string {
     auto out# = string::new()
     match format {
         auto OutputFormat::Human => {
+            auto first_block_range# = Option<BlockRange>::None
+            auto b_idx# = 0:usize
+            loop b_idx < records.len() {
+                auto &r = records.borrow(b_idx)
+                match r.block_range {
+                    auto Option<BlockRange>::Some(&br) => {
+                        first_block_range = Option<BlockRange>::Some(br.clone())
+                        break
+                    }
+                    _ => {}
+                }
+                b_idx = b_idx + 1
+            }
+
             if layout == TextLayout::Grouped {
                 auto show_heading = fmt_cfg.with_filename && needs_heading && resolved_path.display_path.len() > 0
                 if show_heading {
@@ -305,10 +354,88 @@ fn render_batch_text(
                 if separator_needed {
                     out#.push_str("--\n")
                 }
+
+                if fmt_cfg.group_by_scope {
+                    auto b_scope# = Option<string>::None
+                    auto bsi# = 0:usize
+                    loop bsi < records.len() {
+                        auto &r = records.borrow(bsi)
+                        if r.kind == "match" {
+                            match r.scope {
+                                auto Option<string>::Some(&sc) => {
+                                    b_scope = Option<string>::Some(sc.clone())
+                                    break
+                                }
+                                _ => {}
+                            }
+                        }
+                        bsi = bsi + 1
+                    }
+                    match b_scope {
+                        auto Option<string>::Some(&sc) => {
+                            auto sc_changed# = false
+                            match last_scope {
+                                auto Option<string>::Some(&prev) => {
+                                    if !prev.equals(sc.as_str()) {
+                                        sc_changed = true
+                                    }
+                                }
+                                _ => {
+                                    sc_changed = true
+                                }
+                            }
+                            if sc_changed {
+                                out#.push_str("scope: ")
+                                out#.push_str(sc.as_str())
+                                out#.push_str("\n")
+                                last_scope = Option<string>::Some(sc.clone())
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if !fmt_cfg.only_matching {
+                    match first_block_range {
+                        auto Option<BlockRange>::Some(&br) => {
+                            out#.push_str("[block: L")
+                            out#.push_str(u64_to_string(br.start as u64).as_str())
+                            out#.push_str("-L")
+                            out#.push_str(u64_to_string(br.end as u64).as_str())
+                            out#.push_str("]\n")
+                        }
+                        _ => {}
+                    }
+                }
+
                 auto ri# = 0:usize
                 loop ri < records.len() {
                     auto &rec = records.borrow(ri)
                     if rec.kind == "match" {
+                        if fmt_cfg.group_by_scope {
+                            match rec.scope {
+                                auto Option<string>::Some(&sc) => {
+                                    auto sc_changed# = false
+                                    match last_scope {
+                                        auto Option<string>::Some(&prev) => {
+                                            if !prev.equals(sc.as_str()) {
+                                                sc_changed = true
+                                            }
+                                        }
+                                        _ => {
+                                            sc_changed = true
+                                        }
+                                    }
+                                    if sc_changed {
+                                        out#.push_str("scope: ")
+                                        out#.push_str(sc.as_str())
+                                        out#.push_str("\n")
+                                        last_scope = Option<string>::Some(sc.clone())
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         if fmt_cfg.only_matching {
                             auto si# = 0:usize
                             loop si < rec.submatches.len() {
@@ -368,6 +495,18 @@ fn render_batch_text(
                 if separator_needed {
                     out#.push_str("--\n")
                 }
+                if !fmt_cfg.only_matching {
+                    match first_block_range {
+                        auto Option<BlockRange>::Some(&br) => {
+                            out#.push_str("[block: L")
+                            out#.push_str(u64_to_string(br.start as u64).as_str())
+                            out#.push_str("-L")
+                            out#.push_str(u64_to_string(br.end as u64).as_str())
+                            out#.push_str("]\n")
+                        }
+                        _ => {}
+                    }
+                }
                 auto ri# = 0:usize
                 loop ri < records.len() {
                     auto &rec = records.borrow(ri)
@@ -397,7 +536,7 @@ fn render_batch_text(
                                 out#.push_str(u64_to_string(rec.line_number as u64).as_str())
                                 out#.push_str(":")
                             }
-                            if fmt_cfg.scope {
+                            if fmt_cfg.scope || fmt_cfg.group_by_scope {
                                 match rec.scope {
                                     auto Option<string>::Some(&sc) => {
                                         out#.push_str("[")
@@ -486,7 +625,8 @@ pub shape OutputBudgetWriter (
     text_record_bytes#: usize,
     records_emitted#: usize,
     current_scan_pass#: ScanPass,
-    fmt_cfg: FormatConfig
+    fmt_cfg: FormatConfig,
+    last_scope#: Option<string>
 )
 
 impl OutputBudgetWriter {
@@ -514,7 +654,8 @@ impl OutputBudgetWriter {
             text_record_bytes = 0:usize,
             records_emitted = 0:usize,
             current_scan_pass = ScanPass::All,
-            fmt_cfg = fmt_cfg
+            fmt_cfg = fmt_cfg,
+            last_scope = Option<string>::None
         )
     }
 
@@ -541,14 +682,20 @@ impl OutputBudgetWriter {
             text_record_bytes = 0:usize,
             records_emitted = 0:usize,
             current_scan_pass = ScanPass::All,
-            fmt_cfg = fmt_cfg
+            fmt_cfg = fmt_cfg,
+            last_scope = Option<string>::None
         )
     }
 
     pub fn reset_active_segment(self#, next_pass: ScanPass) {
         self.active_segment_file_id = Option<usize>::None
         self.last_emitted_file_key = string::new()
+        self.last_scope = Option<string>::None
         self.current_scan_pass = next_pass
+    }
+
+    pub fn reset_scope_state(self#) {
+        self.last_scope = Option<string>::None
     }
 
     pub fn set_effective_projection(self#, layout: TextLayout, style: PathStyle, with_filename: bool) {
@@ -605,6 +752,10 @@ impl OutputBudgetWriter {
                                      self.fmt_cfg.with_filename &&
                                      (self.last_emitted_file_key != resolved_path.identity_key)
 
+                if self.last_emitted_file_key != resolved_path.identity_key {
+                    self.last_scope = Option<string>::None
+                }
+
                 auto text = render_batch_text(
                     self.format,
                     self.projection.text_layout,
@@ -613,7 +764,8 @@ impl OutputBudgetWriter {
                     batch.records,
                     batch.separator_needed,
                     needs_heading,
-                    self.has_emitted_heading
+                    self.has_emitted_heading,
+                    self.last_scope#
                 )
 
                 auto delta = text.len()
@@ -793,6 +945,10 @@ impl OutputBudgetWriter {
                 auto needs_heading = (self.projection.text_layout == TextLayout::Grouped) &&
                                      (self.last_emitted_file_key != resolved_path.identity_key)
 
+                if self.last_emitted_file_key != resolved_path.identity_key {
+                    self.last_scope = Option<string>::None
+                }
+
                 auto text = render_batch_text(
                     OutputFormat::Human,
                     self.projection.text_layout,
@@ -801,7 +957,8 @@ impl OutputBudgetWriter {
                     batch.records,
                     batch.separator_needed,
                     needs_heading,
-                    self.has_emitted_heading
+                    self.has_emitted_heading,
+                    self.last_scope#
                 )
 
                 if needs_heading {

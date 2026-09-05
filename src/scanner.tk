@@ -20,7 +20,8 @@ import src/types::{
     SyntaxFamily,
     SearchDiagnostic,
     ResolvedPath,
-    InternedRecord
+    InternedRecord,
+    BlockRange
 }
 import src/path_norm::{resolve_path, normalize_cwd}
 import src/matcher::{SearchPlan}
@@ -84,6 +85,55 @@ fn is_binary_chunk(content: str) -> bool {
     return false
 }
 
+fn flush_block_window(
+    state#: ContextState,
+    end_line: usize,
+    writer#: OutputBudgetWriter,
+    budget_state#: BudgetState,
+    frame_state#: FileFrameState,
+    resolved_path: ResolvedPath
+) -> LineProcessOutcome {
+    if state.block_window.len() == 0 {
+        return LineProcessOutcome::Continue
+    }
+    auto start_line = state.block_start_line
+    auto actual_end# = end_line
+    if actual_end < start_line {
+        actual_end = start_line
+    }
+
+    auto br = BlockRange(start = start_line, end = actual_end)
+    auto recs# = Vec<InternedRecord>::new()
+    auto i# = 0:usize
+    loop i < state.block_window.len() {
+        auto rec# = state.block_window.borrow(i).clone()
+        if rec.kind == "match" {
+            rec.block_range = Option<BlockRange>::Some(br.clone())
+        }
+        recs#.push(cede rec)
+        i = i + 1
+    }
+    state.block_window#.clear()
+
+    auto batch = OutputBatch::new(cede recs, state.block_separator_needed)
+    state.block_separator_needed = false
+    auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
+    match outcome {
+        auto EmitOutcome::Written => {
+            return LineProcessOutcome::Continue
+        }
+        auto EmitOutcome::Truncated => {
+            return LineProcessOutcome::Continue
+        }
+        auto EmitOutcome::BrokenPipe => {
+            return LineProcessOutcome::BrokenPipe
+        }
+        auto EmitOutcome::FatalError => {
+            return LineProcessOutcome::FatalError
+        }
+    }
+}
+
 fn process_logical_line(
     cede line: LogicalLine,
     line_matches: bool,
@@ -105,6 +155,71 @@ fn process_logical_line(
         auto res_ok = budget_state#.reserve_match(resolved_path.display_path.as_str(), line.line_number, is_first_for_file)
         if !res_ok {
             return LineProcessOutcome::Continue
+        }
+
+        // Multi-Match Block Collapse: if block_active is already true in active block window
+        if opts.context_block && state.block_active {
+            auto cur_gid = state.current_group_id
+            auto submatches# = Vec<SubMatch>::new()
+            if opts.json_mode || opts.only_matching || opts.mcp_mode {
+                if !opts.invert_match {
+                    auto s_idx# = 0:usize
+                    loop s_idx < ranges.len() {
+                        auto r = ranges.get(s_idx)
+                        if r.end >= r.start && r.end <= line.text.len() {
+                            auto match_text = string::from(line.text.as_str().substr(r.start, r.end - r.start))
+                            submatches#.push(SubMatch(
+                                match_text = cede match_text,
+                                start = r.start,
+                                end = r.end
+                            ))
+                        }
+                        s_idx = s_idx + 1:usize
+                    }
+                }
+            }
+            auto submatch_count = submatches.len()
+            auto sc_opt# = Option<string>::None
+            if scope_name.len() > 0 {
+                sc_opt = Option<string>::Some(string::from(scope_name))
+            }
+
+            state.block_window#.push(InternedRecord(
+                kind = string::from("match"),
+                group_id = cur_gid,
+                line_number = line.line_number,
+                absolute_offset = line.absolute_offset,
+                text = line.text.clone(),
+                submatches = cede submatches,
+                scope = cede sc_opt,
+                block_truncated = false,
+                block_range = Option<BlockRange>::None
+            ))
+
+            auto is_first_emitted = !file_has_emitted_match
+            budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
+            file_has_emitted_match = true
+            file_matched_lines_emitted = file_matched_lines_emitted + 1
+            state.last_emitted_line_num = line.line_number
+            state.pending_after = opts.after_context
+            state.had_emitted_group = true
+            return LineProcessOutcome::Continue
+        }
+
+        // Flush any previously unclosed block window
+        if opts.context_block && state.block_window.len() > 0 {
+            auto last_emitted = state.last_emitted_line_num
+            auto flush_outcome = flush_block_window(
+                state#,
+                last_emitted,
+                writer#,
+                budget_state#,
+                frame_state#,
+                resolved_path
+            )
+            if flush_outcome != LineProcessOutcome::Continue {
+                return flush_outcome
+            }
         }
 
         // 1. Group separator & Group ID
@@ -154,6 +269,20 @@ fn process_logical_line(
             state.block_target_indent = target_indent
             state.block_active = true
             state.block_lines_emitted = num_ring - emit_start_idx + 1
+        } else if opts.context_block {
+            state.block_active = true
+            state.block_lines_emitted = 1:usize
+            state.block_target_depth = line.brace_depth
+            state.block_target_indent = line.indent_level
+        }
+
+        if opts.context_block {
+            state.block_start_line = line.line_number
+            if num_ring > 0 && emit_start_idx < num_ring {
+                auto actual_first_idx = (state.ring.head + emit_start_idx) % state.ring.capacity
+                state.block_start_line = state.ring.lines.borrow(actual_first_idx).line_number
+            }
+            state.block_separator_needed = separator_needed
         }
 
         auto records# = Vec<InternedRecord>::new()
@@ -163,7 +292,7 @@ fn process_logical_line(
             auto &r_line = state.ring.lines.borrow(actual_idx)
             auto r_line_num = r_line.line_number
             if r_line_num > state.last_emitted_line_num {
-                records#.push(InternedRecord(
+                auto ctx_rec = InternedRecord(
                     kind = string::from("context"),
                     group_id = cur_gid,
                     line_number = r_line_num,
@@ -171,8 +300,14 @@ fn process_logical_line(
                     text = r_line.text.clone(),
                     submatches = Vec<SubMatch>::new(),
                     scope = Option<string>::None,
-                    block_truncated = false
-                ))
+                    block_truncated = false,
+                    block_range = Option<BlockRange>::None
+                )
+                if opts.context_block {
+                    state.block_window#.push(cede ctx_rec)
+                } else {
+                    records#.push(cede ctx_rec)
+                }
                 state.last_emitted_line_num = r_line_num
             }
             r_idx = r_idx + 1
@@ -204,7 +339,7 @@ fn process_logical_line(
             sc_opt = Option<string>::Some(string::from(scope_name))
         }
 
-        records#.push(InternedRecord(
+        auto m_rec = InternedRecord(
             kind = string::from("match"),
             group_id = cur_gid,
             line_number = line.line_number,
@@ -212,31 +347,44 @@ fn process_logical_line(
             text = line.text.clone(),
             submatches = cede submatches,
             scope = cede sc_opt,
-            block_truncated = false
-        ))
+            block_truncated = false,
+            block_range = Option<BlockRange>::None
+        )
 
-        // 4. Emit via Writer (Atomic OpeningMatchBatch)
         auto is_first_emitted = !file_has_emitted_match
-        auto batch = OutputBatch::new(cede records, separator_needed)
-        auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
-        match outcome {
-            EmitOutcome::Written => {
-                budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
-                file_has_emitted_match = true
-                file_matched_lines_emitted = file_matched_lines_emitted + 1
-                state.last_emitted_line_num = line.line_number
-                state.pending_after = opts.after_context
-                state.had_emitted_group = true
-                return LineProcessOutcome::Continue
-            }
-            EmitOutcome::Truncated => {
-                return LineProcessOutcome::Continue
-            }
-            EmitOutcome::BrokenPipe => {
-                return LineProcessOutcome::BrokenPipe
-            }
-            EmitOutcome::FatalError => {
-                return LineProcessOutcome::FatalError
+        if opts.context_block {
+            state.block_window#.push(cede m_rec)
+            budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
+            file_has_emitted_match = true
+            file_matched_lines_emitted = file_matched_lines_emitted + 1
+            state.last_emitted_line_num = line.line_number
+            state.pending_after = opts.after_context
+            state.had_emitted_group = true
+            return LineProcessOutcome::Continue
+        } else {
+            records#.push(cede m_rec)
+            // 4. Emit via Writer (Atomic OpeningMatchBatch)
+            auto batch = OutputBatch::new(cede records, separator_needed)
+            auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
+            match outcome {
+                EmitOutcome::Written => {
+                    budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
+                    file_has_emitted_match = true
+                    file_matched_lines_emitted = file_matched_lines_emitted + 1
+                    state.last_emitted_line_num = line.line_number
+                    state.pending_after = opts.after_context
+                    state.had_emitted_group = true
+                    return LineProcessOutcome::Continue
+                }
+                EmitOutcome::Truncated => {
+                    return LineProcessOutcome::Continue
+                }
+                EmitOutcome::BrokenPipe => {
+                    return LineProcessOutcome::BrokenPipe
+                }
+                EmitOutcome::FatalError => {
+                    return LineProcessOutcome::FatalError
+                }
             }
         }
     }
@@ -258,7 +406,18 @@ fn process_logical_line(
                     if trimmed.len > 0 && !trimmed.starts_with("#") {
                         if line.indent_level <= state.block_target_indent {
                             state.block_active = false
-                            return LineProcessOutcome::Continue
+                            auto last_emitted = state.last_emitted_line_num
+                            auto flush_outcome = flush_block_window(
+                                state#,
+                                last_emitted,
+                                writer#,
+                                budget_state#,
+                                frame_state#,
+                                resolved_path
+                            )
+                            if flush_outcome != LineProcessOutcome::Continue {
+                                return flush_outcome
+                            }
                         }
                     }
                 }
@@ -270,44 +429,37 @@ fn process_logical_line(
             }
         }
 
-        if line.line_number > state.last_emitted_line_num {
-            auto target_gid = state.current_group_id
-            auto ctx_recs# = Vec<InternedRecord>::new()
-            ctx_recs#.push(InternedRecord(
-                kind = string::from("context"),
-                group_id = target_gid,
-                line_number = line.line_number,
-                absolute_offset = line.absolute_offset,
-                text = line.text.clone(),
-                submatches = Vec<SubMatch>::new(),
-                scope = Option<string>::None,
-                block_truncated = is_block_truncated
-            ))
-            auto batch = OutputBatch::new(cede ctx_recs, false)
-            auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
-            match outcome {
-                EmitOutcome::Written => {
-                    state.last_emitted_line_num = line.line_number
-                }
-                EmitOutcome::Truncated => {
-                    return LineProcessOutcome::Continue
-                }
-                EmitOutcome::BrokenPipe => {
-                    return LineProcessOutcome::BrokenPipe
-                }
-                EmitOutcome::FatalError => {
-                    return LineProcessOutcome::FatalError
-                }
+        if state.block_active {
+            if line.line_number > state.last_emitted_line_num {
+                auto target_gid = state.current_group_id
+                state.block_window#.push(InternedRecord(
+                    kind = string::from("context"),
+                    group_id = target_gid,
+                    line_number = line.line_number,
+                    absolute_offset = line.absolute_offset,
+                    text = line.text.clone(),
+                    submatches = Vec<SubMatch>::new(),
+                    scope = Option<string>::None,
+                    block_truncated = is_block_truncated,
+                    block_range = Option<BlockRange>::None
+                ))
+                state.last_emitted_line_num = line.line_number
             }
-        }
 
-        if terminate_block && state.pending_after == 0 {
-            state.block_active = false
+            if terminate_block {
+                state.block_active = false
+                auto flush_outcome = flush_block_window(
+                    state#,
+                    line.line_number,
+                    writer#,
+                    budget_state#,
+                    frame_state#,
+                    resolved_path
+                )
+                return flush_outcome
+            }
+            return LineProcessOutcome::Continue
         }
-        if state.pending_after > 0 {
-            state.pending_after = state.pending_after - 1
-        }
-        return LineProcessOutcome::Continue
     }
 
     // Normal pending after-context line
@@ -323,7 +475,8 @@ fn process_logical_line(
                 text = line.text.clone(),
                 submatches = Vec<SubMatch>::new(),
                 scope = Option<string>::None,
-                block_truncated = false
+                block_truncated = false,
+                block_range = Option<BlockRange>::None
             ))
             auto batch = OutputBatch::new(cede ctx_recs, false)
             auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
@@ -829,6 +982,25 @@ pub fn scan_file_stream_with_pass(
                 }
                 abs_offset = abs_offset + advance_len
                 line_num = line_num + 1
+            }
+        }
+
+        // Flush any lingering block window at EOF
+        if !is_binary && !had_error && !is_broken_pipe && !budget_state.is_truncated && opts.context_block && context_state.block_window.len() > 0 {
+            auto end_line = context_state.last_emitted_line_num
+            auto flush_outcome = flush_block_window(
+                context_state#,
+                end_line,
+                writer#,
+                budget_state#,
+                frame_state#,
+                resolved_path
+            )
+            context_state.block_active = false
+            match flush_outcome {
+                LineProcessOutcome::BrokenPipe => { is_broken_pipe = true }
+                LineProcessOutcome::FatalError => { had_error = true }
+                _ => {}
             }
         }
 

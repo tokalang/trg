@@ -1,0 +1,190 @@
+// Symbol tokenization and variant expansion for trg.
+import core/str::{str}
+import core/string::{string}
+import std/vec::{Vec}
+
+fn is_ascii_upper(ch: char) -> bool {
+    return ch >= ('A' as char) && ch <= ('Z' as char)
+}
+
+fn is_ascii_lower(ch: char) -> bool {
+    return ch >= ('a' as char) && ch <= ('z' as char)
+}
+
+fn is_ascii_digit(ch: char) -> bool {
+    return ch >= ('0' as char) && ch <= ('9' as char)
+}
+
+fn is_delim(ch: char) -> bool {
+    return ch == ('_' as char) || ch == ('-' as char)
+}
+
+pub fn is_valid_identifier(s: str) -> bool {
+    if s.len == 0 {
+        return false
+    }
+    auto first = s.byte_at(0)
+    auto is_first_ok = is_ascii_lower(first) || is_ascii_upper(first) || (first == ('_' as char))
+    if !is_first_ok {
+        return false
+    }
+    auto i# = 1:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i)
+        auto is_ok = is_ascii_lower(ch) || is_ascii_upper(ch) || is_ascii_digit(ch) || is_delim(ch)
+        if !is_ok {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+pub fn tokenize_identifier(s: str) -> Vec<string> {
+    auto tokens# = Vec<string>::new()
+    auto n = s.len
+    auto i# = 0:usize
+    loop i < n {
+        loop i < n && is_delim(s.byte_at(i)) {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        auto start = i
+        i = i + 1
+        loop i < n {
+            auto ch = s.byte_at(i)
+            if is_delim(ch) {
+                break
+            }
+            auto prev = s.byte_at(i - 1:usize)
+            // Lower to Upper: parseJson -> break before 'J'
+            if is_ascii_lower(prev) && is_ascii_upper(ch) {
+                break
+            }
+            // Acronym sequence to capitalized word: HTTPServer -> break before 'S'
+            if is_ascii_upper(prev) && is_ascii_upper(ch) && (i + 1:usize < n) && is_ascii_lower(s.byte_at(i + 1:usize)) {
+                break
+            }
+            i = i + 1
+        }
+        auto word_slice = s.substr(start, i - start)
+        auto word_str = string::from(word_slice).to_lower()
+        if word_str.len() > 0 {
+            tokens#.push(cede word_str)
+        }
+    }
+    return cede tokens
+}
+
+fn capitalize_word(w: str) -> string {
+    if w.len == 0 {
+        return string::new()
+    }
+    auto up_full = string::from(w).to_upper()
+    auto res# = string::new()
+    res#.push_str(up_full.as_str().substr(0, 1))
+    if w.len > 1 {
+        res#.push_str(w.substr(1, w.len - 1))
+    }
+    return cede res
+}
+
+fn push_variant(res#: Vec<string>, cand: str, ignore_case: bool) {
+    if cand.len == 0 {
+        return
+    }
+    auto i# = 0:usize
+    loop i < res.len() {
+        auto existing = res.borrow(i).as_str()
+        if ignore_case {
+            auto existing_lower = string::from(existing).to_lower()
+            auto cand_lower = string::from(cand).to_lower()
+            if existing_lower.as_str().equals(cand_lower.as_str()) {
+                return
+            }
+        } else {
+            if existing.equals(cand) {
+                return
+            }
+        }
+        i = i + 1
+    }
+    res#.push(string::from(cand))
+}
+
+pub fn generate_symbol_variants(ident: str, ignore_case: bool) -> Vec<string> {
+    auto tokens = tokenize_identifier(ident)
+    auto res# = Vec<string>::new()
+
+    // 1. Original pattern
+    push_variant(res#, ident, ignore_case)
+
+    if tokens.len() == 0 {
+        return cede res
+    }
+
+    // 2. snake_case
+    auto snake# = string::new()
+    auto i# = 0:usize
+    loop i < tokens.len() {
+        if i > 0 {
+            snake#.push_str("_")
+        }
+        snake#.push_str(tokens.borrow(i).as_str())
+        i = i + 1
+    }
+    push_variant(res#, snake.as_str(), ignore_case)
+
+    // 3. camelCase
+    auto camel# = string::new()
+    i = 0
+    loop i < tokens.len() {
+        if i == 0 {
+            camel#.push_str(tokens.borrow(i).as_str())
+        } else {
+            auto cap = capitalize_word(tokens.borrow(i).as_str())
+            camel#.push_str(cap.as_str())
+        }
+        i = i + 1
+    }
+    push_variant(res#, camel.as_str(), ignore_case)
+
+    // 4. PascalCase
+    auto pascal# = string::new()
+    i = 0
+    loop i < tokens.len() {
+        auto cap = capitalize_word(tokens.borrow(i).as_str())
+        pascal#.push_str(cap.as_str())
+        i = i + 1
+    }
+    push_variant(res#, pascal.as_str(), ignore_case)
+
+    // 5. SCREAMING_SNAKE_CASE
+    auto screaming# = string::new()
+    i = 0
+    loop i < tokens.len() {
+        if i > 0 {
+            screaming#.push_str("_")
+        }
+        auto up = string::from(tokens.borrow(i).as_str()).to_upper()
+        screaming#.push_str(up.as_str())
+        i = i + 1
+    }
+    push_variant(res#, screaming.as_str(), ignore_case)
+
+    // 6. kebab-case
+    auto kebab# = string::new()
+    i = 0
+    loop i < tokens.len() {
+        if i > 0 {
+            kebab#.push_str("-")
+        }
+        kebab#.push_str(tokens.borrow(i).as_str())
+        i = i + 1
+    }
+    push_variant(res#, kebab.as_str(), ignore_case)
+
+    return cede res
+}

@@ -1,6 +1,6 @@
 // Context ring buffer and syntactic block context calculation for trg.
 import std/vec::{Vec}
-import src/types::{LogicalLine, SyntaxFamily}
+import src/types::{LogicalLine, SyntaxFamily, InternedRecord}
 import src/syntax::{detect_declaration_scope}
 
 pub shape BeforeRing (
@@ -21,7 +21,10 @@ pub shape ContextState (
     block_target_indent: usize,
     block_archetype: SyntaxFamily,
     block_lines_emitted: usize,
-    current_group_id: usize
+    current_group_id: usize,
+    block_window: Vec<InternedRecord>,
+    block_start_line: usize,
+    block_separator_needed: bool
 )
 
 pub fn make_context_state(before_cap: usize, archetype: SyntaxFamily) -> ContextState {
@@ -41,7 +44,10 @@ pub fn make_context_state(before_cap: usize, archetype: SyntaxFamily) -> Context
         block_target_indent = 0:usize,
         block_archetype = archetype,
         block_lines_emitted = 0:usize,
-        current_group_id = 0:usize
+        current_group_id = 0:usize,
+        block_window = Vec<InternedRecord>::new(),
+        block_start_line = 0:usize,
+        block_separator_needed = false
     )
 }
 

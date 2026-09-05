@@ -219,6 +219,7 @@ pub fn execute_search(
 
         if !budget_state.is_truncated && !broken_pipe_occurred && !(opts.quiet && found_any_match) {
             writer#.reset_active_segment(ScanPass::UsagesOnly)
+            writer#.reset_scope_state()
             auto j# = 0:usize
             loop j < num_files {
                 if budget_state.is_truncated {

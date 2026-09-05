@@ -120,6 +120,10 @@ pub fn format_effective_query(opts: CliOptions) -> string {
     if eq.def_first { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str(",\"deduplicate_targets\":")
     if eq.deduplicate_targets { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"group_by_scope\":")
+    if eq.group_by_scope { s#.push_str("true") } else { s#.push_str("false") }
+    s#.push_str(",\"symbol_variants\":")
+    if eq.symbol_variants { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str("}")
     return cede s
 }
@@ -267,6 +271,16 @@ pub fn format_segments(writer: OutputBudgetWriter) -> string {
                 }
                 s#.push_str(",\"block_truncated\":")
                 if rec.block_truncated { s#.push_str("true") } else { s#.push_str("false") }
+                match rec.block_range {
+                    auto Option<BlockRange>::Some(&br) => {
+                        s#.push_str(",\"block_range\":[")
+                        s#.push_str(u64_to_string(br.start as u64).as_str())
+                        s#.push_str(",")
+                        s#.push_str(u64_to_string(br.end as u64).as_str())
+                        s#.push_str("]")
+                    }
+                    _ => {}
+                }
                 s#.push_str("}")
             } else {
                 s#.push_str("{\"kind\":\"context\",\"group_id\":")

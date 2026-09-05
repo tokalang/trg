@@ -169,7 +169,7 @@ def extract_mcp_records(sc):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.11.1 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.12.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -188,7 +188,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined or "trg v0.12.0" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -215,25 +215,25 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.11.1 identity on both binaries
+    # Validate exact 0.12.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.11.1 (Toka)", f"Expected 'trg 0.11.1 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.12.0 (Toka)", f"Expected 'trg 0.12.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.11.1 (Toka)", f"Expected 'trg 0.11.1 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.12.0 (Toka)", f"Expected 'trg 0.12.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.11.1
-    log("Test 1: Help & Version flags (exact 0.11.1 release identity)")
+    # Test 1: Help & Version exact 0.12.0
+    log("Test 1: Help & Version flags (exact 0.12.0 release identity)")
     r = run_cmd([trg, "-h"])
-    assert "trg 0.11.1 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.12.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
     assert r.returncode == 0
 
     r = run_cmd([trg, "-V"])
-    assert r.stdout.strip() == "trg 0.11.1 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.12.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -783,7 +783,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.11.1" in r_re_ctx.stdout
+    assert "trg 0.12.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -1923,7 +1923,9 @@ def main():
         # Match on declaration itself with --context-block
         r_decl = run_cmd([trg, "--context-block", "fn target_fn", str(block_dir / "test.c")])
         assert r_decl.returncode == 0
-        decl_lines = r_decl.stdout.strip().split("\n")
+        raw_decl_lines = r_decl.stdout.strip().split("\n")
+        assert any(l.startswith("[block: L") for l in raw_decl_lines)
+        decl_lines = [l for l in raw_decl_lines if not l.startswith("[block:")]
         assert "fn target_fn" in decl_lines[0]
         assert decl_lines[-1].strip().endswith("}")
         assert not any("fn unused" in l for l in decl_lines)
@@ -2024,7 +2026,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.11.1"
+        assert resp1["result"]["serverInfo"]["version"] == "0.12.0"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -4221,10 +4223,324 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert sess_lines[0]["id"] == 1 and "result" in sess_lines[0]
     assert sess_lines[1]["id"] == 2 and sess_lines[1]["error"]["code"] == -32602
     assert sess_lines[2]["id"] == 3 and "result" in sess_lines[2]
-    assert sess_lines[3]["id"] == 4 and "result" in sess_lines[3]
+    # Test 126: Brace block boundary closure and block_range
+    log("Test 126: Brace block boundary closure and block_range")
+    with tempfile.TemporaryDirectory(prefix="trg_test_126_") as td:
+        tdp = pathlib.Path(td)
+        c_code = (
+            "// Line 1\n"
+            "void target_function() {\n"
+            "    int a = 1;\n"
+            "    int my_special_symbol = 100;\n"
+            "    int b = 2;\n"
+            "}\n"
+            "\n"
+            "void other_func() {\n"
+            "    int c = 3;\n"
+            "}\n"
+        )
+        c_file = tdp / "test.c"
+        c_file.write_text(c_code, encoding="utf-8")
+
+        # Text mode: [block: L1-L6]
+        r_txt = run_cmd([trg, "--block", "my_special_symbol", str(c_file)])
+        assert r_txt.returncode == 0
+        txt_lines = r_txt.stdout.strip().split("\n")
+        assert any(l.startswith("[block: L1-L6]") for l in txt_lines), f"Expected [block: L1-L6] in: {r_txt.stdout}"
+
+        # JSON mode: match record block_range
+        r_json = run_cmd([trg, "--json", "--block", "my_special_symbol", str(c_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 1
+        m_data = matches[0]["data"]
+        assert m_data.get("block_range") == [1, 6], f"Expected block_range [1, 6], got {m_data.get('block_range')}"
+
+    # Test 127: Indent block boundary closure and block_range
+    log("Test 127: Indent block boundary closure and block_range")
+    with tempfile.TemporaryDirectory(prefix="trg_test_127_") as td:
+        tdp = pathlib.Path(td)
+        py_code = (
+            "# Line 1\n"
+            "def calculate_total():\n"
+            "    subtotal = 50\n"
+            "    # comment inside\n"
+            "    tax_rate_target = 0.08\n"
+            "    return subtotal * (1 + tax_rate_target)\n"
+            "\n"
+            "def another():\n"
+            "    pass\n"
+        )
+        py_file = tdp / "test.py"
+        py_file.write_text(py_code, encoding="utf-8")
+
+        # Text mode
+        r_txt = run_cmd([trg, "--block", "tax_rate_target", str(py_file)])
+        assert r_txt.returncode == 0
+        txt_lines = r_txt.stdout.strip().split("\n")
+        assert any(l.startswith("[block: L2-L7]") for l in txt_lines), f"Expected [block: L2-L7] in: {r_txt.stdout}"
+
+        # JSON mode
+        r_json = run_cmd([trg, "--json", "--block", "tax_rate_target", str(py_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 2
+        assert matches[0]["data"].get("block_range") == [2, 7]
+        assert matches[1]["data"].get("block_range") == [2, 7]
+
+    # Test 128: Multi-match block collapse within single block window
+    log("Test 128: Multi-match block collapse within single block window")
+    with tempfile.TemporaryDirectory(prefix="trg_test_128_") as td:
+        tdp = pathlib.Path(td)
+        multi_code = (
+            "fn compute_stats() {\n"
+            "    let item_val = 10;\n"
+            "    let duplicate_var = item_val * 2;\n"
+            "    let final_res = duplicate_var + item_val;\n"
+            "    return final_res;\n"
+            "}\n"
+        )
+        multi_file = tdp / "stats.tk"
+        multi_file.write_text(multi_code, encoding="utf-8")
+
+        # Text mode: exactly ONE block header even though 2 matches occur
+        r_txt = run_cmd([trg, "--block", "duplicate_var", str(multi_file)])
+        assert r_txt.returncode == 0
+        block_headers = [l for l in r_txt.stdout.strip().split("\n") if l.startswith("[block:")]
+        assert len(block_headers) == 1, f"Expected 1 block header, got {len(block_headers)}: {block_headers}"
+        assert block_headers[0] == "[block: L1-L6]"
+
+        # JSON mode: both matches have identical block_range [1, 6]
+        r_json = run_cmd([trg, "--json", "--block", "duplicate_var", str(multi_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 2
+        assert matches[0]["data"]["block_range"] == [1, 6]
+        assert matches[1]["data"]["block_range"] == [1, 6]
+
+    # Test 129: --max-block-lines truncation with block_range
+    log("Test 129: --max-block-lines truncation with block_range")
+    with tempfile.TemporaryDirectory(prefix="trg_test_129_") as td:
+        tdp = pathlib.Path(td)
+        long_code = (
+            "void massive_function() {\n"
+            "    int line_1 = 1;\n"
+            "    int line_2 = 2;\n"
+            "    int target_trunc_var = 3;\n"
+            "    int line_4 = 4;\n"
+            "    int line_5 = 5;\n"
+            "    int line_6 = 6;\n"
+            "    int line_7 = 7;\n"
+            "    int line_8 = 8;\n"
+            "}\n"
+        )
+        long_file = tdp / "long.c"
+        long_file.write_text(long_code, encoding="utf-8")
+
+        # Human mode: cutoff indicator
+        r_txt = run_cmd([trg, "--block", "--max-block-lines", "4", "target_trunc_var", str(long_file)])
+        assert r_txt.returncode == 0
+        assert "[block context truncated by --max-block-lines 4]" in r_txt.stdout
+
+        # JSON mode
+        r_json = run_cmd([trg, "--json", "--block", "--max-block-lines", "4", "target_trunc_var", str(long_file)])
+        assert r_json.returncode == 0
+        j_lines = [json.loads(l) for l in r_json.stdout.strip().split("\n") if l.strip()]
+        matches = [ev for ev in j_lines if ev.get("type") == "match"]
+        assert len(matches) == 1
+        br = m_data.get("block_range")
+        assert br == [1, 6], f"Expected block_range [1, 6], got {br}"
+        summary_ev = next(ev for ev in j_lines if ev.get("type") == "summary")
+        assert summary_ev["data"]["stats"]["block_contexts_truncated"] >= 1
+        assert summary_ev["data"]["block_truncated"] is True
+
+    # Test 130: --symbol-variants 5-casing expansion
+    log("Test 130: --symbol-variants 5-casing expansion")
+    with tempfile.TemporaryDirectory(prefix="trg_test_130_") as td:
+        tdp = pathlib.Path(td)
+        poly_code = (
+            "val user_account_id = 1\n"
+            "val userAccountId = 2\n"
+            "val UserAccountId = 3\n"
+            "val USER_ACCOUNT_ID = 4\n"
+            "val user-account-id = 5\n"
+            "val unrelated_variable = 6\n"
+        )
+        poly_file = tdp / "poly.txt"
+        poly_file.write_text(poly_code, encoding="utf-8")
+
+        # Query using snake_case
+        r_snake = run_cmd([trg, "--symbol-variants", "user_account_id", str(poly_file)])
+        assert r_snake.returncode == 0
+        lines_snake = r_snake.stdout.strip().split("\n")
+        assert len(lines_snake) == 5
+
+        # Query using PascalCase
+        r_pascal = run_cmd([trg, "--symbol-variants", "UserAccountId", str(poly_file)])
+        assert r_pascal.returncode == 0
+        lines_pascal = r_pascal.stdout.strip().split("\n")
+        assert len(lines_pascal) == 5
+
+        # Query using kebab-case
+        r_kebab = run_cmd([trg, "--symbol-variants", "user-account-id", str(poly_file)])
+        assert r_kebab.returncode == 0
+        lines_kebab = r_kebab.stdout.strip().split("\n")
+        assert len(lines_kebab) == 5
+
+    # Test 131: Acronym lookahead in symbol variants
+    log("Test 131: Acronym lookahead in symbol variants")
+    with tempfile.TemporaryDirectory(prefix="trg_test_131_") as td:
+        tdp = pathlib.Path(td)
+        acronym_code = (
+            "val http_server = 1\n"
+            "val httpServer = 2\n"
+            "val HttpServer = 3\n"
+            "val HTTP_SERVER = 4\n"
+            "val http-server = 5\n"
+            "val h_t_t_p_server = 6\n"
+        )
+        acronym_file = tdp / "acronym.txt"
+        acronym_file.write_text(acronym_code, encoding="utf-8")
+
+        r_acr = run_cmd([trg, "--symbol-variants", "HTTPServer", str(acronym_file)])
+        assert r_acr.returncode == 0
+        acr_lines = r_acr.stdout.strip().split("\n")
+        assert len(acr_lines) == 5
+        assert not any("h_t_t_p_server" in l for l in acr_lines)
+
+    # Test 132: Non-identifier and regex conflict rejection
+    log("Test 132: Non-identifier and regex conflict rejection")
+    # CLI space separated
+    r_bad_space = run_cmd([trg, "--symbol-variants", "fn foo", str(repo_root)], check=False)
+    assert r_bad_space.returncode == 2
+    assert "--symbol-variants requires a single valid identifier" in r_bad_space.stderr
+
+    # CLI leading digit
+    r_bad_digit = run_cmd([trg, "--symbol-variants", "123func", str(repo_root)], check=False)
+    assert r_bad_digit.returncode == 2
+    assert "--symbol-variants requires a single valid identifier" in r_bad_digit.stderr
+
+    # CLI regex conflict
+    r_bad_regex = run_cmd([trg, "-E", "--symbol-variants", "my_func", str(repo_root)], check=False)
+    assert r_bad_regex.returncode == 2
+    assert "--symbol-variants cannot be combined with -E" in r_bad_regex.stderr
+
+    # MCP invalid identifier
+    r_mcp_bad_id = run_cmd([trg, "--mcp"], input_data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "trg_search", "arguments": {"pattern": "fn foo", "symbol_variants": True, "path": str(repo_root)}}}) + "\n")
+    resp_mcp_id = json.loads(r_mcp_bad_id.stdout.strip())
+    assert resp_mcp_id.get("error", {}).get("code") == -32602
+    assert "single valid identifier" in resp_mcp_id["error"]["message"]
+
+    # MCP regex conflict
+    r_mcp_conflict = run_cmd([trg, "--mcp"], input_data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "trg_search", "arguments": {"pattern": "my_func", "mode": "regex", "symbol_variants": True, "path": str(repo_root)}}}) + "\n")
+    resp_mcp_conflict = json.loads(r_mcp_conflict.stdout.strip())
+    assert resp_mcp_conflict.get("error", {}).get("code") == -32602
+    assert "--symbol-variants" in resp_mcp_conflict["error"]["message"]
+
+    # Test 133: --symbol-variants with -i deduplication
+    log("Test 133: --symbol-variants with -i deduplication")
+    with tempfile.TemporaryDirectory(prefix="trg_test_133_") as td:
+        tdp = pathlib.Path(td)
+        dedup_code = (
+            "let user_name = 1;\n"
+            "let USER_NAME = 2;\n"
+        )
+        dedup_file = tdp / "dedup.tk"
+        dedup_file.write_text(dedup_code, encoding="utf-8")
+
+        r_count = run_cmd([trg, "-i", "--symbol-variants", "-c", "user_name", str(dedup_file)])
+        assert r_count.returncode == 0
+        assert r_count.stdout.strip() == "2"
+
+    # Test 134: --group-by-scope grouping and resets
+    log("Test 134: --group-by-scope grouping and resets")
+    with tempfile.TemporaryDirectory(prefix="trg_test_134_") as td:
+        tdp = pathlib.Path(td)
+        f1_code = (
+            "fn worker_a() {\n"
+            "    let test_needle = 1;\n"
+            "}\n"
+            "fn worker_b() {\n"
+            "    let test_needle = 2;\n"
+            "}\n"
+        )
+        f2_code = (
+            "fn worker_a() {\n"
+            "    let test_needle = 3;\n"
+            "}\n"
+        )
+        (tdp / "file1.tk").write_text(f1_code, encoding="utf-8")
+        (tdp / "file2.tk").write_text(f2_code, encoding="utf-8")
+
+        # Grouped mode (--heading default)
+        r_grp = run_cmd([trg, "--heading", "--group-by-scope", "--sort", "path", "test_needle", str(tdp)])
+        assert r_grp.returncode == 0
+        grp_lines = r_grp.stdout.strip().split("\n")
+        assert any("scope: " in l and "worker_a" in l for l in grp_lines)
+        assert any("scope: " in l and "worker_b" in l for l in grp_lines)
+
+        # Flat layout inline degradation (--no-heading)
+        r_flat = run_cmd([trg, "--no-heading", "--group-by-scope", "--sort", "path", "test_needle", str(tdp)])
+        assert r_flat.returncode == 0
+        flat_lines = r_flat.stdout.strip().split("\n")
+        assert any("worker_a" in l and ":" in l for l in flat_lines)
+        assert any("worker_b" in l and ":" in l for l in flat_lines)
+
+        # def-first pass reset verification
+        r_df = run_cmd([trg, "--def-first", "--group-by-scope", "worker_a", str(tdp)])
+        assert r_df.returncode == 0
+
+    # Test 135: MCP protocol end-to-end v2 schema validation with new features
+    log("Test 135: MCP protocol end-to-end v2 schema validation with new features")
+    with tempfile.TemporaryDirectory(prefix="trg_test_135_") as td:
+        tdp = pathlib.Path(td)
+        mcp_code = (
+            "fn perform_task() {\n"
+            "    let api_endpoint = 'http';\n"
+            "    return api_endpoint;\n"
+            "}\n"
+        )
+        (tdp / "task.tk").write_text(mcp_code, encoding="utf-8")
+
+        sess_input = (
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n" +
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "trg_search", "arguments": {"pattern": "api_endpoint", "block": True, "group_by_scope": True, "path": str(tdp)}}}) + "\n"
+        )
+        p_sess = subprocess.Popen([trg, "--mcp"], cwd=str(repo_root), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            s_out, _ = p_sess.communicate(input=sess_input, timeout=5.0)
+        finally:
+            if p_sess.poll() is None:
+                p_sess.kill()
+                p_sess.communicate()
+
+        lines = [json.loads(l) for l in s_out.strip().split("\n") if l.strip()]
+        assert len(lines) == 3
+        # 1. initialize
+        assert lines[0]["result"]["serverInfo"]["version"] == "0.12.0"
+        # 2. tools/list schema contains group_by_scope and symbol_variants
+        tool_schema = lines[1]["result"]["tools"][0]["inputSchema"]["properties"]
+        assert "group_by_scope" in tool_schema
+        assert "symbol_variants" in tool_schema
+        # 3. tools/call response
+        call_res = lines[2]["result"]["structuredContent"]
+        assert call_res.get("schema") == "trg-mcp-result-v2"
+        assert call_res.get("effective_query", {}).get("group_by_scope") is True
+        # Check records block_range and scope
+        recs = extract_mcp_records(call_res)
+        match_recs = [r for r in recs if r.get("kind") == "match"]
+        assert len(match_recs) == 2
+        for r in match_recs:
+            assert r.get("block_range") == [1, 4]
+            assert "perform_task" in r.get("scope", "")
 
     log("=" * 60)
-    log("ALL 125 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.11.1)!")
+    log("ALL 135 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.12.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":
