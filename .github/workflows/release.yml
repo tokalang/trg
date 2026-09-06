@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Tag name to build binaries for'
         required: true
-        default: 'v0.11.1'
+        default: 'v0.13.1'
 
 permissions:
   contents: write
@@ -36,6 +36,8 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -100,6 +102,8 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Download all binary artifacts
         uses: actions/download-artifact@v4
