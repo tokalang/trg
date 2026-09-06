@@ -7,7 +7,9 @@ import stdx/serde/json::{JsonNode}
 import std/math::{is_finite, floor}
 import src/types::{CliOptions, OutputFormat, SearchReport, SearchDiagnostic, BudgetState, BlockRange}
 import src/path_norm::{normalize_cwd, resolves_to_root, compute_identity_key}
-import src/view::{ViewOptions, execute_view_operation}
+import src/view::{ViewOptions, execute_view_operation, parse_range_spec}
+import src/parse::{parse_size_bytes_strict}
+import src/syntax::{is_valid_utf8}
 import src/posix::{posix_write_stdout, posix_read_stdin_line}
 import src/cli::{parse_cli_args_from_vec}
 import src/printer::{
@@ -88,6 +90,374 @@ fn send_tool_error(id_str: str, message: str) -> bool {
     return send_mcp_response(resp.as_str())
 }
 
+fn is_strict_hex_digit(c: char) -> bool {
+    if c >= ('0' as char) && c <= ('9' as char) { return true }
+    if c >= ('a' as char) && c <= ('f' as char) { return true }
+    if c >= ('A' as char) && c <= ('F' as char) { return true }
+    return false
+}
+
+fn hex_char_to_val(c: char) -> usize {
+    if c >= ('0' as char) && c <= ('9' as char) {
+        return (c as usize) - (('0' as char) as usize)
+    }
+    if c >= ('a' as char) && c <= ('f' as char) {
+        return (c as usize) - (('a' as char) as usize) + 10:usize
+    }
+    if c >= ('A' as char) && c <= ('F' as char) {
+        return (c as usize) - (('A' as char) as usize) + 10:usize
+    }
+    return 0:usize
+}
+
+fn skip_json_ws(s: str, pos#: usize) {
+    loop pos < s.len {
+        auto c = s.byte_at(pos)
+        if c == (' ' as char) || c == ('\t' as char) || c == ('\n' as char) || c == ('\r' as char) {
+            pos = pos + 1
+        } else {
+            break
+        }
+    }
+}
+
+fn parse_strict_json_string(s: str, pos#: usize) -> bool {
+    if pos >= s.len || s.byte_at(pos) != ('"' as char) {
+        return false
+    }
+    pos = pos + 1
+    loop pos < s.len {
+        auto sc = s.byte_at(pos)
+        auto sc_val = (sc as u8) as usize
+        if sc_val < 32 {
+            return false
+        }
+        if sc == ('"' as char) {
+            pos = pos + 1
+            return true
+        }
+        if sc == ('\\' as char) {
+            if pos + 1 >= s.len {
+                return false
+            }
+            auto esc = s.byte_at(pos + 1)
+            if esc == ('"' as char) || esc == ('\\' as char) || esc == ('/' as char) ||
+               esc == ('b' as char) || esc == ('f' as char) || esc == ('n' as char) ||
+               esc == ('r' as char) || esc == ('t' as char) {
+                pos = pos + 2
+                continue
+            } else if esc == ('u' as char) {
+                if pos + 5 >= s.len {
+                    return false
+                }
+                if !is_strict_hex_digit(s.byte_at(pos + 2)) ||
+                   !is_strict_hex_digit(s.byte_at(pos + 3)) ||
+                   !is_strict_hex_digit(s.byte_at(pos + 4)) ||
+                   !is_strict_hex_digit(s.byte_at(pos + 5)) {
+                    return false
+                }
+                auto h1 = hex_char_to_val(s.byte_at(pos + 2))
+                auto h2 = hex_char_to_val(s.byte_at(pos + 3))
+                auto h3 = hex_char_to_val(s.byte_at(pos + 4))
+                auto h4 = hex_char_to_val(s.byte_at(pos + 5))
+                auto cp = (h1 << 12) | (h2 << 8) | (h3 << 4) | h4
+                // UTF-16 surrogate checks:
+                if cp >= 0xD800 && cp <= 0xDBFF {
+                    // High surrogate: MUST be immediately followed by \uDC00..\uDFFF
+                    if pos + 11 >= s.len {
+                        return false
+                    }
+                    if s.byte_at(pos + 6) != ('\\' as char) || s.byte_at(pos + 7) != ('u' as char) {
+                        return false
+                    }
+                    if !is_strict_hex_digit(s.byte_at(pos + 8)) ||
+                       !is_strict_hex_digit(s.byte_at(pos + 9)) ||
+                       !is_strict_hex_digit(s.byte_at(pos + 10)) ||
+                       !is_strict_hex_digit(s.byte_at(pos + 11)) {
+                        return false
+                    }
+                    auto l1 = hex_char_to_val(s.byte_at(pos + 8))
+                    auto l2 = hex_char_to_val(s.byte_at(pos + 9))
+                    auto l3 = hex_char_to_val(s.byte_at(pos + 10))
+                    auto l4 = hex_char_to_val(s.byte_at(pos + 11))
+                    auto low_cp = (l1 << 12) | (l2 << 8) | (l3 << 4) | l4
+                    if low_cp < 0xDC00 || low_cp > 0xDFFF {
+                        return false
+                    }
+                    pos = pos + 12
+                    continue
+                } else if cp >= 0xDC00 && cp <= 0xDFFF {
+                    // Isolated low surrogate: invalid
+                    return false
+                }
+                pos = pos + 6
+                continue
+            } else {
+                return false
+            }
+        }
+        pos = pos + 1
+    }
+    return false
+}
+
+fn parse_strict_json_number(s: str, pos#: usize) -> bool {
+    if pos >= s.len {
+        return false
+    }
+    if s.byte_at(pos) == ('-' as char) {
+        pos = pos + 1
+    }
+    if pos >= s.len {
+        return false
+    }
+    auto c = s.byte_at(pos)
+    if c < ('0' as char) || c > ('9' as char) {
+        return false
+    }
+    if c == ('0' as char) {
+        pos = pos + 1
+        if pos < s.len {
+            auto nc = s.byte_at(pos)
+            if nc >= ('0' as char) && nc <= ('9' as char) {
+                return false
+            }
+        }
+    } else {
+        loop pos < s.len {
+            auto dc = s.byte_at(pos)
+            if dc >= ('0' as char) && dc <= ('9' as char) {
+                pos = pos + 1
+            } else {
+                break
+            }
+        }
+    }
+
+    // Fraction
+    if pos < s.len && s.byte_at(pos) == ('.' as char) {
+        pos = pos + 1
+        if pos >= s.len {
+            return false
+        }
+        auto fc = s.byte_at(pos)
+        if fc < ('0' as char) || fc > ('9' as char) {
+            return false
+        }
+        loop pos < s.len {
+            auto dc = s.byte_at(pos)
+            if dc >= ('0' as char) && dc <= ('9' as char) {
+                pos = pos + 1
+            } else {
+                break
+            }
+        }
+    }
+
+    // Exponent
+    if pos < s.len && (s.byte_at(pos) == ('e' as char) || s.byte_at(pos) == ('E' as char)) {
+        pos = pos + 1
+        if pos < s.len && (s.byte_at(pos) == ('+' as char) || s.byte_at(pos) == ('-' as char)) {
+            pos = pos + 1
+        }
+        if pos >= s.len {
+            return false
+        }
+        auto ec = s.byte_at(pos)
+        if ec < ('0' as char) || ec > ('9' as char) {
+            return false
+        }
+        loop pos < s.len {
+            auto dc = s.byte_at(pos)
+            if dc >= ('0' as char) && dc <= ('9' as char) {
+                pos = pos + 1
+            } else {
+                break
+            }
+        }
+    }
+
+    // Delimiter boundary check: character immediately after number MUST be whitespace, comma, bracket, brace, or EOF
+    if pos < s.len {
+        auto end_c = s.byte_at(pos)
+        if end_c != (' ' as char) && end_c != ('\t' as char) && end_c != ('\r' as char) &&
+           end_c != ('\n' as char) && end_c != (',' as char) && end_c != (']' as char) &&
+           end_c != ('}' as char) {
+            return false
+        }
+    }
+    return true
+}
+
+fn parse_strict_json_value(s: str, pos#: usize, depth: usize) -> bool {
+    if depth > 64 {
+        return false
+    }
+    skip_json_ws(s, pos#)
+    if pos >= s.len {
+        return false
+    }
+    auto c = s.byte_at(pos)
+
+    if c == ('"' as char) {
+        return parse_strict_json_string(s, pos#)
+    }
+
+    if c == ('{' as char) {
+        pos = pos + 1
+        skip_json_ws(s, pos#)
+        if pos < s.len && s.byte_at(pos) == ('}' as char) {
+            pos = pos + 1
+            return true
+        }
+        loop true {
+            skip_json_ws(s, pos#)
+            if pos >= s.len || s.byte_at(pos) != ('"' as char) {
+                return false
+            }
+            if !parse_strict_json_string(s, pos#) {
+                return false
+            }
+            skip_json_ws(s, pos#)
+            if pos >= s.len || s.byte_at(pos) != (':' as char) {
+                return false
+            }
+            pos = pos + 1
+            skip_json_ws(s, pos#)
+            if !parse_strict_json_value(s, pos#, depth + 1) {
+                return false
+            }
+            skip_json_ws(s, pos#)
+            if pos >= s.len {
+                return false
+            }
+            auto sep = s.byte_at(pos)
+            if sep == (',' as char) {
+                pos = pos + 1
+                skip_json_ws(s, pos#)
+                if pos < s.len && s.byte_at(pos) == ('}' as char) {
+                    return false
+                }
+            } else if sep == ('}' as char) {
+                pos = pos + 1
+                return true
+            } else {
+                return false
+            }
+        }
+    }
+
+    if c == ('[' as char) {
+        pos = pos + 1
+        skip_json_ws(s, pos#)
+        if pos < s.len && s.byte_at(pos) == (']' as char) {
+            pos = pos + 1
+            return true
+        }
+        loop true {
+            skip_json_ws(s, pos#)
+            if !parse_strict_json_value(s, pos#, depth + 1) {
+                return false
+            }
+            skip_json_ws(s, pos#)
+            if pos >= s.len {
+                return false
+            }
+            auto sep = s.byte_at(pos)
+            if sep == (',' as char) {
+                pos = pos + 1
+                skip_json_ws(s, pos#)
+                if pos < s.len && s.byte_at(pos) == (']' as char) {
+                    return false
+                }
+            } else if sep == (']' as char) {
+                pos = pos + 1
+                return true
+            } else {
+                return false
+            }
+        }
+    }
+
+    if c == ('t' as char) {
+        if pos + 3 < s.len && s.byte_at(pos + 1) == ('r' as char) &&
+           s.byte_at(pos + 2) == ('u' as char) && s.byte_at(pos + 3) == ('e' as char) {
+            pos = pos + 4
+            if pos < s.len {
+                auto nc = s.byte_at(pos)
+                if nc != (' ' as char) && nc != ('\t' as char) && nc != ('\r' as char) &&
+                   nc != ('\n' as char) && nc != (',' as char) && nc != (']' as char) &&
+                   nc != ('}' as char) {
+                    return false
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    if c == ('f' as char) {
+        if pos + 4 < s.len && s.byte_at(pos + 1) == ('a' as char) &&
+           s.byte_at(pos + 2) == ('l' as char) && s.byte_at(pos + 3) == ('s' as char) &&
+           s.byte_at(pos + 4) == ('e' as char) {
+            pos = pos + 5
+            if pos < s.len {
+                auto nc = s.byte_at(pos)
+                if nc != (' ' as char) && nc != ('\t' as char) && nc != ('\r' as char) &&
+                   nc != ('\n' as char) && nc != (',' as char) && nc != (']' as char) &&
+                   nc != ('}' as char) {
+                    return false
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    if c == ('n' as char) {
+        if pos + 3 < s.len && s.byte_at(pos + 1) == ('u' as char) &&
+           s.byte_at(pos + 2) == ('l' as char) && s.byte_at(pos + 3) == ('l' as char) {
+            pos = pos + 4
+            if pos < s.len {
+                auto nc = s.byte_at(pos)
+                if nc != (' ' as char) && nc != ('\t' as char) && nc != ('\r' as char) &&
+                   nc != ('\n' as char) && nc != (',' as char) && nc != (']' as char) &&
+                   nc != ('}' as char) {
+                    return false
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    auto is_digit = c >= ('0' as char) && c <= ('9' as char)
+    if is_digit || c == ('-' as char) {
+        return parse_strict_json_number(s, pos#)
+    }
+
+    return false
+}
+
+pub fn validate_strict_json(s: str) -> bool {
+    if !is_valid_utf8(s) {
+        return false
+    }
+    auto pos# = 0:usize
+    skip_json_ws(s, pos#)
+    if pos >= s.len {
+        return false
+    }
+    if !parse_strict_json_value(s, pos#, 0:usize) {
+        return false
+    }
+    skip_json_ws(s, pos#)
+    if pos < s.len {
+        return false
+    }
+    return true
+}
+
 pub fn run_mcp_server() -> i32 {
     auto server_state# = McpServerState::new()
     auto startup_cwd = normalize_cwd(env::current_dir().as_str())
@@ -100,6 +470,11 @@ pub fn run_mcp_server() -> i32 {
         auto line_str = line_opt.unwrap()
         auto trimmed = line_str.as_str().trim()
         if trimmed.len == 0 {
+            continue
+        }
+
+        if !validate_strict_json(trimmed) {
+            send_error("null", -32700, "Parse error")
             continue
         }
 
@@ -217,7 +592,7 @@ pub fn run_mcp_server() -> i32 {
                     resp#.push_str(id_str.as_str())
                     resp#.push_str(",\"result\":{\"protocolVersion\":\"")
                     resp#.push_str(negotiated.as_str())
-                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.13.0\"}}}\n")
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.13.1\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
@@ -283,7 +658,7 @@ pub fn run_mcp_server() -> i32 {
                                                             if nxt.is_none() { break }
                                                             auto entry = nxt.unwrap()
                                                             auto k = entry.key().as_str()
-                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" {
+                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" {
                                                                 unexp_opt = Option<string>::Some(entry.key().clone())
                                                                 break
                                                             }
@@ -443,6 +818,14 @@ pub fn run_mcp_server() -> i32 {
                                                                             lines_err = true
                                                                         }
                                                                     }
+                                                                    auto JsonNode::StrNode(&s) => {
+                                                                        auto pr = parse_range_spec(s.as_str())
+                                                                        if pr.is_ok() {
+                                                                            lines_range_opt = Option<BlockRange>::Some(pr.unwrap())
+                                                                        } else {
+                                                                            lines_err = true
+                                                                        }
+                                                                    }
                                                                     auto JsonNode::NullNode(_) => {}
                                                                     _ => {
                                                                         lines_err = true
@@ -452,7 +835,7 @@ pub fn run_mcp_server() -> i32 {
                                                             _ => {}
                                                         }
                                                         if lines_err {
-                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'lines' must be an array of two positive integers [start, end]")
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'lines' must be an array of two positive integers [start, end] or a range string '<start>-<end>'")
                                                             continue
                                                         }
                                                         if lines_order_err {
@@ -473,25 +856,312 @@ pub fn run_mcp_server() -> i32 {
                                                             continue
                                                         }
 
+                                                        auto max_lines_opt# = Option<usize>::Some(200:usize)
+                                                        auto max_lines_err# = false
+                                                        match arg_map.try_borrow(string::from("max_lines")) {
+                                                            auto Option<&JsonNode>::Some(&mln) => {
+                                                                match mln {
+                                                                    auto JsonNode::NumNode(n) => {
+                                                                        if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 10000.0 {
+                                                                            max_lines_opt = Option<usize>::Some(n as usize)
+                                                                        } else {
+                                                                            max_lines_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {
+                                                                        max_lines_opt = Option<usize>::None
+                                                                    }
+                                                                    _ => {
+                                                                        max_lines_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if max_lines_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'max_lines' must be an integer between 1 and 10000 or null")
+                                                            continue
+                                                        }
+
+                                                        auto has_mrb = arg_map.try_borrow(string::from("max_result_bytes")).is_some()
+                                                        auto has_mb = arg_map.try_borrow(string::from("max_bytes")).is_some()
+                                                        if has_mrb && has_mb {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: Cannot provide both 'max_bytes' and 'max_result_bytes'")
+                                                            continue
+                                                        }
+
+                                                        auto max_bytes_opt# = Option<usize>::Some(65536:usize)
+                                                        auto max_bytes_err# = false
+                                                        auto max_bytes_err_msg# = string::from("Invalid params: 'max_result_bytes' must be a size string (e.g. '64K'), non-negative integer, or null")
+
+                                                        auto check_bytes_node# = Option<&JsonNode>::None
+                                                        auto key_used# = "max_result_bytes"
+                                                        if has_mrb {
+                                                            check_bytes_node = arg_map.try_borrow(string::from("max_result_bytes"))
+                                                        } else if has_mb {
+                                                            check_bytes_node = arg_map.try_borrow(string::from("max_bytes"))
+                                                            key_used = "max_bytes"
+                                                        }
+
+                                                        match check_bytes_node {
+                                                            auto Option<&JsonNode>::Some(&mbn) => {
+                                                                match mbn {
+                                                                    auto JsonNode::NumNode(n) => {
+                                                                        if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
+                                                                            max_bytes_opt = Option<usize>::Some(n as usize)
+                                                                        } else {
+                                                                            max_bytes_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::StrNode(&s) => {
+                                                                        auto p_res = parse_size_bytes_strict(s.as_str(), key_used)
+                                                                        if p_res.is_ok() {
+                                                                            max_bytes_opt = Option<usize>::Some(p_res.unwrap())
+                                                                        } else {
+                                                                            max_bytes_err = true
+                                                                            max_bytes_err_msg = string::from("Invalid params: ")
+                                                                            max_bytes_err_msg#.push_str(p_res.unwrap_err().as_str())
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {
+                                                                        max_bytes_opt = Option<usize>::None
+                                                                    }
+                                                                    _ => {
+                                                                        max_bytes_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if max_bytes_err {
+                                                            send_error(id_str.as_str(), -32602, max_bytes_err_msg.as_str())
+                                                            continue
+                                                        }
+
+                                                        auto max_columns_opt# = Option<usize>::None
+                                                        auto max_columns_err# = false
+                                                        match arg_map.try_borrow(string::from("max_columns")) {
+                                                            auto Option<&JsonNode>::Some(&mcn) => {
+                                                                match mcn {
+                                                                    auto JsonNode::NumNode(n) => {
+                                                                        if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
+                                                                            max_columns_opt = Option<usize>::Some(n as usize)
+                                                                        } else {
+                                                                            max_columns_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {
+                                                                        max_columns_opt = Option<usize>::None
+                                                                    }
+                                                                    _ => {
+                                                                        max_columns_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if max_columns_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'max_columns' must be a non-negative integer or null")
+                                                            continue
+                                                        }
+
+                                                        auto max_block_lines_val# = 80:usize
+                                                        auto max_block_lines_err# = false
+                                                        match arg_map.try_borrow(string::from("max_block_lines")) {
+                                                            auto Option<&JsonNode>::Some(&mbln) => {
+                                                                match mbln {
+                                                                    auto JsonNode::NumNode(n) => {
+                                                                        if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 1000.0 {
+                                                                            max_block_lines_val = n as usize
+                                                                        } else {
+                                                                            max_block_lines_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {
+                                                                        max_block_lines_val = 80:usize
+                                                                    }
+                                                                    _ => {
+                                                                        max_block_lines_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if max_block_lines_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'max_block_lines' must be an integer between 1 and 1000 or null")
+                                                            continue
+                                                        }
+
                                                         auto target_path = compute_identity_key(startup_cwd.as_str(), path_str.as_str())
                                                         auto view_opts = ViewOptions(
                                                             file_path = cede target_path,
                                                             line = line_opt,
                                                             context = context_val,
                                                             block = block_val,
-                                                            lines_range = lines_range_opt
+                                                            lines_range = lines_range_opt,
+                                                            max_lines = max_lines_opt,
+                                                            max_result_bytes = max_bytes_opt,
+                                                            max_columns = max_columns_opt,
+                                                            max_block_lines = max_block_lines_val
                                                         )
                                                         auto view_res = execute_view_operation(view_opts)
                                                         if view_res.is_err() {
                                                             send_tool_error(id_str.as_str(), view_res.unwrap_err().as_str())
                                                             continue
                                                         }
-                                                        auto text = view_res.unwrap()
+                                                        auto vr = view_res.unwrap()
                                                         auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
                                                         resp#.push_str(id_str.as_str())
                                                         resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
-                                                        resp#.push_str(json_escape(text.as_str()).as_str())
-                                                        resp#.push_str("\"}],\"isError\":false}}\n")
+                                                        resp#.push_str(json_escape(vr.text.as_str()).as_str())
+                                                        resp#.push_str("\"}],\"isError\":false")
+
+                                                        if server_state.negotiated_version.as_str() == "2025-11-25" {
+                                                            resp#.push_str(",\"structuredContent\":{\"schema\":\"trg-mcp-view-result-v1\",\"mode\":\"")
+                                                            resp#.push_str(vr.mode.as_str())
+                                                            resp#.push_str("\",\"path\":\"")
+                                                            resp#.push_str(json_escape(vr.path.as_str()).as_str())
+                                                            resp#.push_str("\",\"requested_line\":")
+                                                            match vr.requested_line {
+                                                                auto Option<usize>::Some(l) => {
+                                                                    resp#.push_str(u64_to_string(l as u64).as_str())
+                                                                }
+                                                                auto Option<usize>::None => {
+                                                                    resp#.push_str("null")
+                                                                }
+                                                            }
+                                                            resp#.push_str(",\"requested_range\":")
+                                                            match vr.requested_range {
+                                                                auto Option<BlockRange>::Some(rr) => {
+                                                                    resp#.push_str("[")
+                                                                    resp#.push_str(u64_to_string(rr.start as u64).as_str())
+                                                                    resp#.push_str(",")
+                                                                    resp#.push_str(u64_to_string(rr.end as u64).as_str())
+                                                                    resp#.push_str("]")
+                                                                }
+                                                                auto Option<BlockRange>::None => {
+                                                                    resp#.push_str("null")
+                                                                }
+                                                            }
+                                                            resp#.push_str(",\"detected_block_range\":")
+                                                            match vr.detected_block_range {
+                                                                auto Option<BlockRange>::Some(dbr) => {
+                                                                    resp#.push_str("[")
+                                                                    resp#.push_str(u64_to_string(dbr.start as u64).as_str())
+                                                                    resp#.push_str(",")
+                                                                    resp#.push_str(u64_to_string(dbr.end as u64).as_str())
+                                                                    resp#.push_str("]")
+                                                                }
+                                                                auto Option<BlockRange>::None => {
+                                                                    resp#.push_str("null")
+                                                                }
+                                                            }
+                                                            resp#.push_str(",\"emitted_range\":")
+                                                            match vr.emitted_range {
+                                                                auto Option<BlockRange>::Some(er) => {
+                                                                    resp#.push_str("[")
+                                                                    resp#.push_str(u64_to_string(er.start as u64).as_str())
+                                                                    resp#.push_str(",")
+                                                                    resp#.push_str(u64_to_string(er.end as u64).as_str())
+                                                                    resp#.push_str("]")
+                                                                }
+                                                                auto Option<BlockRange>::None => {
+                                                                    resp#.push_str("null")
+                                                                }
+                                                            }
+                                                            resp#.push_str(",\"target_included\":")
+                                                            match vr.target_included {
+                                                                auto Option<bool>::Some(ti) => {
+                                                                    if ti {
+                                                                        resp#.push_str("true")
+                                                                    } else {
+                                                                        resp#.push_str("false")
+                                                                    }
+                                                                }
+                                                                auto Option<bool>::None => {
+                                                                    resp#.push_str("null")
+                                                                }
+                                                            }
+                                                            resp#.push_str(",\"content_omitted\":")
+                                                            if vr.content_omitted {
+                                                                resp#.push_str("true")
+                                                            } else {
+                                                                resp#.push_str("false")
+                                                            }
+                                                            resp#.push_str(",\"complete\":")
+                                                            if vr.complete {
+                                                                resp#.push_str("true")
+                                                            } else {
+                                                                resp#.push_str("false")
+                                                            }
+                                                            resp#.push_str(",\"eof_reached\":")
+                                                            if vr.eof_reached {
+                                                                resp#.push_str("true")
+                                                            } else {
+                                                                resp#.push_str("false")
+                                                            }
+                                                            resp#.push_str(",\"truncated\":")
+                                                            if vr.truncated {
+                                                                resp#.push_str("true")
+                                                            } else {
+                                                                resp#.push_str("false")
+                                                            }
+                                                            resp#.push_str(",\"termination_reason\":\"")
+                                                            resp#.push_str(vr.reason.as_str())
+                                                            resp#.push_str("\",\"lines_emitted\":")
+                                                            resp#.push_str(u64_to_string(vr.lines_emitted as u64).as_str())
+                                                            resp#.push_str(",\"content_bytes_emitted\":")
+                                                            resp#.push_str(u64_to_string(vr.bytes_emitted as u64).as_str())
+                                                            resp#.push_str(",\"records\":[")
+                                                            auto r_i# = 0:usize
+                                                            auto r_len = vr.records.len()
+                                                            loop r_i < r_len {
+                                                                auto &r = vr.records.borrow(r_i)
+                                                                if r_i > 0:usize {
+                                                                    resp#.push_str(",")
+                                                                }
+                                                                resp#.push_str("{\"line_number\":")
+                                                                resp#.push_str(u64_to_string(r.line_number as u64).as_str())
+                                                                resp#.push_str(",\"kind\":\"")
+                                                                resp#.push_str(r.kind.as_str())
+                                                                resp#.push_str("\",\"text\":\"")
+                                                                resp#.push_str(json_escape(r.text.as_str()).as_str())
+                                                                resp#.push_str("\"}")
+                                                                r_i = r_i + 1:usize
+                                                            }
+                                                            resp#.push_str("]}")
+                                                        }
+
+                                                        resp#.push_str(",\"_meta\":{\"truncated\":")
+                                                        if vr.truncated {
+                                                            resp#.push_str("true,\"reason\":\"")
+                                                            if vr.reason.len() > 0 {
+                                                                resp#.push_str(vr.reason.as_str())
+                                                            } else {
+                                                                resp#.push_str("truncated")
+                                                            }
+                                                            resp#.push_str("\"")
+                                                        } else {
+                                                            resp#.push_str("false,\"reason\":null")
+                                                        }
+                                                        resp#.push_str(",\"lines\":")
+                                                        resp#.push_str(u64_to_string(vr.lines_emitted as u64).as_str())
+                                                        resp#.push_str(",\"bytes\":")
+                                                        resp#.push_str(u64_to_string(vr.bytes_emitted as u64).as_str())
+                                                        resp#.push_str(",\"summary\":{\"complete\":")
+                                                        if vr.truncated {
+                                                            resp#.push_str("false,\"truncated\":true,\"termination_reason\":\"")
+                                                            if vr.reason.len() > 0 {
+                                                                resp#.push_str(vr.reason.as_str())
+                                                            } else {
+                                                                resp#.push_str("truncated")
+                                                            }
+                                                            resp#.push_str("\"")
+                                                        } else {
+                                                            resp#.push_str("true,\"truncated\":false,\"termination_reason\":\"completed\"")
+                                                        }
+                                                        resp#.push_str("}}}}")
+                                                        resp#.push_str("\n")
                                                         send_mcp_response(resp.as_str())
                                                         continue
                                                     }

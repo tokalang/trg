@@ -1,22 +1,132 @@
 // Syntax and lexical analysis for trg: definitions, scopes, and delimiters.
 import core/str::{str}
 import std/vec::{Vec}
-import src/types::{ScopeFrame, SyntaxFamily, BlockDelimiter}
+import src/types::{ScopeFrame, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo}
 import src/matcher::{SearchPlan}
 import src/file_types::{extract_file_extension}
 
 pub shape DelimiterDepths (
     brace_depth: usize,
-    paren_depth: usize
+    paren_depth: usize,
+    in_str: bool,
+    str_char: char,
+    escape: bool,
+    is_triple_quote: bool,
+    block_comment_depth: usize
 )
 
 impl DelimiterDepths {
     pub fn clone(self) -> DelimiterDepths {
         return DelimiterDepths(
             brace_depth = self.brace_depth,
-            paren_depth = self.paren_depth
+            paren_depth = self.paren_depth,
+            in_str = self.in_str,
+            str_char = self.str_char,
+            escape = self.escape,
+            is_triple_quote = self.is_triple_quote,
+            block_comment_depth = self.block_comment_depth
         )
     }
+
+    pub fn new() -> DelimiterDepths {
+        return DelimiterDepths(
+            brace_depth = 0:usize,
+            paren_depth = 0:usize,
+            in_str = false,
+            str_char = 0:char,
+            escape = false,
+            is_triple_quote = false,
+            block_comment_depth = 0:usize
+        )
+    }
+}
+
+pub fn is_valid_utf8(s: str) -> bool {
+    auto i# = 0:usize
+    loop i < s.len {
+        auto b1 = (s.byte_at(i) as u8) as usize
+        if b1 <= 0x7F {
+            i = i + 1
+            continue
+        }
+        if b1 >= 0xC2 && b1 <= 0xDF {
+            if i + 1 >= s.len { return false }
+            auto b2 = (s.byte_at(i + 1) as u8) as usize
+            auto m2 = b2 & 0xC0
+            if m2 != 0x80 { return false }
+            i = i + 2
+            continue
+        }
+        if b1 == 0xE0 {
+            if i + 2 >= s.len { return false }
+            auto b2 = (s.byte_at(i + 1) as u8) as usize
+            auto b3 = (s.byte_at(i + 2) as u8) as usize
+            if b2 < 0xA0 || b2 > 0xBF { return false }
+            auto m3 = b3 & 0xC0
+            if m3 != 0x80 { return false }
+            i = i + 3
+            continue
+        }
+        if b1 >= 0xE1 && b1 <= 0xEF && b1 != 0xED {
+            if i + 2 >= s.len { return false }
+            auto b2 = (s.byte_at(i + 1) as u8) as usize
+            auto b3 = (s.byte_at(i + 2) as u8) as usize
+            auto m2 = b2 & 0xC0
+            auto m3 = b3 & 0xC0
+            if m2 != 0x80 || m3 != 0x80 { return false }
+            i = i + 3
+            continue
+        }
+        if b1 == 0xED {
+            // Rejects UTF-16 surrogates (U+D800..U+DFFF)
+            if i + 2 >= s.len { return false }
+            auto b2 = (s.byte_at(i + 1) as u8) as usize
+            auto b3 = (s.byte_at(i + 2) as u8) as usize
+            if b2 < 0x80 || b2 > 0x9F { return false }
+            auto m3 = b3 & 0xC0
+            if m3 != 0x80 { return false }
+            i = i + 3
+            continue
+        }
+        if b1 == 0xF0 {
+            if i + 3 >= s.len { return false }
+            auto b2 = (s.byte_at(i + 1) as u8) as usize
+            auto b3 = (s.byte_at(i + 2) as u8) as usize
+            auto b4 = (s.byte_at(i + 3) as u8) as usize
+            if b2 < 0x90 || b2 > 0xBF { return false }
+            auto m3 = b3 & 0xC0
+            auto m4 = b4 & 0xC0
+            if m3 != 0x80 || m4 != 0x80 { return false }
+            i = i + 4
+            continue
+        }
+        if b1 >= 0xF1 && b1 <= 0xF3 {
+            if i + 3 >= s.len { return false }
+            auto b2 = (s.byte_at(i + 1) as u8) as usize
+            auto b3 = (s.byte_at(i + 2) as u8) as usize
+            auto b4 = (s.byte_at(i + 3) as u8) as usize
+            auto m2 = b2 & 0xC0
+            auto m3 = b3 & 0xC0
+            auto m4 = b4 & 0xC0
+            if m2 != 0x80 || m3 != 0x80 || m4 != 0x80 { return false }
+            i = i + 4
+            continue
+        }
+        if b1 == 0xF4 {
+            if i + 3 >= s.len { return false }
+            auto b2 = (s.byte_at(i + 1) as u8) as usize
+            auto b3 = (s.byte_at(i + 2) as u8) as usize
+            auto b4 = (s.byte_at(i + 3) as u8) as usize
+            if b2 < 0x80 || b2 > 0x8F { return false }
+            auto m3 = b3 & 0xC0
+            auto m4 = b4 & 0xC0
+            if m3 != 0x80 || m4 != 0x80 { return false }
+            i = i + 4
+            continue
+        }
+        return false
+    }
+    return true
 }
 
 pub fn utf8_truncate_len(s: str, max_bytes: usize) -> usize {
@@ -38,6 +148,21 @@ pub fn detect_syntax_family(path: str) -> SyntaxFamily {
     return SyntaxFamily::Brace
 }
 
+pub fn detect_lexical_dialect(path: str) -> LexicalDialect {
+    auto ext = extract_file_extension(path)
+    if ext == "tk" {
+        return LexicalDialect::Toka
+    }
+    if ext == "rs" {
+        return LexicalDialect::Rust
+    }
+    if ext == "py" || ext == "pyi" || ext == "yaml" || ext == "yml" || ext == "nim" ||
+       ext == "sh" || ext == "bash" || ext == "zsh" || ext == "rb" || ext == "pl" || ext == "r" {
+        return LexicalDialect::HashComment
+    }
+    return LexicalDialect::Generic
+}
+
 pub fn compute_line_indent(line: str) -> usize {
     auto indent# = 0:usize
     auto i# = 0:usize
@@ -55,69 +180,279 @@ pub fn compute_line_indent(line: str) -> usize {
     return indent
 }
 
-pub fn update_delimiter_depths(line: str, depths#: DelimiterDepths) {
-    auto in_str# = false
-    auto str_char# = 0:char
-    auto escape# = false
-    auto i# = 0:usize
+pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDialect) -> LineLexicalInfo {
+    auto depth_before_brace = depths.brace_depth
+    auto depth_before_paren = depths.paren_depth
+    auto was_in_comm_or_str = depths.in_str || depths.block_comment_depth > 0:usize
 
+    auto out# = string::new()
+    out#.ensure_capacity(line.len + 1:usize)
+
+    auto has_code_brace_closer# = false
+    auto has_code_paren_closer# = false
+    auto has_code# = false
+    auto first_token_is_quote# = false
+    auto first_token_col# = 0:usize
+    auto saw_first_non_ws# = false
+
+    auto i# = 0:usize
     loop i < line.len {
         auto ch = line.byte_at(i)
 
-        if in_str {
-            if escape {
-                escape = false
-            } else if ch == ('\\' as char) {
-                escape = true
-            } else if ch == str_char {
-                in_str = false
+        // 1. In block comment
+        if depths.block_comment_depth > 0:usize {
+            if ch == ('*' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('/' as char) {
+                if dialect == LexicalDialect::Rust || dialect == LexicalDialect::Toka {
+                    depths.block_comment_depth = depths.block_comment_depth - 1:usize
+                } else {
+                    depths.block_comment_depth = 0:usize
+                }
+                out#.push_char(' ')
+                out#.push_char(' ')
+                i = i + 2:usize
+                continue
             }
-            i = i + 1
+            auto is_nested_comm = dialect == LexicalDialect::Rust || dialect == LexicalDialect::Toka
+            if is_nested_comm &&
+               ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('*' as char) {
+                depths.block_comment_depth = depths.block_comment_depth + 1:usize
+                out#.push_char(' ')
+                out#.push_char(' ')
+                i = i + 2:usize
+                continue
+            }
+            out#.push_char(' ')
+            i = i + 1:usize
             continue
         }
 
+        // 2. In string
+        if depths.in_str {
+            if depths.escape {
+                depths.escape = false
+                out#.push_char(' ')
+                i = i + 1:usize
+                continue
+            }
+            if ch == ('\\' as char) {
+                depths.escape = true
+                out#.push_char(' ')
+                i = i + 1:usize
+                continue
+            }
+            if depths.is_triple_quote {
+                if ch == depths.str_char && i + 2:usize < line.len &&
+                   line.byte_at(i + 1:usize) == depths.str_char &&
+                   line.byte_at(i + 2:usize) == depths.str_char {
+                    depths.in_str = false
+                    depths.str_char = 0:char
+                    depths.is_triple_quote = false
+                    out#.push_char(' ')
+                    out#.push_char(' ')
+                    out#.push_char(' ')
+                    i = i + 3:usize
+                    continue
+                }
+            } else if ch == depths.str_char {
+                depths.in_str = false
+                depths.str_char = 0:char
+                out#.push_char(' ')
+                i = i + 1:usize
+                continue
+            }
+            out#.push_char(' ')
+            i = i + 1:usize
+            continue
+        }
+
+        // 3. Not in comment, not in string
+        auto is_ws = ch == (' ' as char) || ch == ('\t' as char) || ch == ('\r' as char) || ch == ('\n' as char)
+
+        // Block comment opener (only for non-HashComment dialects)
+        if dialect != LexicalDialect::HashComment && ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('*' as char) {
+            depths.block_comment_depth = depths.block_comment_depth + 1:usize
+            out#.push_char(' ')
+            out#.push_char(' ')
+            i = i + 2:usize
+            continue
+        }
+
+        // Line comments:
+        // HashComment dialect: '#' is comment
+        // Other dialects: '//' is comment; '#' is code!
+        if dialect == LexicalDialect::HashComment && ch == ('#' as char) {
+            loop i < line.len {
+                out#.push_char(' ')
+                i = i + 1:usize
+            }
+            break
+        }
+        if dialect != LexicalDialect::HashComment && ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('/' as char) {
+            loop i < line.len {
+                out#.push_char(' ')
+                i = i + 1:usize
+            }
+            break
+        }
+
+        // Check if string opener or lifetime
         if ch == ('"' as char) || ch == ('\'' as char) || ch == ('`' as char) {
-            in_str = true
-            str_char = ch
-            escape = false
-            i = i + 1
+            // Check Toka/Rust lifetime/ident: 'ident
+            if ch == ('\'' as char) && (dialect == LexicalDialect::Toka || dialect == LexicalDialect::Rust) {
+                if i + 1:usize < line.len {
+                    auto next_c = line.byte_at(i + 1:usize)
+                    auto is_ident_start = (next_c >= ('a' as char) && next_c <= ('z' as char)) ||
+                                          (next_c >= ('A' as char) && next_c <= ('Z' as char)) ||
+                                          (next_c == ('_' as char))
+                    if is_ident_start {
+                        auto is_char_literal# = false
+                        if i + 2:usize < line.len && line.byte_at(i + 2:usize) == ('\'' as char) {
+                            is_char_literal = true
+                        }
+                        if !is_char_literal {
+                            // 'ident is code!
+                            if !saw_first_non_ws {
+                                saw_first_non_ws = true
+                                first_token_col = i
+                            }
+                            has_code = true
+                            out#.push_char(ch)
+                            i = i + 1:usize
+                            loop i < line.len {
+                                auto ic = line.byte_at(i)
+                                auto is_id = (ic >= ('a' as char) && ic <= ('z' as char)) ||
+                                             (ic >= ('A' as char) && ic <= ('Z' as char)) ||
+                                             (ic >= ('0' as char) && ic <= ('9' as char)) ||
+                                             (ic == ('_' as char))
+                                if !is_id {
+                                    break
+                                }
+                                out#.push_char(ic)
+                                i = i + 1:usize
+                            }
+                            continue
+                        }
+                    }
+                }
+            }
+
+            // String opener
+            if !saw_first_non_ws {
+                saw_first_non_ws = true
+                first_token_col = i
+                first_token_is_quote = true
+            }
+
+            // Triple quote check: """ or '''
+            auto is_quote_char = ch == ('"' as char) || ch == ('\'' as char)
+            if is_quote_char && i + 2:usize < line.len &&
+               line.byte_at(i + 1:usize) == ch && line.byte_at(i + 2:usize) == ch {
+                depths.in_str = true
+                depths.str_char = ch
+                depths.is_triple_quote = true
+                depths.escape = false
+                out#.push_char(' ')
+                out#.push_char(' ')
+                out#.push_char(' ')
+                i = i + 3:usize
+                continue
+            }
+
+            depths.in_str = true
+            depths.str_char = ch
+            depths.is_triple_quote = false
+            depths.escape = false
+            out#.push_char(' ')
+            i = i + 1:usize
             continue
         }
 
-        if ch == ('/' as char) && i + 1 < line.len && line.byte_at(i + 1) == ('/' as char) {
-            break
-        }
-        if ch == ('#' as char) {
-            break
+        // Other code or whitespace
+        if !is_ws {
+            if !saw_first_non_ws {
+                saw_first_non_ws = true
+                first_token_col = i
+            }
+            has_code = true
+
+            if ch == ('{' as char) {
+                depths.brace_depth = depths.brace_depth + 1:usize
+            } else if ch == ('}' as char) {
+                if depths.brace_depth > 0:usize {
+                    depths.brace_depth = depths.brace_depth - 1:usize
+                }
+                has_code_brace_closer = true
+            } else if ch == ('(' as char) {
+                depths.paren_depth = depths.paren_depth + 1:usize
+            } else if ch == (')' as char) {
+                if depths.paren_depth > 0:usize {
+                    depths.paren_depth = depths.paren_depth - 1:usize
+                }
+                has_code_paren_closer = true
+            }
         }
 
-        if ch == ('{' as char) {
-            depths.brace_depth = depths.brace_depth + 1
-        } else if ch == ('}' as char) {
-            if depths.brace_depth > 0:usize {
-                depths.brace_depth = depths.brace_depth - 1:usize
-            }
-        } else if ch == ('(' as char) {
-            depths.paren_depth = depths.paren_depth + 1
-        } else if ch == (')' as char) {
-            if depths.paren_depth > 0:usize {
-                depths.paren_depth = depths.paren_depth - 1:usize
-            }
-        }
-
-        i = i + 1
+        out#.push_char(ch)
+        i = i + 1:usize
     }
+
+    // End-of-line string persistence:
+    if depths.in_str && !depths.is_triple_quote && depths.str_char != ('`' as char) {
+        if depths.escape {
+            depths.escape = false
+        } else {
+            depths.in_str = false
+            depths.str_char = 0:char
+        }
+    }
+
+    auto participates_in_indent# = false
+    auto statement_indent# = 0:usize
+
+    if !was_in_comm_or_str {
+        if has_code {
+            participates_in_indent = true
+            statement_indent = compute_line_indent(line)
+        } else if first_token_is_quote && first_token_col < line.len {
+            participates_in_indent = true
+            statement_indent = compute_line_indent(line)
+        }
+    }
+
+    auto is_scope_decl = is_scope_declaration(out.as_str())
+    auto starts_block = is_block_construct(out.as_str())
+    auto delimiter = detect_block_delimiter(out.as_str())
+
+    return LineLexicalInfo(
+        code_text = cede out,
+        participates_in_indent = participates_in_indent,
+        statement_indent = statement_indent,
+        depth_before_brace = depth_before_brace,
+        depth_after_brace = depths.brace_depth,
+        depth_before_paren = depth_before_paren,
+        depth_after_paren = depths.paren_depth,
+        has_code_brace_closer = has_code_brace_closer,
+        has_code_paren_closer = has_code_paren_closer,
+        is_scope_decl = is_scope_decl,
+        starts_block = starts_block,
+        delimiter = delimiter
+    )
 }
 
-pub fn update_brace_depth(line: str, depth#: usize) {
-    auto d# = DelimiterDepths(brace_depth = depth, paren_depth = 0:usize)
-    update_delimiter_depths(line, d#)
+pub fn update_delimiter_depths(line: str, depths#: DelimiterDepths, dialect: LexicalDialect) {
+    auto _ = scan_line_lexical(line, depths#, dialect)
+}
+
+pub fn update_brace_depth(line: str, depth#: usize, dialect: LexicalDialect) {
+    auto d# = DelimiterDepths::new()
+    d.brace_depth = depth
+    auto _ = scan_line_lexical(line, d#, dialect)
     depth = d.brace_depth
 }
 
 pub fn extract_declared_identifier(line: str) -> string {
     auto trimmed = line.trim()
-    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") {
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return string::from("")
     }
     auto s# = trimmed
@@ -213,9 +548,9 @@ pub fn is_defining_symbol(line: str, plan: SearchPlan) -> bool {
     return plan.is_match(id.as_str())
 }
 
-pub fn is_definition_line(line: str) -> bool {
+pub fn is_scope_declaration(line: str) -> bool {
     auto trimmed = line.trim()
-    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") {
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return false
     }
     auto s# = trimmed
@@ -246,6 +581,39 @@ pub fn is_definition_line(line: str) -> bool {
        s.starts_with("enum ") || s.starts_with("impl ") {
         return true
     }
+    return false
+}
+
+pub fn is_block_construct(line: str) -> bool {
+    if is_scope_declaration(line) {
+        return true
+    }
+    auto trimmed = line.trim()
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+        return false
+    }
+    auto s# = trimmed
+    if s.starts_with("pub ") {
+        s = s.substr(4:usize, s.len - 4:usize).trim()
+    } else if s.starts_with("pub(") {
+        auto close_paren = s.index_of(')' as char)
+        if close_paren.is_some() {
+            auto idx = close_paren.unwrap() + 1:usize
+            s = s.substr(idx, s.len - idx).trim()
+        }
+    }
+    if s.starts_with("export default ") {
+        s = s.substr(15:usize, s.len - 15:usize).trim()
+    } else if s.starts_with("export ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
+    if s.starts_with("async ") {
+        s = s.substr(6:usize, s.len - 6:usize).trim()
+    }
+    if s.starts_with("inline ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
+
     if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
         auto eq_idx = s.index_of('=' as char)
         if eq_idx.is_some() {
@@ -259,9 +627,13 @@ pub fn is_definition_line(line: str) -> bool {
     return false
 }
 
+pub fn is_definition_line(line: str) -> bool {
+    return is_block_construct(line)
+}
+
 pub fn detect_block_delimiter(line: str) -> BlockDelimiter {
     auto trimmed = line.trim()
-    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") {
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return BlockDelimiter::Brace
     }
     auto s# = trimmed
@@ -311,6 +683,25 @@ pub fn detect_block_delimiter(line: str) -> BlockDelimiter {
     return BlockDelimiter::Brace
 }
 
+pub fn check_is_runaway_definition_structured(
+    is_scope_decl: bool,
+    depth_before_brace: usize,
+    target_delim: BlockDelimiter,
+    target_depth: usize
+) -> bool {
+    if !is_scope_decl {
+        return false
+    }
+    match target_delim {
+        auto BlockDelimiter::Paren => {
+            return true
+        }
+        auto BlockDelimiter::Brace => {
+            return depth_before_brace <= target_depth
+        }
+    }
+}
+
 pub fn check_is_runaway_definition(
     line_text: str,
     line_brace_depth: usize,
@@ -341,6 +732,24 @@ pub fn check_is_runaway_definition(
     }
 }
 
+pub fn check_is_self_closed_structured(
+    target_delim: BlockDelimiter,
+    depth_after_brace: usize,
+    depth_after_paren: usize,
+    target_depth: usize,
+    has_code_brace_closer: bool,
+    has_code_paren_closer: bool
+) -> bool {
+    match target_delim {
+        auto BlockDelimiter::Paren => {
+            return depth_after_paren <= target_depth && has_code_paren_closer
+        }
+        auto BlockDelimiter::Brace => {
+            return depth_after_brace <= target_depth && has_code_brace_closer
+        }
+    }
+}
+
 pub fn check_is_self_closed_line(
     line_text: str,
     target_delim: BlockDelimiter,
@@ -366,7 +775,7 @@ pub fn check_is_self_closed_line(
 
 pub fn detect_declaration_scope(line: str) -> string {
     auto trimmed = line.trim()
-    if !is_definition_line(trimmed) {
+    if !is_scope_declaration(trimmed) {
         return string::from("")
     }
 
@@ -435,43 +844,67 @@ impl ScopeTracker {
         return ScopeTracker(frames = Vec<ScopeFrame>::new())
     }
 
-    pub fn update(self#, line: str, brace_depth: usize, indent_level: usize, family: SyntaxFamily) {
+    pub fn update(
+        self#,
+        code_text: str,
+        brace_depth: usize,
+        paren_depth: usize,
+        participates_in_indent: bool,
+        statement_indent: usize,
+        family: SyntaxFamily
+    ) {
         loop true {
             if self.frames.len() == 0 {
                 break
             }
             auto top_idx = self.frames.len() - 1:usize
-            auto top_depth = self.frames.borrow(top_idx).depth
-            match family {
-                auto SyntaxFamily::Indent => {
-                    auto trimmed = line.trim()
-                    if trimmed.len > 0 && !trimmed.starts_with("#") {
-                        if indent_level <= top_depth {
-                            self.frames#.pop()
-                            continue
+            auto should_pop# = false
+            {
+                auto &top = self.frames.borrow(top_idx)
+                match family {
+                    auto SyntaxFamily::Indent => {
+                        if participates_in_indent && statement_indent <= top.depth {
+                            should_pop = true
+                        }
+                    }
+                    auto SyntaxFamily::Brace => {
+                        match top.delimiter {
+                            auto BlockDelimiter::Paren => {
+                                if paren_depth < top.depth {
+                                    should_pop = true
+                                }
+                            }
+                            auto BlockDelimiter::Brace => {
+                                if brace_depth < top.depth {
+                                    should_pop = true
+                                }
+                            }
                         }
                     }
                 }
-                auto SyntaxFamily::Brace => {
-                    if brace_depth < top_depth {
-                        self.frames#.pop()
-                        continue
-                    }
-                }
+            }
+            if should_pop {
+                self.frames#.pop()
+                continue
             }
             break
         }
 
-        auto scope_decl = detect_declaration_scope(line)
+        auto scope_decl = detect_declaration_scope(code_text)
         if scope_decl.len() > 0 {
+            auto delim = detect_block_delimiter(code_text)
             auto decl_depth# = brace_depth
             match family {
                 auto SyntaxFamily::Indent => {
-                    decl_depth = indent_level
+                    decl_depth = statement_indent
                 }
-                auto SyntaxFamily::Brace => {}
+                auto SyntaxFamily::Brace => {
+                    if delim == BlockDelimiter::Paren {
+                        decl_depth = paren_depth
+                    }
+                }
             }
-            self.frames#.push(ScopeFrame(name = cede scope_decl, depth = decl_depth))
+            self.frames#.push(ScopeFrame(name = cede scope_decl, delimiter = delim, depth = decl_depth))
         }
     }
 

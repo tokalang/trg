@@ -213,11 +213,14 @@ pub fn posix_read_stdin_line() -> Option<string> {
             }
             auto ch = buf[0]
             if ch == ('\n' as char) {
+                if line.len() > 0 && line.byte_at(line.len() - 1) == ('\r' as char) {
+                    auto s = line.as_str()
+                    auto trimmed = string::from(s.substr(0, s.len - 1))
+                    return Option<string>::Some(cede trimmed)
+                }
                 return Option<string>::Some(cede line)
             }
-            if ch != ('\r' as char) {
-                line#.push_char(ch)
-            }
+            line#.push_char(ch)
         }
     }
     return Option<string>::None

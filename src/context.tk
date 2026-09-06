@@ -1,7 +1,6 @@
 // Context ring buffer and syntactic block context calculation for trg.
 import std/vec::{Vec}
 import src/types::{LogicalLine, SyntaxFamily, InternedRecord, BlockDelimiter}
-import src/syntax::{detect_declaration_scope}
 
 pub shape BeforeRing (
     lines: Vec<LogicalLine>,
@@ -104,22 +103,19 @@ pub fn calculate_block_context_start(
         match archetype {
             auto SyntaxFamily::Indent => {
                 // IndentFamily: find shallower indent line
-                auto trimmed = r_line.text.as_str().trim()
-                if trimmed.len > 0 && !trimmed.starts_with("#") {
-                    if r_line.indent_level < cur_indent {
-                        emit_start_idx = s_idx
-                        target_indent = r_line.indent_level
-                        found_start = true
-                        break
-                    }
+                if r_line.participates_in_indent && r_line.statement_indent < cur_indent {
+                    emit_start_idx = s_idx
+                    target_indent = r_line.statement_indent
+                    found_start = true
+                    break
                 }
             }
             auto SyntaxFamily::Brace => {
                 // BraceFamily: find declaration or outer depth
-                if r_line.brace_depth < cur_depth || detect_declaration_scope(r_line.text.as_str()).len() > 0 {
+                if r_line.brace_depth < cur_depth || r_line.is_scope_decl {
                     emit_start_idx = s_idx
                     auto r_depth = r_line.brace_depth
-                    if detect_declaration_scope(r_line.text.as_str()).len() > 0 && r_depth > 0 {
+                    if r_line.is_scope_decl && r_depth > 0 {
                         target_depth = r_depth - 1
                     } else {
                         target_depth = r_depth

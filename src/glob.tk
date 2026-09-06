@@ -3,7 +3,79 @@ import core/str::{str}
 import std/vec::{Vec}
 import src/types::{GlobRule}
 
-pub fn parse_glob_rule(raw: string) -> GlobRule {
+pub shape GlobDialect (
+    CliOverride = 0 |
+    GitIgnore = 1
+)
+
+fn find_closing_bracket(pat: str, start_bracket: usize) -> Option<usize> {
+    auto p_len = pat.len
+    auto i# = start_bracket + 1:usize
+    if i < p_len && (pat.byte_at(i) == ('!' as char) || pat.byte_at(i) == ('^' as char)) {
+        i = i + 1:usize
+    }
+    if i < p_len && pat.byte_at(i) == (']' as char) {
+        i = i + 1:usize
+    }
+    loop i < p_len {
+        auto ch = pat.byte_at(i)
+        if ch == ('\\' as char) && i + 1:usize < p_len {
+            i = i + 2:usize
+            continue
+        }
+        if ch == (']' as char) {
+            return Option<usize>::Some(i)
+        }
+        i = i + 1:usize
+    }
+    return Option<usize>::None
+}
+
+fn match_class_char(c: char, pat: str, start: usize, end_bracket: usize) -> bool {
+    auto is_inverted# = false
+    auto idx# = start
+    if idx < end_bracket && (pat.byte_at(idx) == ('!' as char) || pat.byte_at(idx) == ('^' as char)) {
+        is_inverted = true
+        idx = idx + 1:usize
+    }
+    auto matched# = false
+    if idx < end_bracket && pat.byte_at(idx) == (']' as char) {
+        if c == (']' as char) {
+            matched = true
+        }
+        idx = idx + 1:usize
+    }
+    loop idx < end_bracket {
+        auto ch = pat.byte_at(idx)
+        if ch == ('\\' as char) && idx + 1:usize < end_bracket {
+            idx = idx + 1:usize
+            if c == pat.byte_at(idx) {
+                matched = true
+            }
+            idx = idx + 1:usize
+            continue
+        }
+        if idx + 2:usize < end_bracket && pat.byte_at(idx + 1:usize) == ('-' as char) && pat.byte_at(idx + 2:usize) != (']' as char) {
+            auto from_c = pat.byte_at(idx)
+            auto to_c = pat.byte_at(idx + 2:usize)
+            if c >= from_c && c <= to_c {
+                matched = true
+            }
+            idx = idx + 3:usize
+            continue
+        }
+        if c == ch {
+            matched = true
+        }
+        idx = idx + 1:usize
+    }
+    if is_inverted {
+        return !matched
+    }
+    return matched
+}
+
+pub fn validate_and_parse_glob_rule(raw: string, dialect: GlobDialect) -> Result<GlobRule, string> {
     auto view = raw.as_str()
     auto is_neg# = false
     auto start_idx# = 0:usize
@@ -22,12 +94,97 @@ pub fn parse_glob_rule(raw: string) -> GlobRule {
         end_len = pat_view.len - 1
     }
 
-    auto clean_pat = string::from(pat_view.substr(0, end_len))
-    return GlobRule(
-        pattern = cede clean_pat,
+    auto p_str = pat_view.substr(0, end_len)
+
+    match dialect {
+        auto GlobDialect::CliOverride => {
+            // Check trailing backslash
+            auto backslashes# = 0:usize
+            auto k# = p_str.len
+            loop k > 0 {
+                k = k - 1:usize
+                if p_str.byte_at(k) == ('\\' as char) {
+                    backslashes = backslashes + 1:usize
+                } else {
+                    break
+                }
+            }
+            if backslashes % 2:usize != 0:usize {
+                auto err# = string::from("Invalid glob pattern '")
+                err#.push_str(p_str)
+                err#.push_str("': trailing backslash")
+                return Result<GlobRule, string>::Err(cede err)
+            }
+
+            // Check brackets and braces
+            auto i# = 0:usize
+            loop i < p_str.len {
+                auto ch = p_str.byte_at(i)
+                if ch == ('\\' as char) {
+                    i = i + 2:usize
+                    continue
+                }
+                if ch == ('{' as char) {
+                    auto err# = string::from("Invalid glob pattern '")
+                    err#.push_str(p_str)
+                    err#.push_str("': unsupported syntax '{'")
+                    return Result<GlobRule, string>::Err(cede err)
+                }
+                if ch == ('[' as char) {
+                    auto close_opt = find_closing_bracket(p_str, i)
+                    if close_opt.is_none() {
+                        auto err# = string::from("Invalid glob pattern '")
+                        err#.push_str(p_str)
+                        err#.push_str("': unclosed character class '['")
+                        return Result<GlobRule, string>::Err(cede err)
+                    }
+                    auto close_idx = close_opt.unwrap()
+                    // Validate ranges inside class
+                    auto c_idx# = i + 1:usize
+                    if c_idx < close_idx && (p_str.byte_at(c_idx) == ('!' as char) || p_str.byte_at(c_idx) == ('^' as char)) {
+                        c_idx = c_idx + 1:usize
+                    }
+                    if c_idx < close_idx && p_str.byte_at(c_idx) == (']' as char) {
+                        c_idx = c_idx + 1:usize
+                    }
+                    loop c_idx < close_idx {
+                        if p_str.byte_at(c_idx) == ('\\' as char) {
+                            c_idx = c_idx + 2:usize
+                            continue
+                        }
+                        if c_idx + 2:usize < close_idx && p_str.byte_at(c_idx + 1:usize) == ('-' as char) && p_str.byte_at(c_idx + 2:usize) != (']' as char) {
+                            auto r_start = p_str.byte_at(c_idx)
+                            auto r_end = p_str.byte_at(c_idx + 2:usize)
+                            if r_start > r_end {
+                                auto err# = string::from("Invalid glob pattern '")
+                                err#.push_str(p_str)
+                                err#.push_str("': invalid character range in class")
+                                return Result<GlobRule, string>::Err(cede err)
+                            }
+                            c_idx = c_idx + 3:usize
+                            continue
+                        }
+                        c_idx = c_idx + 1:usize
+                    }
+                    i = close_idx + 1:usize
+                    continue
+                }
+                i = i + 1:usize
+            }
+        }
+        auto GlobDialect::GitIgnore => {}
+    }
+
+    return Result<GlobRule, string>::Ok(GlobRule(
+        pattern = string::from(p_str),
         is_negation = is_neg,
         dir_only = is_dir
-    )
+    ))
+}
+
+pub fn parse_glob_rule(raw: string) -> GlobRule {
+    auto res = validate_and_parse_glob_rule(raw, GlobDialect::GitIgnore)
+    return res.unwrap()
 }
 
 fn get_basename(path: str) -> str <- path {
@@ -42,51 +199,124 @@ fn get_basename(path: str) -> str <- path {
 }
 
 pub fn match_wildcard(text: str, pattern: str) -> bool {
-    if pattern.equals("*") {
-        return true
-    }
-    if pattern.len == 0 {
-        return text.len == 0
-    }
+    auto t_len = text.len
+    auto p_len = pattern.len
+    auto t_idx# = 0:usize
+    auto p_idx# = 0:usize
+    auto star_p# = Option<usize>::None
+    auto star_t# = 0:usize
 
-    auto star_opt = pattern.index_of('*' as char)
-    if star_opt.is_none() {
-        return text.equals(pattern)
-    }
+    loop t_idx < t_len {
+        if p_idx < p_len && pattern.byte_at(p_idx) == ('*' as char) {
+            star_p = Option<usize>::Some(p_idx)
+            p_idx = p_idx + 1:usize
+            star_t = t_idx
+            continue
+        }
 
-    auto idx = star_opt.unwrap()
-    auto last_star = pattern.last_index_of('*' as char).unwrap()
-    if idx == last_star {
-        if idx == 0 {
-            // Suffix match: *.ext
-            auto suffix = pattern.substr(1, pattern.len - 1)
-            return text.ends_with(suffix)
+        auto matches_current# = false
+        auto next_p# = p_idx
+
+        if p_idx < p_len {
+            auto pch = pattern.byte_at(p_idx)
+            if pch == ('\\' as char) && p_idx + 1:usize < p_len {
+                if pattern.byte_at(p_idx + 1:usize) == text.byte_at(t_idx) {
+                    matches_current = true
+                    next_p = p_idx + 2:usize
+                }
+            } else if pch == ('?' as char) {
+                matches_current = true
+                next_p = p_idx + 1:usize
+            } else if pch == ('[' as char) {
+                auto close_opt = find_closing_bracket(pattern, p_idx)
+                if close_opt.is_some() {
+                    auto close_idx = close_opt.unwrap()
+                    if match_class_char(text.byte_at(t_idx), pattern, p_idx + 1:usize, close_idx) {
+                        matches_current = true
+                        next_p = close_idx + 1:usize
+                    }
+                }
+            } else if pch == text.byte_at(t_idx) {
+                matches_current = true
+                next_p = p_idx + 1:usize
+            }
         }
-        if idx == pattern.len - 1 {
-            // Prefix match: prefix*
-            auto prefix = pattern.substr(0, pattern.len - 1)
-            return text.starts_with(prefix)
-        }
-        // Star in middle: prefix*suffix
-        auto prefix = pattern.substr(0, idx)
-        auto suffix = pattern.substr(idx + 1, pattern.len - (idx + 1))
-        if text.len < prefix.len + suffix.len {
+
+        if matches_current {
+            t_idx = t_idx + 1:usize
+            p_idx = next_p
+        } else if star_p.is_some() {
+            p_idx = star_p.unwrap() + 1:usize
+            star_t = star_t + 1:usize
+            t_idx = star_t
+        } else {
             return false
         }
-        return text.starts_with(prefix) && text.ends_with(suffix)
     }
 
-    // Two stars: *middle*
-    if idx == 0 && last_star == pattern.len - 1 {
-        auto middle = pattern.substr(1, pattern.len - 2)
-        return text.index_of_str(middle).is_some()
+    loop p_idx < p_len && pattern.byte_at(p_idx) == ('*' as char) {
+        p_idx = p_idx + 1:usize
     }
 
-    // Fallback for multi-star
-    auto prefix = pattern.substr(0, idx)
-    if !text.starts_with(prefix) { return false }
-    auto suffix = pattern.substr(last_star + 1, pattern.len - (last_star + 1))
-    return text.ends_with(suffix)
+    return p_idx == p_len
+}
+
+fn split_segments(s: str) -> Vec<string> {
+    auto res# = Vec<string>::new()
+    auto i# = 0:usize
+    auto start# = 0:usize
+    loop i < s.len {
+        if s.byte_at(i) == ('/' as char) {
+            if i > start {
+                auto seg = s.substr(start, i - start)
+                if seg != "." {
+                    res#.push(string::from(seg))
+                }
+            }
+            start = i + 1:usize
+        }
+        i = i + 1:usize
+    }
+    if start < s.len {
+        auto seg = s.substr(start, s.len - start)
+        if seg != "." {
+            res#.push(string::from(seg))
+        }
+    }
+    return cede res
+}
+
+fn match_segments(path_segs: Vec<string>, pat_segs: Vec<string>) -> bool {
+    auto path_len = path_segs.len()
+    auto pat_len = pat_segs.len()
+    auto p_idx# = 0:usize
+    auto pat_i# = 0:usize
+    auto star_idx# = Option<usize>::None
+    auto match_idx# = 0:usize
+
+    loop p_idx < path_len {
+        if pat_i < pat_len && (pat_segs.borrow(pat_i).as_str() != "**") &&
+           match_wildcard(path_segs.borrow(p_idx).as_str(), pat_segs.borrow(pat_i).as_str()) {
+            p_idx = p_idx + 1:usize
+            pat_i = pat_i + 1:usize
+        } else if pat_i < pat_len && pat_segs.borrow(pat_i).as_str() == "**" {
+            star_idx = Option<usize>::Some(pat_i)
+            pat_i = pat_i + 1:usize
+            match_idx = p_idx
+        } else if star_idx.is_some() {
+            pat_i = star_idx.unwrap() + 1:usize
+            match_idx = match_idx + 1:usize
+            p_idx = match_idx
+        } else {
+            return false
+        }
+    }
+
+    loop pat_i < pat_len && pat_segs.borrow(pat_i).as_str() == "**" {
+        pat_i = pat_i + 1:usize
+    }
+
+    return pat_i == pat_len
 }
 
 pub fn match_glob_pat(rel_path: str, is_dir: bool, pat: str, dir_only: bool) -> bool {
@@ -98,18 +328,21 @@ pub fn match_glob_pat(rel_path: str, is_dir: bool, pat: str, dir_only: bool) -> 
         return false
     }
 
-    // Anchored or path-level glob (contains '/')
-    if pat.index_of('/' as char).is_some() {
-        auto check_pat# = pat
-        if pat.starts_with("/") {
-            check_pat = pat.substr(1, pat.len - 1)
-        }
-        return match_wildcard(rel_path, check_pat)
+    // Basename match (no '/')
+    if pat.index_of('/' as char).is_none() {
+        auto basename = get_basename(rel_path)
+        return match_wildcard(basename, pat)
     }
 
-    // Basename match (e.g. *.tk or build)
-    auto basename = get_basename(rel_path)
-    return match_wildcard(basename, pat)
+    // Path-level glob (contains '/')
+    auto clean_pat# = pat
+    if clean_pat.starts_with("/") {
+        clean_pat = clean_pat.substr(1:usize, clean_pat.len - 1:usize)
+    }
+
+    auto path_segs = split_segments(rel_path)
+    auto pat_segs = split_segments(clean_pat)
+    return match_segments(path_segs, pat_segs)
 }
 
 pub fn is_glob_allowed(rel_path: str, is_dir: bool, globs: Vec<GlobRule>) -> bool {

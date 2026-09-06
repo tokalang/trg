@@ -10,7 +10,9 @@ import src/types::{
     PathStyle,
     TextLayout,
     PathKind,
-    path_kind_name
+    path_kind_name,
+    SnippetProjection,
+    BlockRange
 }
 import src/printer::{OutputBudgetWriter, u64_to_string, i64_to_string, json_escape, format_segment_opening}
 
@@ -282,6 +284,28 @@ pub fn format_segments(writer: OutputBudgetWriter) -> string {
                         s#.push_str(",")
                         s#.push_str(u64_to_string(br.end as u64).as_str())
                         s#.push_str("]")
+                    }
+                    _ => {}
+                }
+                match rec.snippet {
+                    auto Option<SnippetProjection>::Some(&sn) => {
+                        s#.push_str(",\"snippet\":{\"text\":\"")
+                        s#.push_str(json_escape(sn.text.as_str()).as_str())
+                        s#.push_str("\",\"submatches\":[")
+                        auto sni# = 0:usize
+                        loop sni < sn.submatches.len() {
+                            if sni > 0 { s#.push_str(",") }
+                            auto &ssm = sn.submatches.borrow(sni)
+                            s#.push_str("{\"match_text\":\"")
+                            s#.push_str(json_escape(ssm.match_text.as_str()).as_str())
+                            s#.push_str("\",\"start\":")
+                            s#.push_str(u64_to_string(ssm.start as u64).as_str())
+                            s#.push_str(",\"end\":")
+                            s#.push_str(u64_to_string(ssm.end as u64).as_str())
+                            s#.push_str("}")
+                            sni = sni + 1
+                        }
+                        s#.push_str("]}")
                     }
                     _ => {}
                 }

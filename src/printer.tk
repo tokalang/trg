@@ -19,6 +19,7 @@ import src/types::{
     path_kind_name,
     ResolvedPath,
     InternedRecord,
+    SnippetProjection,
     PathBase,
     FileEntry,
     ResultSegment,
@@ -27,7 +28,6 @@ import src/types::{
     scan_pass_name
 }
 import src/posix::{posix_write_stdout, print_err}
-import src/snippet::{format_kwic_snippet}
 
 pub shape EmitOutcome (
     Written = 0 |
@@ -180,6 +180,28 @@ pub fn format_interned_record_json(rec: InternedRecord) -> string {
             }
             _ => {}
         }
+        match rec.snippet {
+            auto Option<SnippetProjection>::Some(&sn) => {
+                s#.push_str(",\"snippet\":{\"text\":\"")
+                s#.push_str(json_escape(sn.text.as_str()).as_str())
+                s#.push_str("\",\"submatches\":[")
+                auto sni# = 0:usize
+                loop sni < sn.submatches.len() {
+                    if sni > 0 { s#.push_str(",") }
+                    auto &ssm = sn.submatches.borrow(sni)
+                    s#.push_str("{\"match_text\":\"")
+                    s#.push_str(json_escape(ssm.match_text.as_str()).as_str())
+                    s#.push_str("\",\"start\":")
+                    s#.push_str(u64_to_string(ssm.start as u64).as_str())
+                    s#.push_str(",\"end\":")
+                    s#.push_str(u64_to_string(ssm.end as u64).as_str())
+                    s#.push_str("}")
+                    sni = sni + 1
+                }
+                s#.push_str("]}")
+            }
+            _ => {}
+        }
     } else {
         s#.push_str(",\"block_truncated\":")
         if rec.block_truncated { s#.push_str("true") } else { s#.push_str("false") }
@@ -244,6 +266,28 @@ pub fn format_json_match_interned(path: str, rec: InternedRecord) -> string {
         }
         _ => {}
     }
+    match rec.snippet {
+        auto Option<SnippetProjection>::Some(&sn) => {
+            match_json#.push_str(",\"snippet\":{\"text\":\"")
+            match_json#.push_str(json_escape(sn.text.as_str()).as_str())
+            match_json#.push_str("\",\"submatches\":[")
+            auto sni# = 0:usize
+            loop sni < sn.submatches.len() {
+                if sni > 0 { match_json#.push_str(",") }
+                auto &ssm = sn.submatches.borrow(sni)
+                match_json#.push_str("{\"match\":{\"text\":\"")
+                match_json#.push_str(json_escape(ssm.match_text.as_str()).as_str())
+                match_json#.push_str("\"},\"start\":")
+                match_json#.push_str(u64_to_string(ssm.start as u64).as_str())
+                match_json#.push_str(",\"end\":")
+                match_json#.push_str(u64_to_string(ssm.end as u64).as_str())
+                match_json#.push_str("}")
+                sni = sni + 1
+            }
+            match_json#.push_str("]}")
+        }
+        _ => {}
+    }
     match_json#.push_str("}}\n")
     return cede match_json
 }
@@ -296,6 +340,28 @@ pub fn format_json_match_compact_interned(path: str, rec: InternedRecord) -> str
             res#.push_str(",")
             res#.push_str(u64_to_string(br.end as u64).as_str())
             res#.push_str("]")
+        }
+        _ => {}
+    }
+    match rec.snippet {
+        auto Option<SnippetProjection>::Some(&sn) => {
+            res#.push_str(",\"snippet\":{\"text\":\"")
+            res#.push_str(json_escape(sn.text.as_str()).as_str())
+            res#.push_str("\",\"submatches\":[")
+            auto sni# = 0:usize
+            loop sni < sn.submatches.len() {
+                if sni > 0 { res#.push_str(",") }
+                auto &ssm = sn.submatches.borrow(sni)
+                res#.push_str("{\"match\":{\"text\":\"")
+                res#.push_str(json_escape(ssm.match_text.as_str()).as_str())
+                res#.push_str("\"},\"start\":")
+                res#.push_str(u64_to_string(ssm.start as u64).as_str())
+                res#.push_str(",\"end\":")
+                res#.push_str(u64_to_string(ssm.end as u64).as_str())
+                res#.push_str("}")
+                sni = sni + 1
+            }
+            res#.push_str("]}")
         }
         _ => {}
     }
@@ -472,12 +538,17 @@ fn render_batch_text(
                             }
                             if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
                                 out#.push_str("[Omitted long matching line]\n")
-                            } else if fmt_cfg.snippet && rec.submatches.len() > 0 {
-                                auto snip = format_kwic_snippet(rec.text.as_str(), rec.submatches, fmt_cfg.snippet_chars)
-                                out#.push_str(snip.as_str())
-                                out#.push_str("\n")
                             } else {
-                                out#.push_str(rec.text.as_str())
+                                auto text_to_print# = rec.text.as_str()
+                                if fmt_cfg.snippet {
+                                    match rec.snippet {
+                                        auto Option<SnippetProjection>::Some(&sn) => {
+                                            text_to_print = sn.text.as_str()
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                out#.push_str(text_to_print)
                                 out#.push_str("\n")
                             }
                         }
@@ -559,12 +630,17 @@ fn render_batch_text(
                             }
                             if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
                                 out#.push_str("[Omitted long matching line]\n")
-                            } else if fmt_cfg.snippet && rec.submatches.len() > 0 {
-                                auto snip = format_kwic_snippet(rec.text.as_str(), rec.submatches, fmt_cfg.snippet_chars)
-                                out#.push_str(snip.as_str())
-                                out#.push_str("\n")
                             } else {
-                                out#.push_str(rec.text.as_str())
+                                auto text_to_print# = rec.text.as_str()
+                                if fmt_cfg.snippet {
+                                    match rec.snippet {
+                                        auto Option<SnippetProjection>::Some(&sn) => {
+                                            text_to_print = sn.text.as_str()
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                out#.push_str(text_to_print)
                                 out#.push_str("\n")
                             }
                         }

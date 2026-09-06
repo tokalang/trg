@@ -122,6 +122,13 @@ pub shape SyntaxFamily (
     Indent = 1
 )
 
+pub shape LexicalDialect (
+    Generic = 0 |
+    Toka = 1 |
+    Rust = 2 |
+    HashComment = 3
+)
+
 pub shape OutputFormat (
     Human = 0 |
     JsonFull = 1 |
@@ -304,6 +311,7 @@ impl BlockRange {
 
 pub shape ScopeFrame (
     name: string,
+    delimiter: BlockDelimiter,
     depth: usize
 )
 
@@ -333,6 +341,26 @@ impl SubMatch {
     }
 }
 
+pub shape SnippetProjection (
+    text: string,
+    submatches: Vec<SubMatch>
+)
+
+impl SnippetProjection {
+    pub fn clone(self) -> SnippetProjection {
+        auto subs# = Vec<SubMatch>::new()
+        auto i# = 0:usize
+        loop i < self.submatches.len() {
+            subs#.push(self.submatches.borrow(i).clone())
+            i = i + 1
+        }
+        return SnippetProjection(
+            text = self.text.clone(),
+            submatches = cede subs
+        )
+    }
+}
+
 pub shape InternedRecord (
     kind: string,
     group_id: usize,
@@ -342,7 +370,8 @@ pub shape InternedRecord (
     submatches: Vec<SubMatch>,
     scope: Option<string>,
     block_truncated: bool,
-    block_range: Option<BlockRange>
+    block_range: Option<BlockRange>,
+    snippet: Option<SnippetProjection>
 )
 
 impl InternedRecord {
@@ -367,6 +396,13 @@ impl InternedRecord {
             }
             _ => {}
         }
+        auto snip_opt# = Option<SnippetProjection>::None
+        match self.snippet {
+            auto Option<SnippetProjection>::Some(&sn) => {
+                snip_opt = Option<SnippetProjection>::Some(sn.clone())
+            }
+            _ => {}
+        }
         return InternedRecord(
             kind = self.kind.clone(),
             group_id = self.group_id,
@@ -376,7 +412,8 @@ impl InternedRecord {
             submatches = cede subs,
             scope = cede sc,
             block_truncated = self.block_truncated,
-            block_range = cede br_opt
+            block_range = cede br_opt,
+            snippet = cede snip_opt
         )
     }
 }
@@ -406,6 +443,21 @@ pub shape MatchEvent (
     context_roles: Vec<string>
 )
 
+pub shape LineLexicalInfo (
+    code_text: string,
+    participates_in_indent: bool,
+    statement_indent: usize,
+    depth_before_brace: usize,
+    depth_after_brace: usize,
+    depth_before_paren: usize,
+    depth_after_paren: usize,
+    has_code_brace_closer: bool,
+    has_code_paren_closer: bool,
+    is_scope_decl: bool,
+    starts_block: bool,
+    delimiter: BlockDelimiter
+)
+
 pub shape LogicalLine (
     text: string,
     line_number: usize,
@@ -413,7 +465,16 @@ pub shape LogicalLine (
     delim_len: usize,
     brace_depth: usize,
     paren_depth: usize,
-    indent_level: usize
+    depth_before_brace: usize,
+    depth_before_paren: usize,
+    indent_level: usize,
+    participates_in_indent: bool,
+    statement_indent: usize,
+    is_scope_decl: bool,
+    starts_block: bool,
+    has_code_brace_closer: bool,
+    has_code_paren_closer: bool,
+    delimiter: BlockDelimiter
 )
 
 pub shape LineProcessOutcome (

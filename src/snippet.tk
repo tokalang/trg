@@ -19,12 +19,17 @@ fn align_utf8_end(line: str, end: usize) -> usize {
     return e
 }
 
-pub fn format_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars: usize) -> string {
+pub shape KwicSnippetResult (
+    text: string,
+    submatches: Vec<SubMatch>
+)
+
+pub fn compute_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars: usize) -> KwicSnippetResult {
     if line.len == 0 {
-        return string::from("")
+        return KwicSnippetResult(text = string::from(""), submatches = Vec<SubMatch>::new())
     }
     if submatches.len() == 0 {
-        return string::from(line)
+        return KwicSnippetResult(text = string::from(line), submatches = Vec<SubMatch>::new())
     }
 
     auto L = line.len
@@ -50,7 +55,13 @@ pub fn format_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars: 
     }
 
     if raw_starts.len() == 0 {
-        return string::from(line)
+        auto empty_sms# = Vec<SubMatch>::new()
+        auto smi# = 0:usize
+        loop smi < submatches.len() {
+            empty_sms#.push(submatches.borrow(smi).clone())
+            smi = smi + 1
+        }
+        return KwicSnippetResult(text = string::from(line), submatches = cede empty_sms)
     }
 
     auto merged_starts# = Vec<usize>::new()
@@ -63,7 +74,6 @@ pub fn format_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars: 
     loop wi < raw_starts.len() {
         auto n_start = raw_starts.get(wi)
         auto n_end = raw_ends.get(wi)
-        // Fusion rule: win_start_{i+1} <= win_end_i + 10
         if n_start <= cur_end + 10 {
             if n_end > cur_end {
                 cur_end = n_end
@@ -80,29 +90,65 @@ pub fn format_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars: 
     merged_ends#.push(cur_end)
 
     auto out# = string::from("")
+    auto win_out_starts# = Vec<usize>::new()
+    auto cur_out_offset# = 0:usize
 
-    // Check first window start: if > 0, prefix with "..."
     if merged_starts.get(0) > 0 {
         out#.push_str("...")
+        cur_out_offset = 3:usize
     }
 
     auto mi# = 0:usize
     loop mi < merged_starts.len() {
         if mi > 0 {
             out#.push_str(" [...] ")
+            cur_out_offset = cur_out_offset + 7:usize
         }
         auto w_start = merged_starts.get(mi)
         auto w_end = merged_ends.get(mi)
+        win_out_starts#.push(cur_out_offset)
         auto slice = line.substr(w_start, w_end - w_start)
         out#.push_str(slice)
+        cur_out_offset = cur_out_offset + (w_end - w_start)
         mi = mi + 1
     }
 
-    // Check last window end: if < L, suffix with "..."
     auto last_end = merged_ends.get(merged_ends.len() - 1)
     if last_end < L {
         out#.push_str("...")
     }
 
-    return out
+    auto new_submatches# = Vec<SubMatch>::new()
+    auto si# = 0:usize
+    loop si < submatches.len() {
+        auto &sm = submatches.borrow(si)
+        auto w_idx# = 0:usize
+        loop w_idx < merged_starts.len() {
+            auto ms = merged_starts.get(w_idx)
+            auto me = merged_ends.get(w_idx)
+            if sm.start >= ms && sm.end <= me {
+                auto win_out_start = win_out_starts.get(w_idx)
+                auto new_start = win_out_start + (sm.start - ms)
+                auto new_end = new_start + (sm.end - sm.start)
+                new_submatches#.push(SubMatch(
+                    match_text = sm.match_text.clone(),
+                    start = new_start,
+                    end = new_end
+                ))
+                break
+            }
+            w_idx = w_idx + 1:usize
+        }
+        si = si + 1:usize
+    }
+
+    return KwicSnippetResult(
+        text = cede out,
+        submatches = cede new_submatches
+    )
+}
+
+pub fn format_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars: usize) -> string {
+    auto res = compute_kwic_snippet(line, submatches, snippet_chars)
+    return res.text
 }
