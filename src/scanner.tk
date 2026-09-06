@@ -24,7 +24,8 @@ import src/types::{
     SnippetProjection,
     BlockRange,
     BlockDelimiter,
-    LineLexicalInfo
+    LineLexicalInfo,
+    BYTE_KIND_CODE
 }
 import src/path_norm::{resolve_path, normalize_cwd}
 import src/matcher::{SearchPlan}
@@ -51,6 +52,7 @@ import src/syntax::{
     update_brace_depth,
     update_delimiter_depths,
     scan_line_lexical,
+    scan_line_lexical_with_mask,
     DelimiterDepths,
     is_defining_symbol,
     extract_declared_identifier,
@@ -684,6 +686,39 @@ fn process_logical_line(
     return LineProcessOutcome::Continue
 }
 
+pub fn is_span_in_code(
+    mask: Vec<u8>,
+    start: usize,
+    end: usize,
+    line_len: usize,
+    was_in_comm_or_str: bool,
+    is_in_comm_or_str_after: bool
+) -> bool {
+    if start > end || end > line_len {
+        return false
+    }
+    if start == end {
+        if line_len == 0:usize {
+            return !was_in_comm_or_str
+        }
+        if start == 0:usize {
+            return mask.get(0) == BYTE_KIND_CODE
+        }
+        if start == line_len {
+            return mask.get(line_len - 1:usize) == BYTE_KIND_CODE && !is_in_comm_or_str_after
+        }
+        return mask.get(start - 1:usize) == BYTE_KIND_CODE && mask.get(start) == BYTE_KIND_CODE
+    }
+    auto idx# = start
+    loop idx < end {
+        if mask.get(idx) != BYTE_KIND_CODE {
+            return false
+        }
+        idx = idx + 1:usize
+    }
+    return true
+}
+
 fn scan_and_process_line(
     plan: SearchPlan,
     opts: CliOptions,
@@ -712,7 +747,30 @@ fn scan_and_process_line(
     auto ranges# = Vec<MatchRange>::new()
 
     if !max_count_reached {
-        if opts.json_mode || opts.only_matching || opts.mcp_mode || opts.snippet {
+        if opts.code_only {
+            auto decision = plan.find_matches(line_text)
+            auto valid_ranges# = Vec<MatchRange>::new()
+            match lex.byte_mask {
+                auto Option<Vec<u8>>::Some(&mask) => {
+                    auto r_idx# = 0:usize
+                    loop r_idx < decision.ranges.len() {
+                        auto r = decision.ranges.get(r_idx)
+                        if is_span_in_code(mask, r.start, r.end, line_text.len, lex.was_in_comm_or_str, lex.is_in_comm_or_str_after) {
+                            valid_ranges#.push(r)
+                        }
+                        r_idx = r_idx + 1:usize
+                    }
+                }
+                auto Option<Vec<u8>>::None => {}
+            }
+            auto matched = valid_ranges.len() > 0:usize
+            if !opts.invert_match {
+                line_matches = matched
+                ranges = cede valid_ranges
+            } else {
+                line_matches = !matched
+            }
+        } else if opts.json_mode || opts.only_matching || opts.mcp_mode || opts.snippet {
             auto decision = plan.find_matches(line_text)
             if !opts.invert_match {
                 line_matches = decision.matched
@@ -1031,7 +1089,7 @@ pub fn scan_file_stream_with_pass(
                         advance_len = nl_idx + 1:usize
 
                         auto line_indent = compute_line_indent(line_text)
-                        auto lex = scan_line_lexical(line_text, cur_depths#, dialect)
+                        auto lex = scan_line_lexical_with_mask(line_text, cur_depths#, dialect, opts.code_only)
                         scope_tracker#.update(lex.code_text.as_str(), lex.depth_after_brace, lex.depth_after_paren, lex.participates_in_indent, lex.statement_indent, family)
 
                         outcome = scan_and_process_line(
@@ -1056,7 +1114,7 @@ pub fn scan_file_stream_with_pass(
                             }
 
                             auto line_indent = compute_line_indent(line_text)
-                            auto lex = scan_line_lexical(line_text, cur_depths#, dialect)
+                            auto lex = scan_line_lexical_with_mask(line_text, cur_depths#, dialect, opts.code_only)
                             scope_tracker#.update(lex.code_text.as_str(), lex.depth_after_brace, lex.depth_after_paren, lex.participates_in_indent, lex.statement_indent, family)
 
                             outcome = scan_and_process_line(
@@ -1122,7 +1180,7 @@ pub fn scan_file_stream_with_pass(
                     advance_len = line_text.len + delim_len
 
                     auto line_indent = compute_line_indent(line_text)
-                    auto lex = scan_line_lexical(line_text, cur_depths#, dialect)
+                    auto lex = scan_line_lexical_with_mask(line_text, cur_depths#, dialect, opts.code_only)
                     scope_tracker#.update(lex.code_text.as_str(), lex.depth_after_brace, lex.depth_after_paren, lex.participates_in_indent, lex.statement_indent, family)
 
                     outcome = scan_and_process_line(

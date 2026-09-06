@@ -19,7 +19,7 @@ import src/syntax::{
     check_is_self_closed_line,
     check_is_self_closed_structured
 }
-import src/printer::{u64_to_string}
+import src/printer::{u64_to_string, json_escape}
 
 import src/parse::{parse_size_bytes_strict}
 
@@ -59,6 +59,491 @@ pub shape ViewResult (
     eof_reached: bool,
     records: Vec<ViewLineRecord>
 )
+
+pub fn format_view_line_record_json(line_number: usize, kind: str, text: str) -> string {
+    auto item# = string::from("{\"line_number\":")
+    item#.push_str(u64_to_string(line_number as u64).as_str())
+    item#.push_str(",\"kind\":\"")
+    item#.push_str(kind)
+    item#.push_str("\",\"text\":\"")
+    item#.push_str(json_escape(text).as_str())
+    item#.push_str("\"}")
+    return cede item
+}
+
+impl ViewResult {
+    pub fn format_structured(self) -> string {
+        auto resp# = string::from("{\"schema\":\"trg-mcp-view-result-v1\",\"mode\":\"")
+        resp#.push_str(self.mode.as_str())
+        resp#.push_str("\",\"path\":\"")
+        resp#.push_str(json_escape(self.path.as_str()).as_str())
+        resp#.push_str("\",\"requested_line\":")
+        match self.requested_line {
+            auto Option<usize>::Some(l) => {
+                resp#.push_str(u64_to_string(l as u64).as_str())
+            }
+            auto Option<usize>::None => {
+                resp#.push_str("null")
+            }
+        }
+        resp#.push_str(",\"requested_range\":")
+        match self.requested_range {
+            auto Option<BlockRange>::Some(rr) => {
+                resp#.push_str("[")
+                resp#.push_str(u64_to_string(rr.start as u64).as_str())
+                resp#.push_str(",")
+                resp#.push_str(u64_to_string(rr.end as u64).as_str())
+                resp#.push_str("]")
+            }
+            auto Option<BlockRange>::None => {
+                resp#.push_str("null")
+            }
+        }
+        resp#.push_str(",\"detected_block_range\":")
+        match self.detected_block_range {
+            auto Option<BlockRange>::Some(dbr) => {
+                resp#.push_str("[")
+                resp#.push_str(u64_to_string(dbr.start as u64).as_str())
+                resp#.push_str(",")
+                resp#.push_str(u64_to_string(dbr.end as u64).as_str())
+                resp#.push_str("]")
+            }
+            auto Option<BlockRange>::None => {
+                resp#.push_str("null")
+            }
+        }
+        resp#.push_str(",\"emitted_range\":")
+        match self.emitted_range {
+            auto Option<BlockRange>::Some(er) => {
+                resp#.push_str("[")
+                resp#.push_str(u64_to_string(er.start as u64).as_str())
+                resp#.push_str(",")
+                resp#.push_str(u64_to_string(er.end as u64).as_str())
+                resp#.push_str("]")
+            }
+            auto Option<BlockRange>::None => {
+                resp#.push_str("null")
+            }
+        }
+        resp#.push_str(",\"target_included\":")
+        match self.target_included {
+            auto Option<bool>::Some(ti) => {
+                if ti {
+                    resp#.push_str("true")
+                } else {
+                    resp#.push_str("false")
+                }
+            }
+            auto Option<bool>::None => {
+                resp#.push_str("null")
+            }
+        }
+        resp#.push_str(",\"content_omitted\":")
+        if self.content_omitted {
+            resp#.push_str("true")
+        } else {
+            resp#.push_str("false")
+        }
+        resp#.push_str(",\"complete\":")
+        if self.complete {
+            resp#.push_str("true")
+        } else {
+            resp#.push_str("false")
+        }
+        resp#.push_str(",\"eof_reached\":")
+        if self.eof_reached {
+            resp#.push_str("true")
+        } else {
+            resp#.push_str("false")
+        }
+        resp#.push_str(",\"truncated\":")
+        if self.truncated {
+            resp#.push_str("true")
+        } else {
+            resp#.push_str("false")
+        }
+        resp#.push_str(",\"termination_reason\":\"")
+        resp#.push_str(self.reason.as_str())
+        resp#.push_str("\",\"lines_emitted\":")
+        resp#.push_str(u64_to_string(self.lines_emitted as u64).as_str())
+        resp#.push_str(",\"content_bytes_emitted\":")
+        resp#.push_str(u64_to_string(self.bytes_emitted as u64).as_str())
+        resp#.push_str(",\"records\":[")
+        auto r_i# = 0:usize
+        auto r_len = self.records.len()
+        loop r_i < r_len {
+            auto &r = self.records.borrow(r_i)
+            if r_i > 0:usize {
+                resp#.push_str(",")
+            }
+            auto r_json = format_view_line_record_json(r.line_number, r.kind.as_str(), r.text.as_str())
+            resp#.push_str(r_json.as_str())
+            r_i = r_i + 1:usize
+        }
+        resp#.push_str("]}")
+        return cede resp
+    }
+
+    // Computes metadata length upper-bound using limit digit count as a conservative
+    // bound, followed by final exact convergence in converge_structured.
+    pub fn compute_candidate_meta_len(
+        self,
+        start_idx: usize,
+        end_idx: usize,
+        is_pruned: bool,
+        limit: usize
+    ) -> usize {
+        auto lines_emitted# = 0:usize
+        if end_idx >= start_idx {
+            lines_emitted = end_idx - start_idx + 1:usize
+        }
+
+        auto s_schema = "{\"schema\":\"trg-mcp-view-result-v1\",\"mode\":\""
+        auto l_schema = s_schema.len
+        auto l_mode = self.mode.len()
+        auto s_path_tag = "\",\"path\":\""
+        auto l_path_tag = s_path_tag.len
+        auto l_path = json_escape(self.path.as_str()).len()
+        auto s_req_line_tag = "\",\"requested_line\":"
+        auto l_req_line_tag = s_req_line_tag.len
+        auto l_req_line# = 4:usize // "null"
+        match self.requested_line {
+            auto Option<usize>::Some(l) => {
+                l_req_line = u64_to_string(l as u64).len()
+            }
+            _ => {}
+        }
+        auto s_req_range_tag = ",\"requested_range\":"
+        auto l_req_range_tag = s_req_range_tag.len
+        auto l_req_range# = 4:usize // "null"
+        match self.requested_range {
+            auto Option<BlockRange>::Some(rr) => {
+                l_req_range = 3:usize + u64_to_string(rr.start as u64).len() + u64_to_string(rr.end as u64).len()
+            }
+            _ => {}
+        }
+        auto s_det_range_tag = ",\"detected_block_range\":"
+        auto l_det_range_tag = s_det_range_tag.len
+        auto l_det_range# = 4:usize // "null"
+        match self.detected_block_range {
+            auto Option<BlockRange>::Some(dbr) => {
+                l_det_range = 3:usize + u64_to_string(dbr.start as u64).len() + u64_to_string(dbr.end as u64).len()
+            }
+            _ => {}
+        }
+        auto s_emit_range_tag = ",\"emitted_range\":"
+        auto l_emit_range_tag = s_emit_range_tag.len
+        auto l_emit_range# = 4:usize // "null"
+        if lines_emitted > 0:usize {
+            auto s_num = self.records.borrow(start_idx).line_number
+            auto e_num = self.records.borrow(end_idx).line_number
+            l_emit_range = 3:usize + u64_to_string(s_num as u64).len() + u64_to_string(e_num as u64).len()
+        }
+        auto s_target_inc_tag = ",\"target_included\":"
+        auto l_target_inc_tag = s_target_inc_tag.len
+        auto l_target_inc# = 4:usize // "null"
+        match self.target_included {
+            auto Option<bool>::Some(ti) => {
+                if lines_emitted > 0:usize && ti {
+                    l_target_inc = 4:usize // "true"
+                } else {
+                    l_target_inc = 5:usize // "false"
+                }
+            }
+            _ => {}
+        }
+        auto s_content_omitted_tag = ",\"content_omitted\":"
+        auto l_content_omitted_tag = s_content_omitted_tag.len
+        auto l_content_omitted# = 5:usize
+        if self.content_omitted {
+            l_content_omitted = 4:usize
+        }
+        auto s_complete_tag = ",\"complete\":"
+        auto l_complete_tag = s_complete_tag.len
+        auto cand_comp# = self.complete
+        if is_pruned {
+            cand_comp = false
+        }
+        auto l_complete# = 5:usize
+        if cand_comp {
+            l_complete = 4:usize
+        }
+        auto s_eof_tag = ",\"eof_reached\":"
+        auto l_eof_tag = s_eof_tag.len
+        auto l_eof# = 5:usize
+        if self.eof_reached {
+            l_eof = 4:usize
+        }
+        auto s_truncated_tag = ",\"truncated\":"
+        auto l_truncated_tag = s_truncated_tag.len
+        auto cand_trunc# = self.truncated
+        if is_pruned {
+            cand_trunc = true
+        }
+        auto l_truncated# = 5:usize
+        if cand_trunc {
+            l_truncated = 4:usize
+        }
+        auto s_reason_tag = ",\"termination_reason\":\""
+        auto l_reason_tag = s_reason_tag.len
+        auto l_reason# = self.reason.len()
+        if is_pruned {
+            auto s_trunc = "max_result_bytes"
+            l_reason = s_trunc.len
+        }
+        auto s_lines_emitted_tag = "\",\"lines_emitted\":"
+        auto l_lines_emitted_tag = s_lines_emitted_tag.len
+        auto l_lines_emitted = u64_to_string(lines_emitted as u64).len()
+        auto s_bytes_emitted_tag = ",\"content_bytes_emitted\":"
+        auto l_bytes_emitted_tag = s_bytes_emitted_tag.len
+        auto l_bytes_emitted = u64_to_string(limit as u64).len()
+        auto s_records_open = ",\"records\":["
+        auto l_records_open = s_records_open.len
+        auto s_records_close = "]}"
+        auto l_records_close = s_records_close.len
+
+        return l_schema + l_mode + l_path_tag + l_path + l_req_line_tag + l_req_line +
+               l_req_range_tag + l_req_range + l_det_range_tag + l_det_range +
+               l_emit_range_tag + l_emit_range + l_target_inc_tag + l_target_inc +
+               l_content_omitted_tag + l_content_omitted + l_complete_tag + l_complete +
+               l_eof_tag + l_eof + l_truncated_tag + l_truncated + l_reason_tag + l_reason +
+               l_lines_emitted_tag + l_lines_emitted + l_bytes_emitted_tag + l_bytes_emitted +
+               l_records_open + l_records_close
+    }
+
+    pub fn converge_structured(self#) -> Result<string, string> {
+        self.bytes_emitted = 0:usize
+        auto cur_s# = self.format_structured()
+        self.bytes_emitted = cur_s.len()
+        auto iter# = 0:usize
+        loop iter < 10:usize {
+            cur_s = self.format_structured()
+            if cur_s.len() == self.bytes_emitted {
+                return Result<string, string>::Ok(cede cur_s)
+            }
+            self.bytes_emitted = cur_s.len()
+            iter = iter + 1:usize
+        }
+        return Result<string, string>::Err(string::from("view_json_budget_convergence_failed: failed to converge bytes_emitted after 10 iterations"))
+    }
+
+    pub fn prune_to_json_budget(self#, limit: usize) -> Result<string, string> {
+        auto n_recs = self.records.len()
+        if n_recs == 0:usize {
+            auto meta_len = self.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
+            if meta_len > limit {
+                auto err# = string::from("target_exceeds_max_result_bytes: View result metadata (")
+                err#.push_str(u64_to_string(meta_len as u64).as_str())
+                err#.push_str(" bytes) exceeds max_result_bytes (")
+                err#.push_str(u64_to_string(limit as u64).as_str())
+                err#.push_str(" bytes)")
+                return Result<string, string>::Err(cede err)
+            }
+            return self#.converge_structured()
+        }
+
+        // 1. Check if unpruned result already converges within limit
+        auto init_conv = self#.converge_structured()
+        if init_conv.is_err() {
+            return init_conv
+        }
+        auto init_json = init_conv.unwrap()
+        if init_json.len() <= limit {
+            return Result<string, string>::Ok(cede init_json)
+        }
+
+        // 2. Precompute exact record JSON lengths: O(B)
+        auto rec_lens# = Vec<usize>::new()
+        auto i# = 0:usize
+        auto total_recs_len# = 0:usize
+        loop i < n_recs {
+            auto &r = self.records.borrow(i)
+            auto r_json = format_view_line_record_json(r.line_number, r.kind.as_str(), r.text.as_str())
+            auto l = r_json.len()
+            rec_lens#.push(l)
+            total_recs_len = total_recs_len + l
+            i = i + 1:usize
+        }
+
+        // 3. Select candidate window [w_start, w_end] in O(N)
+        auto w_start# = 0:usize
+        auto w_end# = n_recs - 1:usize
+        auto cur_recs_len# = total_recs_len
+        auto has_records# = true
+
+        auto req_line_opt = self.requested_line
+        if req_line_opt.is_some() {
+            auto target_line_num = req_line_opt.unwrap()
+            // Point or Block mode: target line must be preserved
+            auto target_idx_opt# = Option<usize>::None
+            auto ti# = 0:usize
+            loop ti < n_recs {
+                if self.records.borrow(ti).line_number == target_line_num && self.records.borrow(ti).kind.as_str() == "target" {
+                    target_idx_opt = Option<usize>::Some(ti)
+                    break
+                }
+                ti = ti + 1:usize
+            }
+
+            if target_idx_opt.is_none() {
+                return Result<string, string>::Err(string::from("target_not_found: Target record not found in view records"))
+            }
+            auto target_idx = target_idx_opt.unwrap()
+
+            // Check if single target line fits
+            auto single_records# = Vec<ViewLineRecord>::new()
+            single_records#.push(ViewLineRecord(
+                line_number = self.records.borrow(target_idx).line_number,
+                kind = self.records.borrow(target_idx).kind.clone(),
+                text = self.records.borrow(target_idx).text.clone()
+            ))
+            auto target_only_vr# = ViewResult(
+                text = string::new(),
+                truncated = true,
+                reason = string::from("max_result_bytes"),
+                lines_emitted = 1:usize,
+                bytes_emitted = 0:usize,
+                mode = self.mode.clone(),
+                path = self.path.clone(),
+                requested_line = self.requested_line,
+                requested_range = self.requested_range,
+                detected_block_range = self.detected_block_range,
+                emitted_range = Option<BlockRange>::Some(BlockRange(start = target_line_num, end = target_line_num)),
+                target_included = self.target_included,
+                content_omitted = self.content_omitted,
+                complete = false,
+                eof_reached = self.eof_reached,
+                records = cede single_records
+            )
+            auto to_conv = target_only_vr#.converge_structured()
+            if to_conv.is_err() {
+                return to_conv
+            }
+            auto to_json = to_conv.unwrap()
+            if to_json.len() > limit {
+                auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record (")
+                err#.push_str(u64_to_string(to_json.len() as u64).as_str())
+                err#.push_str(" bytes) exceeds max_result_bytes (")
+                err#.push_str(u64_to_string(limit as u64).as_str())
+                err#.push_str(" bytes)")
+                return Result<string, string>::Err(cede err)
+            }
+
+            // Shrink window around target_idx until cand_total <= limit
+            loop true {
+                auto num_lines = w_end - w_start + 1:usize
+                auto comma_len# = 0:usize
+                if num_lines > 1:usize {
+                    comma_len = num_lines - 1:usize
+                }
+                auto meta_len = self.compute_candidate_meta_len(w_start, w_end, true, limit)
+                auto cand_total = meta_len + comma_len + cur_recs_len
+                if cand_total <= limit {
+                    break
+                }
+                if w_start == target_idx && w_end == target_idx {
+                    break
+                }
+
+                auto can_remove_start = w_start < target_idx
+                auto can_remove_end = w_end > target_idx
+
+                auto remove_last# = false
+                if can_remove_end && !can_remove_start {
+                    remove_last = true
+                } else if can_remove_start && !can_remove_end {
+                    remove_last = false
+                } else {
+                    auto dist_before = target_line_num - self.records.borrow(w_start).line_number
+                    auto dist_after = self.records.borrow(w_end).line_number - target_line_num
+                    if dist_after >= dist_before {
+                        remove_last = true
+                    } else {
+                        remove_last = false
+                    }
+                }
+
+                if remove_last {
+                    cur_recs_len = cur_recs_len - rec_lens.get(w_end)
+                    w_end = w_end - 1:usize
+                } else {
+                    cur_recs_len = cur_recs_len - rec_lens.get(w_start)
+                    w_start = w_start + 1:usize
+                }
+            }
+        } else {
+            // Range mode: prune from end, or 0 records if needed
+            loop true {
+                auto num_lines = w_end - w_start + 1:usize
+                auto comma_len# = 0:usize
+                if num_lines > 1:usize {
+                    comma_len = num_lines - 1:usize
+                }
+                auto meta_len = self.compute_candidate_meta_len(w_start, w_end, true, limit)
+                auto cand_total = meta_len + comma_len + cur_recs_len
+                if cand_total <= limit {
+                    break
+                }
+                if w_end > 0:usize {
+                    cur_recs_len = cur_recs_len - rec_lens.get(w_end)
+                    w_end = w_end - 1:usize
+                } else {
+                    // Even 1 line cannot fit, check if 0 records can fit
+                    has_records = false
+                    auto zero_meta = self.compute_candidate_meta_len(1:usize, 0:usize, true, limit)
+                    if zero_meta > limit {
+                        auto err# = string::from("target_exceeds_max_result_bytes: View result metadata (")
+                        err#.push_str(u64_to_string(zero_meta as u64).as_str())
+                        err#.push_str(" bytes) exceeds max_result_bytes (")
+                        err#.push_str(u64_to_string(limit as u64).as_str())
+                        err#.push_str(" bytes)")
+                        return Result<string, string>::Err(cede err)
+                    }
+                    break
+                }
+            }
+        }
+
+        // 4. Slice records once and apply pruned metadata
+        auto new_records# = Vec<ViewLineRecord>::new()
+        if has_records {
+            auto k# = w_start
+            loop k <= w_end {
+                new_records#.push(ViewLineRecord(
+                    line_number = self.records.borrow(k).line_number,
+                    kind = self.records.borrow(k).kind.clone(),
+                    text = self.records.borrow(k).text.clone()
+                ))
+                k = k + 1:usize
+            }
+        }
+        self.records = cede new_records
+        self.truncated = true
+        self.reason = string::from("max_result_bytes")
+        self.complete = false
+        self.lines_emitted = self.records.len()
+        if self.lines_emitted > 0:usize {
+            self.emitted_range = Option<BlockRange>::Some(BlockRange(
+                start = self.records.borrow(0).line_number,
+                end = self.records.borrow(self.records.len() - 1:usize).line_number
+            ))
+        } else {
+            self.emitted_range = Option<BlockRange>::None
+        }
+
+        // 5. Converge byte count and final assertion
+        auto conv_res = self#.converge_structured()
+        if conv_res.is_err() {
+            return conv_res
+        }
+        auto final_json = conv_res.unwrap()
+        if final_json.len() > limit {
+            auto err = string::from("target_exceeds_max_result_bytes: Formatted record exceeds max_result_bytes")
+            return Result<string, string>::Err(cede err)
+        }
+        return Result<string, string>::Ok(cede final_json)
+    }
+}
 
 impl ViewOptions {
     pub fn new(file_path: string) -> ViewOptions {

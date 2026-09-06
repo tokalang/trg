@@ -14,7 +14,7 @@ import src/parse::{parse_usize_strict, parse_size_bytes_strict}
 import src/symbol::{is_valid_identifier, generate_symbol_variants}
 
 pub fn print_help() {
-    println("trg 0.13.1 - Fast, agent-friendly code search tool")
+    println("trg 0.14.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -68,6 +68,8 @@ pub fn print_help() {
     println("      --snippet              KWIC centered snippet view around matches (alias: --kwic)")
     println("      --snippet-chars <NUM>  Preserve NUM characters on each side of match in snippet (default: 30)")
     println("      --def-first            Prioritize definition matches before usages under budgets")
+    println("      --code-only            Match only within source code (ignore strings and comments)")
+    println("      --no-code-only         Match everywhere including strings and comments")
     println("      --mcp                  Run as a native Model Context Protocol (MCP) stdio server")
     println("  -t, --type <TYPE>          Only search files matching TYPE")
     println("  -T, --type-not <TYPE>      Do not search files matching TYPE")
@@ -83,7 +85,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.13.1 (Toka)")
+    println("trg 0.14.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
@@ -303,6 +305,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     auto snippet# = false
     auto snippet_chars# = 30:usize
     auto def_first# = false
+    auto code_only# = false
     auto mcp_mode# = false
     auto path_style# = PathStyle::AsGiven
     auto text_layout# = TextLayout::Auto
@@ -1273,6 +1276,18 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             continue
         }
 
+        if view == "--code-only" {
+            code_only = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--no-code-only" {
+            code_only = false
+            i = i + 1
+            continue
+        }
+
         if view == "--mcp" {
             mcp_mode = true
             i = i + 1
@@ -1410,7 +1425,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             group_by_scope = false,
             symbol_variants = false,
             snippet = false,
-            snippet_chars = 30:usize
+            snippet_chars = 30:usize,
+            code_only = false
         ))
     }
 
@@ -1549,6 +1565,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         group_by_scope = group_by_scope,
         symbol_variants = symbol_variants,
         snippet = snippet,
-        snippet_chars = snippet_chars
+        snippet_chars = snippet_chars,
+        code_only = code_only
     ))
 }

@@ -7,7 +7,7 @@ import stdx/serde/json::{JsonNode}
 import std/math::{is_finite, floor}
 import src/types::{CliOptions, OutputFormat, SearchReport, SearchDiagnostic, BudgetState, BlockRange}
 import src/path_norm::{normalize_cwd, resolves_to_root, compute_identity_key}
-import src/view::{ViewOptions, execute_view_operation, parse_range_spec}
+import src/view::{ViewOptions, ViewResult, ViewLineRecord, execute_view_operation, parse_range_spec}
 import src/parse::{parse_size_bytes_strict}
 import src/syntax::{is_valid_utf8}
 import src/posix::{posix_write_stdout, posix_read_stdin_line}
@@ -86,6 +86,19 @@ fn send_tool_error(id_str: str, message: str) -> bool {
     resp#.push_str(id_str)
     resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
     resp#.push_str(json_escape(message).as_str())
+    resp#.push_str("\"}],\"isError\":true}}\n")
+    return send_mcp_response(resp.as_str())
+}
+
+fn send_tool_error_json(id_str: str, message: str) -> bool {
+    auto err_obj# = string::from("{\"error\":\"")
+    err_obj#.push_str(json_escape(message).as_str())
+    err_obj#.push_str("\"}")
+
+    auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+    resp#.push_str(id_str)
+    resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+    resp#.push_str(json_escape(err_obj.as_str()).as_str())
     resp#.push_str("\"}],\"isError\":true}}\n")
     return send_mcp_response(resp.as_str())
 }
@@ -592,7 +605,7 @@ pub fn run_mcp_server() -> i32 {
                     resp#.push_str(id_str.as_str())
                     resp#.push_str(",\"result\":{\"protocolVersion\":\"")
                     resp#.push_str(negotiated.as_str())
-                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.13.1\"}}}\n")
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.14.0\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
@@ -658,7 +671,7 @@ pub fn run_mcp_server() -> i32 {
                                                             if nxt.is_none() { break }
                                                             auto entry = nxt.unwrap()
                                                             auto k = entry.key().as_str()
-                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" {
+                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" {
                                                                 unexp_opt = Option<string>::Some(entry.key().clone())
                                                                 break
                                                             }
@@ -992,7 +1005,34 @@ pub fn run_mcp_server() -> i32 {
                                                             continue
                                                         }
 
+                                                        auto format_is_json# = false
+                                                        auto format_err# = false
+                                                        match arg_map.try_borrow(string::from("format")) {
+                                                            auto Option<&JsonNode>::Some(&fmn) => {
+                                                                match fmn {
+                                                                    auto JsonNode::StrNode(&fms) => {
+                                                                        if fms.as_str() == "json" {
+                                                                            format_is_json = true
+                                                                        } else if fms.as_str() == "text" {
+                                                                            format_is_json = false
+                                                                        } else {
+                                                                            format_err = true
+                                                                        }
+                                                                    }
+                                                                    _ => {
+                                                                        format_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if format_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'format' must be one of [\"text\", \"json\"]")
+                                                            continue
+                                                        }
+
                                                         auto target_path = compute_identity_key(startup_cwd.as_str(), path_str.as_str())
+                                                        auto exec_max_bytes = max_bytes_opt
                                                         auto view_opts = ViewOptions(
                                                             file_path = cede target_path,
                                                             line = line_opt,
@@ -1000,16 +1040,84 @@ pub fn run_mcp_server() -> i32 {
                                                             block = block_val,
                                                             lines_range = lines_range_opt,
                                                             max_lines = max_lines_opt,
-                                                            max_result_bytes = max_bytes_opt,
+                                                            max_result_bytes = exec_max_bytes,
                                                             max_columns = max_columns_opt,
                                                             max_block_lines = max_block_lines_val
                                                         )
                                                         auto view_res = execute_view_operation(view_opts)
                                                         if view_res.is_err() {
-                                                            send_tool_error(id_str.as_str(), view_res.unwrap_err().as_str())
+                                                            if format_is_json {
+                                                                send_tool_error_json(id_str.as_str(), view_res.unwrap_err().as_str())
+                                                            } else {
+                                                                send_tool_error(id_str.as_str(), view_res.unwrap_err().as_str())
+                                                            }
                                                             continue
                                                         }
-                                                        auto vr = view_res.unwrap()
+                                                        auto vr# = view_res.unwrap()
+
+                                                        if format_is_json {
+                                                            auto json_str# = string::new()
+                                                            if max_bytes_opt.is_some() {
+                                                                auto prune_res = vr#.prune_to_json_budget(max_bytes_opt.unwrap())
+                                                                if prune_res.is_err() {
+                                                                    send_tool_error_json(id_str.as_str(), prune_res.unwrap_err().as_str())
+                                                                    continue
+                                                                }
+                                                                json_str = prune_res.unwrap()
+                                                            } else {
+                                                                auto conv_res = vr#.converge_structured()
+                                                                if conv_res.is_err() {
+                                                                    send_tool_error_json(id_str.as_str(), conv_res.unwrap_err().as_str())
+                                                                    continue
+                                                                }
+                                                                json_str = conv_res.unwrap()
+                                                            }
+
+                                                            auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                            resp#.push_str(id_str.as_str())
+                                                            resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+                                                            resp#.push_str(json_escape(json_str.as_str()).as_str())
+                                                            resp#.push_str("\"}]")
+
+                                                            if server_state.negotiated_version.as_str() == "2025-11-25" {
+                                                                resp#.push_str(",\"structuredContent\":")
+                                                                resp#.push_str(json_str.as_str())
+                                                            }
+
+                                                            resp#.push_str(",\"_meta\":{\"truncated\":")
+                                                            if vr.truncated {
+                                                                resp#.push_str("true,\"reason\":\"")
+                                                                if vr.reason.len() > 0 {
+                                                                    resp#.push_str(vr.reason.as_str())
+                                                                } else {
+                                                                    resp#.push_str("truncated")
+                                                                }
+                                                                resp#.push_str("\"")
+                                                            } else {
+                                                                resp#.push_str("false,\"reason\":null")
+                                                            }
+                                                            resp#.push_str(",\"lines\":")
+                                                            resp#.push_str(u64_to_string(vr.lines_emitted as u64).as_str())
+                                                            resp#.push_str(",\"bytes\":")
+                                                            resp#.push_str(u64_to_string(vr.bytes_emitted as u64).as_str())
+                                                            resp#.push_str(",\"summary\":{\"complete\":")
+                                                            if vr.truncated {
+                                                                resp#.push_str("false,\"truncated\":true,\"termination_reason\":\"")
+                                                                if vr.reason.len() > 0 {
+                                                                    resp#.push_str(vr.reason.as_str())
+                                                                } else {
+                                                                    resp#.push_str("truncated")
+                                                                }
+                                                                resp#.push_str("\"")
+                                                            } else {
+                                                                resp#.push_str("true,\"truncated\":false,\"termination_reason\":\"completed\"")
+                                                            }
+                                                            resp#.push_str("}}}}")
+                                                            resp#.push_str("\n")
+                                                            send_mcp_response(resp.as_str())
+                                                            continue
+                                                        }
+
                                                         auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
                                                         resp#.push_str(id_str.as_str())
                                                         resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
@@ -1017,119 +1125,8 @@ pub fn run_mcp_server() -> i32 {
                                                         resp#.push_str("\"}],\"isError\":false")
 
                                                         if server_state.negotiated_version.as_str() == "2025-11-25" {
-                                                            resp#.push_str(",\"structuredContent\":{\"schema\":\"trg-mcp-view-result-v1\",\"mode\":\"")
-                                                            resp#.push_str(vr.mode.as_str())
-                                                            resp#.push_str("\",\"path\":\"")
-                                                            resp#.push_str(json_escape(vr.path.as_str()).as_str())
-                                                            resp#.push_str("\",\"requested_line\":")
-                                                            match vr.requested_line {
-                                                                auto Option<usize>::Some(l) => {
-                                                                    resp#.push_str(u64_to_string(l as u64).as_str())
-                                                                }
-                                                                auto Option<usize>::None => {
-                                                                    resp#.push_str("null")
-                                                                }
-                                                            }
-                                                            resp#.push_str(",\"requested_range\":")
-                                                            match vr.requested_range {
-                                                                auto Option<BlockRange>::Some(rr) => {
-                                                                    resp#.push_str("[")
-                                                                    resp#.push_str(u64_to_string(rr.start as u64).as_str())
-                                                                    resp#.push_str(",")
-                                                                    resp#.push_str(u64_to_string(rr.end as u64).as_str())
-                                                                    resp#.push_str("]")
-                                                                }
-                                                                auto Option<BlockRange>::None => {
-                                                                    resp#.push_str("null")
-                                                                }
-                                                            }
-                                                            resp#.push_str(",\"detected_block_range\":")
-                                                            match vr.detected_block_range {
-                                                                auto Option<BlockRange>::Some(dbr) => {
-                                                                    resp#.push_str("[")
-                                                                    resp#.push_str(u64_to_string(dbr.start as u64).as_str())
-                                                                    resp#.push_str(",")
-                                                                    resp#.push_str(u64_to_string(dbr.end as u64).as_str())
-                                                                    resp#.push_str("]")
-                                                                }
-                                                                auto Option<BlockRange>::None => {
-                                                                    resp#.push_str("null")
-                                                                }
-                                                            }
-                                                            resp#.push_str(",\"emitted_range\":")
-                                                            match vr.emitted_range {
-                                                                auto Option<BlockRange>::Some(er) => {
-                                                                    resp#.push_str("[")
-                                                                    resp#.push_str(u64_to_string(er.start as u64).as_str())
-                                                                    resp#.push_str(",")
-                                                                    resp#.push_str(u64_to_string(er.end as u64).as_str())
-                                                                    resp#.push_str("]")
-                                                                }
-                                                                auto Option<BlockRange>::None => {
-                                                                    resp#.push_str("null")
-                                                                }
-                                                            }
-                                                            resp#.push_str(",\"target_included\":")
-                                                            match vr.target_included {
-                                                                auto Option<bool>::Some(ti) => {
-                                                                    if ti {
-                                                                        resp#.push_str("true")
-                                                                    } else {
-                                                                        resp#.push_str("false")
-                                                                    }
-                                                                }
-                                                                auto Option<bool>::None => {
-                                                                    resp#.push_str("null")
-                                                                }
-                                                            }
-                                                            resp#.push_str(",\"content_omitted\":")
-                                                            if vr.content_omitted {
-                                                                resp#.push_str("true")
-                                                            } else {
-                                                                resp#.push_str("false")
-                                                            }
-                                                            resp#.push_str(",\"complete\":")
-                                                            if vr.complete {
-                                                                resp#.push_str("true")
-                                                            } else {
-                                                                resp#.push_str("false")
-                                                            }
-                                                            resp#.push_str(",\"eof_reached\":")
-                                                            if vr.eof_reached {
-                                                                resp#.push_str("true")
-                                                            } else {
-                                                                resp#.push_str("false")
-                                                            }
-                                                            resp#.push_str(",\"truncated\":")
-                                                            if vr.truncated {
-                                                                resp#.push_str("true")
-                                                            } else {
-                                                                resp#.push_str("false")
-                                                            }
-                                                            resp#.push_str(",\"termination_reason\":\"")
-                                                            resp#.push_str(vr.reason.as_str())
-                                                            resp#.push_str("\",\"lines_emitted\":")
-                                                            resp#.push_str(u64_to_string(vr.lines_emitted as u64).as_str())
-                                                            resp#.push_str(",\"content_bytes_emitted\":")
-                                                            resp#.push_str(u64_to_string(vr.bytes_emitted as u64).as_str())
-                                                            resp#.push_str(",\"records\":[")
-                                                            auto r_i# = 0:usize
-                                                            auto r_len = vr.records.len()
-                                                            loop r_i < r_len {
-                                                                auto &r = vr.records.borrow(r_i)
-                                                                if r_i > 0:usize {
-                                                                    resp#.push_str(",")
-                                                                }
-                                                                resp#.push_str("{\"line_number\":")
-                                                                resp#.push_str(u64_to_string(r.line_number as u64).as_str())
-                                                                resp#.push_str(",\"kind\":\"")
-                                                                resp#.push_str(r.kind.as_str())
-                                                                resp#.push_str("\",\"text\":\"")
-                                                                resp#.push_str(json_escape(r.text.as_str()).as_str())
-                                                                resp#.push_str("\"}")
-                                                                r_i = r_i + 1:usize
-                                                            }
-                                                            resp#.push_str("]}")
+                                                            resp#.push_str(",\"structuredContent\":")
+                                                            resp#.push_str(vr.format_structured().as_str())
                                                         }
 
                                                         resp#.push_str(",\"_meta\":{\"truncated\":")
@@ -1180,6 +1177,25 @@ pub fn run_mcp_server() -> i32 {
 
                                     match p_map.try_borrow(string::from("arguments")) {
                                         auto Option<&JsonNode>::Some(&a_val) => {
+                                            auto is_format_json# = false
+                                            match a_val {
+                                                auto JsonNode::ObjectNode(&arg_map) => {
+                                                    match arg_map.try_borrow(string::from("format")) {
+                                                        auto Option<&JsonNode>::Some(&fn_node) => {
+                                                            match fn_node {
+                                                                auto JsonNode::StrNode(&fs) => {
+                                                                    if fs.as_str() == "json" {
+                                                                        is_format_json = true
+                                                                    }
+                                                                }
+                                                                _ => {}
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
                                             auto build_res = build_mcp_cli_args(a_val, startup_cwd.as_str())
                                             if build_res.is_err() {
                                                 send_error(id_str.as_str(), -32602, build_res.unwrap_err().as_str())
@@ -1230,7 +1246,7 @@ pub fn run_mcp_server() -> i32 {
                                                         report = search_res.unwrap()
                                                         finalize_search(search_opts, writer#, report)
                                                     }
-                                                    auto resp = format_tool_call_response(id_str, report, search_opts, writer, server_state.negotiated_version.as_str())
+                                                    auto resp = format_tool_call_response(id_str, report, search_opts, writer, server_state.negotiated_version.as_str(), is_format_json)
                                                     send_mcp_response(resp.as_str())
                                         }
                                         _ => {

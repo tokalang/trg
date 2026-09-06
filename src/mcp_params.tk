@@ -46,7 +46,8 @@ pub shape OptionFamily (
     GroupByScope = 28 |     // --group-by-scope
     SymbolVariants = 29 |   // --symbol-variants
     Snippet = 30 |          // --snippet, --kwic
-    SnippetChars = 31       // --snippet-chars, --snippet-chars=*
+    SnippetChars = 31 |     // --snippet-chars, --snippet-chars=*
+    CodeOnly = 32           // --code-only, --no-code-only
 )
 
 pub shape OptionToken (
@@ -263,6 +264,11 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
             }
             if view == "--deduplicate-targets" || view == "--no-deduplicate-targets" {
                 families#.push(OptionToken(family = OptionFamily::DeduplicateTargets, token = string::from(view)))
+                i = i + 1
+                continue
+            }
+            if view == "--code-only" || view == "--no-code-only" {
+                families#.push(OptionToken(family = OptionFamily::CodeOnly, token = string::from(view)))
                 i = i + 1
                 continue
             }
@@ -555,6 +561,9 @@ pub fn find_family_token(tokens: Vec<OptionToken>, target: OptionFamily) -> Opti
             auto OptionFamily::SnippetChars => {
                 match target { auto OptionFamily::SnippetChars => { matched = true } _ => {} }
             }
+            auto OptionFamily::CodeOnly => {
+                match target { auto OptionFamily::CodeOnly => { matched = true } _ => {} }
+            }
         }
         if matched {
             return Option<string>::Some(ot.token.clone())
@@ -740,6 +749,8 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
             auto max_files_with_matches# = ParamUsizeState(state = 0:u8, value = 0:usize)
             auto path_style# = ParamStringState(state = 0:u8, value = string::new())
             auto text_layout# = ParamStringState(state = 0:u8, value = string::new())
+            auto code_only# = ParamBoolState(state = 0:u8, value = false)
+            auto format_val# = ParamStringState(state = 0:u8, value = string::new())
             auto raw_args_state# = ParamVecState(state = 0:u8, value = Vec<string>::new())
 
             auto iter# = map.iter()
@@ -863,6 +874,19 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
                     auto r = parse_string_param(node, "text_layout")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     text_layout = r.unwrap()
+                } else if k == "code_only" {
+                    auto r = parse_bool_param(node, "code_only")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    code_only = r.unwrap()
+                } else if k == "format" {
+                    auto r = parse_string_param(node, "format")
+                    if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
+                    format_val = r.unwrap()
+                    if format_val.state == 2:u8 {
+                        if format_val.value.as_str() != "text" && format_val.value.as_str() != "json" {
+                            return Result<Vec<string>, string>::Err(string::from("Invalid params: 'format' must be one of [\"text\", \"json\"]"))
+                        }
+                    }
                 } else if k == "args" {
                     auto r = parse_vec_string_param(node, "args", 0:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
@@ -1116,6 +1140,14 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
                 return Result<Vec<string>, string>::Err(cede err)
             }
 
+            auto tok_co = find_family_token(families, OptionFamily::CodeOnly)
+            if tok_co.is_some() && code_only.state == 2:u8 {
+                auto err# = string::from("Invalid params: typed property 'code_only' conflicts with args option '")
+                err#.push_str(tok_co.unwrap().as_str())
+                err#.push_str("'")
+                return Result<Vec<string>, string>::Err(cede err)
+            }
+
             auto tok_b = find_family_token(families, OptionFamily::Block)
             if tok_b.is_some() && block.state == 2:u8 {
                 auto err# = string::from("Invalid params: typed property 'block' conflicts with args option '")
@@ -1295,6 +1327,15 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
             // Def-first
             if def_first.state == 2:u8 && def_first.value {
                 cli_args#.push(string::from("--def-first"))
+            }
+
+            // Code only
+            if code_only.state == 2:u8 {
+                if code_only.value {
+                    cli_args#.push(string::from("--code-only"))
+                } else {
+                    cli_args#.push(string::from("--no-code-only"))
+                }
             }
 
             // Block

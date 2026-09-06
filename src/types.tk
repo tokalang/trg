@@ -2,6 +2,10 @@
 import core/option::{Option}
 import std/vec::{Vec}
 
+pub const BYTE_KIND_CODE: u8 = 0:u8
+pub const BYTE_KIND_STRING: u8 = 1:u8
+pub const BYTE_KIND_COMMENT: u8 = 2:u8
+
 pub shape OutputMode (
     CliStreaming = 0 |
     McpCollecting = 1
@@ -287,7 +291,8 @@ pub shape CliOptions (
     group_by_scope: bool,
     symbol_variants: bool,
     snippet: bool,
-    snippet_chars: usize
+    snippet_chars: usize,
+    code_only: bool
 )
 
 pub shape BlockDelimiter (
@@ -455,7 +460,10 @@ pub shape LineLexicalInfo (
     has_code_paren_closer: bool,
     is_scope_decl: bool,
     starts_block: bool,
-    delimiter: BlockDelimiter
+    delimiter: BlockDelimiter,
+    byte_mask: Option<Vec<u8>>,
+    was_in_comm_or_str: bool,
+    is_in_comm_or_str_after: bool
 )
 
 pub shape LogicalLine (
@@ -571,7 +579,8 @@ pub shape EffectiveQuery (
     group_by_scope: bool,
     symbol_variants: bool,
     snippet: bool,
-    snippet_chars: usize
+    snippet_chars: usize,
+    code_only: bool
 )
 
 impl EffectiveQuery {
@@ -701,7 +710,8 @@ impl EffectiveQuery {
             group_by_scope = opts.group_by_scope,
             symbol_variants = opts.symbol_variants,
             snippet = opts.snippet,
-            snippet_chars = opts.snippet_chars
+            snippet_chars = opts.snippet_chars,
+            code_only = opts.code_only
         )
     }
 }

@@ -1,6 +1,7 @@
 // Serialization of canonical structuredContent, _meta.summary, and MCP tool call responses.
 import core/str::{str}
 import std/vec::{Vec}
+import core/option::{Option}
 import src/types::{
     CliOptions,
     EffectiveQuery,
@@ -14,6 +15,7 @@ import src/types::{
     SnippetProjection,
     BlockRange
 }
+import src/view::{ViewResult, ViewLineRecord}
 import src/printer::{OutputBudgetWriter, u64_to_string, i64_to_string, json_escape, format_segment_opening}
 
 pub fn format_effective_query(opts: CliOptions) -> string {
@@ -130,6 +132,8 @@ pub fn format_effective_query(opts: CliOptions) -> string {
     if eq.snippet { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str(",\"snippet_chars\":")
     s#.push_str(u64_to_string(eq.snippet_chars as u64).as_str())
+    s#.push_str(",\"code_only\":")
+    if eq.code_only { s#.push_str("true") } else { s#.push_str("false") }
     s#.push_str("}")
     return cede s
 }
@@ -446,7 +450,8 @@ pub fn format_tool_call_response(
     report: SearchReport,
     opts: CliOptions,
     writer: OutputBudgetWriter,
-    proto_version: str
+    proto_version: str,
+    format_json: bool
 ) -> string {
     auto has_error = !report.diagnostics.is_empty() || report.had_error
     auto is_trunc = report.budget_state.is_truncated
@@ -459,51 +464,61 @@ pub fn format_tool_call_response(
         term_reason = report.budget_state.truncation_reason.clone()
     }
 
-    auto text_out# = writer.take_output()
-    if report.diagnostics.len() > 0 {
-        if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
-            text_out#.push_str("\n")
-        }
-        auto d_idx# = 0:usize
-        loop d_idx < report.diagnostics.len() {
-            auto &d = report.diagnostics.borrow(d_idx)
-            text_out#.push_str(d.kind.as_str())
-            text_out#.push_str(" error")
-            match d.path {
-                auto Option<string>::Some(&p) => {
-                    text_out#.push_str(" (")
-                    text_out#.push_str(p.as_str())
-                    text_out#.push_str(")")
-                }
-                _ => {}
+    auto struct_json# = string::new()
+    if format_json || proto_version == "2025-11-25" {
+        struct_json = format_structured_content(report, opts, writer)
+    }
+
+    auto esc_text# = string::new()
+    if format_json {
+        esc_text = json_escape(struct_json.as_str())
+    } else {
+        auto text_out# = writer.take_output()
+        if report.diagnostics.len() > 0 {
+            if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
+                text_out#.push_str("\n")
             }
-            text_out#.push_str(": ")
-            text_out#.push_str(d.message.as_str())
-            text_out#.push_str("\n")
-            d_idx = d_idx + 1
+            auto d_idx# = 0:usize
+            loop d_idx < report.diagnostics.len() {
+                auto &d = report.diagnostics.borrow(d_idx)
+                text_out#.push_str(d.kind.as_str())
+                text_out#.push_str(" error")
+                match d.path {
+                    auto Option<string>::Some(&p) => {
+                        text_out#.push_str(" (")
+                        text_out#.push_str(p.as_str())
+                        text_out#.push_str(")")
+                    }
+                    _ => {}
+                }
+                text_out#.push_str(": ")
+                text_out#.push_str(d.message.as_str())
+                text_out#.push_str("\n")
+                d_idx = d_idx + 1
+            }
         }
-    }
 
-    if !opts.json_mode {
-        if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
-            text_out#.push_str("\n")
+        if !opts.json_mode {
+            if text_out.len() > 0 && !text_out.as_str().ends_with("\n") {
+                text_out#.push_str("\n")
+            }
+            text_out#.push_str("[trg: complete=")
+            if is_comp { text_out#.push_str("true") } else { text_out#.push_str("false") }
+            text_out#.push_str(", truncated=")
+            if is_trunc { text_out#.push_str("true") } else { text_out#.push_str("false") }
+            text_out#.push_str(", reason=")
+            text_out#.push_str(term_reason.as_str())
+            text_out#.push_str(", matches=")
+            text_out#.push_str(u64_to_string(report.budget_state.matched_lines_emitted as u64).as_str())
+            text_out#.push_str(", scanned=")
+            text_out#.push_str(u64_to_string(report.budget_state.files_scanned as u64).as_str())
+            text_out#.push_str(", passes=")
+            text_out#.push_str(u64_to_string(report.budget_state.file_scan_passes as u64).as_str())
+            text_out#.push_str("]\n")
         }
-        text_out#.push_str("[trg: complete=")
-        if is_comp { text_out#.push_str("true") } else { text_out#.push_str("false") }
-        text_out#.push_str(", truncated=")
-        if is_trunc { text_out#.push_str("true") } else { text_out#.push_str("false") }
-        text_out#.push_str(", reason=")
-        text_out#.push_str(term_reason.as_str())
-        text_out#.push_str(", matches=")
-        text_out#.push_str(u64_to_string(report.budget_state.matched_lines_emitted as u64).as_str())
-        text_out#.push_str(", scanned=")
-        text_out#.push_str(u64_to_string(report.budget_state.files_scanned as u64).as_str())
-        text_out#.push_str(", passes=")
-        text_out#.push_str(u64_to_string(report.budget_state.file_scan_passes as u64).as_str())
-        text_out#.push_str("]\n")
-    }
 
-    auto esc_text = json_escape(text_out.as_str())
+        esc_text = json_escape(text_out.as_str())
+    }
 
     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
     resp#.push_str(id_val.as_str())
@@ -513,7 +528,7 @@ pub fn format_tool_call_response(
 
     if proto_version == "2025-11-25" {
         resp#.push_str(",\"structuredContent\":")
-        resp#.push_str(format_structured_content(report, opts, writer).as_str())
+        resp#.push_str(struct_json.as_str())
     }
 
     resp#.push_str(",\"_meta\":")

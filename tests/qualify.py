@@ -173,7 +173,7 @@ def extract_mcp_records(sc):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.13.1 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.14.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -192,7 +192,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined or "trg v0.12.0" in build_combined or "trg v0.13.0" in build_combined or "trg v0.13.1" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined or "trg v0.12.0" in build_combined or "trg v0.13.0" in build_combined or "trg v0.13.1" in build_combined or "trg v0.14.0" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -219,26 +219,26 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.13.1 identity on both binaries
+    # Validate exact 0.14.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.13.1 (Toka)", f"Expected 'trg 0.13.1 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.14.0 (Toka)", f"Expected 'trg 0.14.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.13.1 (Toka)", f"Expected 'trg 0.13.1 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.14.0 (Toka)", f"Expected 'trg 0.14.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.13.1
-    log("Test 1: Help & Version flags (exact 0.13.1 release identity)")
+    # Test 1: Help & Version exact 0.14.0
+    log("Test 1: Help & Version flags (exact 0.14.0 release identity)")
     r = run_cmd([trg, "--help"])
     assert r.returncode == 0
-    assert "trg 0.13.1 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.14.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
 
     r = run_cmd([trg, "--version"])
     assert r.returncode == 0
-    assert r.stdout.strip() == "trg 0.13.1 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.14.0 (Toka)", f"Unexpected version: {r.stdout}"
     assert r.returncode == 0
 
     # Test 2: Basic literal search (-F)
@@ -788,7 +788,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.13.1" in r_re_ctx.stdout
+    assert "trg 0.14.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -2031,7 +2031,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.13.1"
+        assert resp1["result"]["serverInfo"]["version"] == "0.14.0"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -4528,7 +4528,7 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         lines = [json.loads(l) for l in s_out.strip().split("\n") if l.strip()]
         assert len(lines) == 3
         # 1. initialize
-        assert lines[0]["result"]["serverInfo"]["version"] == "0.13.1"
+        assert lines[0]["result"]["serverInfo"]["version"] == "0.14.0"
         # 2. tools/list schema contains group_by_scope, symbol_variants, snippet, snippet_chars
         tool_schema = lines[1]["result"]["tools"][0]["inputSchema"]["properties"]
         assert "group_by_scope" in tool_schema
@@ -4812,7 +4812,7 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         assert len(resps) == 6
 
         # 1. initialize
-        assert resps[0]["result"]["serverInfo"]["version"] == "0.13.1"
+        assert resps[0]["result"]["serverInfo"]["version"] == "0.14.0"
 
         # 2. tools/list
         tool_names = [t["name"] for t in resps[1]["result"]["tools"]]
@@ -5959,8 +5959,510 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert resp_emoji["id"] == "😀"
     assert "result" in resp_emoji
 
+    # Test 171: --code-only / --no-code-only in CLI and code_only in MCP Server
+    log("Test 171: --code-only / --no-code-only in CLI and code_only in MCP Server")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        code_file = tdp / "sample.js"
+        code_file.write_text(
+            'const target_var = 1; // target_var in comment\n'
+            '// only target_var comment\n'
+            '"only target_var in string";\n'
+            'const other_var = 2;\n',
+            encoding="utf-8"
+        )
+
+        # 1. Normal search matches lines 1, 2, 3
+        p = subprocess.run([trg, "-n", "target_var", str(code_file)], capture_output=True, text=True)
+        assert p.returncode == 0
+        lines = [l for l in p.stdout.strip().split("\n") if l]
+        assert len(lines) == 3
+
+        # 2. CLI --code-only matches ONLY line 1
+        p_code = subprocess.run([trg, "-n", "--code-only", "target_var", str(code_file)], capture_output=True, text=True)
+        assert p_code.returncode == 0
+        code_lines = [l for l in p_code.stdout.strip().split("\n") if l]
+        assert len(code_lines) == 1
+        assert "const target_var = 1;" in code_lines[0]
+
+        # 3. CLI --code-only with JSON output: submatches only contain code span
+        p_json = subprocess.run([trg, "--json", "--code-only", "target_var", str(code_file)], capture_output=True, text=True)
+        assert p_json.returncode == 0
+        matches = [json.loads(l) for l in p_json.stdout.strip().split("\n") if l and json.loads(l).get("type") == "match"]
+        assert len(matches) == 1
+        submatches = matches[0]["data"]["submatches"]
+        assert len(submatches) == 1
+        assert submatches[0]["start"] == 6
+        assert submatches[0]["end"] == 16
+
+        # 4. Invert-match (-v) with --code-only matches lines 2, 3, 4 (non-code matches or no match)
+        p_inv = subprocess.run([trg, "-n", "-v", "--code-only", "target_var", str(code_file)], capture_output=True, text=True)
+        assert p_inv.returncode == 0
+        inv_lines = [l for l in p_inv.stdout.strip().split("\n") if l]
+        assert len(inv_lines) == 3
+
+        # 5. CLI last-wins: --code-only --no-code-only vs --no-code-only --code-only
+        p_last_no = subprocess.run([trg, "-n", "--code-only", "--no-code-only", "target_var", str(code_file)], capture_output=True, text=True)
+        assert len([l for l in p_last_no.stdout.strip().split("\n") if l]) == 3
+
+        p_last_yes = subprocess.run([trg, "-n", "--no-code-only", "--code-only", "target_var", str(code_file)], capture_output=True, text=True)
+        assert len([l for l in p_last_yes.stdout.strip().split("\n") if l]) == 1
+
+        # 6. Fast-paths: -c, -l, -q with --code-only
+        p_c = subprocess.run([trg, "-c", "--code-only", "target_var", str(code_file)], capture_output=True, text=True)
+        assert p_c.returncode == 0
+        assert p_c.stdout.strip() == "1"
+
+        p_l_hit = subprocess.run([trg, "-l", "--code-only", "target_var", str(code_file)], capture_output=True, text=True)
+        assert p_l_hit.returncode == 0
+        assert str(code_file) in p_l_hit.stdout
+
+        p_l_miss = subprocess.run([trg, "-l", "--code-only", "in string", str(code_file)], capture_output=True, text=True)
+        assert p_l_miss.returncode == 1
+
+        p_q_hit = subprocess.run([trg, "-q", "--code-only", "target_var", str(code_file)], capture_output=True, text=True)
+        assert p_q_hit.returncode == 0
+
+        p_q_miss = subprocess.run([trg, "-q", "--code-only", "in string", str(code_file)], capture_output=True, text=True)
+        assert p_q_miss.returncode == 1
+
+        # 7. MCP trg_search: code_only: true vs false
+        p_mcp = subprocess.Popen([trg, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        p_mcp.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n")
+        p_mcp.stdin.flush()
+        json.loads(p_mcp.stdout.readline())
+        p_mcp.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        p_mcp.stdin.flush()
+
+        p_mcp.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "target_var",
+                    "path": str(code_file),
+                    "code_only": True
+                }
+            }
+        }) + "\n")
+        p_mcp.stdin.flush()
+        res_mcp_co = json.loads(p_mcp.stdout.readline())["result"]
+        sc_co = res_mcp_co["structuredContent"]
+        assert sc_co["stats"]["matches_emitted"] == 1
+        assert sc_co["effective_query"]["code_only"] is True
+
+        p_mcp.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "target_var",
+                    "path": str(code_file),
+                    "code_only": False
+                }
+            }
+        }) + "\n")
+        p_mcp.stdin.flush()
+        res_mcp_nco = json.loads(p_mcp.stdout.readline())["result"]
+        sc_nco = res_mcp_nco["structuredContent"]
+        assert sc_nco["stats"]["matches_emitted"] == 3
+        assert sc_nco["effective_query"]["code_only"] is False
+
+        p_mcp.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "target_var",
+                    "path": str(code_file),
+                    "code_only": True,
+                    "args": ["--no-code-only"]
+                }
+            }
+        }) + "\n")
+        p_mcp.stdin.flush()
+        res_conflict = json.loads(p_mcp.stdout.readline())
+        assert res_conflict["error"]["code"] == -32602
+        assert "conflicts with args option '--no-code-only'" in res_conflict["error"]["message"]
+
+        p_mcp.stdin.close()
+        p_mcp.wait()
+
+    # Test 172: MCP format: "json" for trg_search and trg_view across protocols and error cases
+    log("Test 172: MCP format: 'json' for trg_search and trg_view across protocols and error cases")
+    with tempfile.TemporaryDirectory() as td:
+        tdp = pathlib.Path(td)
+        view_file = tdp / "sample.py"
+        view_lines = [
+            "def outer():",
+            "    val = 1",
+            "    # Comment line",
+            "    result = val + 2",
+            "    return result",
+            "print(outer())"
+        ]
+        view_file.write_text("\n".join(view_lines) + "\n", encoding="utf-8")
+
+        # 1. trg_search with format: "json" under 2025-11-25
+        p_2025 = subprocess.Popen([trg, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        p_2025.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n")
+        p_2025.stdin.flush()
+        json.loads(p_2025.stdout.readline())
+        p_2025.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        p_2025.stdin.flush()
+
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "val",
+                    "path": str(view_file),
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        s_2025 = json.loads(p_2025.stdout.readline())["result"]
+        parsed_text_s = json.loads(s_2025["content"][0]["text"])
+        assert parsed_text_s == s_2025["structuredContent"]
+        assert parsed_text_s["schema"] == "trg-mcp-result-v2"
+        assert parsed_text_s["stats"]["matches_emitted"] == 2
+
+        # 2. trg_view with format: "json" under 2025-11-25
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(view_file),
+                    "line": 4,
+                    "context": 1,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        v_2025 = json.loads(p_2025.stdout.readline())["result"]
+        parsed_text_v = json.loads(v_2025["content"][0]["text"])
+        assert parsed_text_v == v_2025["structuredContent"]
+        assert parsed_text_v["schema"] == "trg-mcp-view-result-v1"
+        assert parsed_text_v["requested_line"] == 4
+        assert len(parsed_text_v["records"]) == 3
+        actual_utf8_bytes = len(v_2025["content"][0]["text"].encode("utf-8"))
+        assert parsed_text_v["content_bytes_emitted"] == actual_utf8_bytes
+        assert v_2025["_meta"]["bytes"] == actual_utf8_bytes
+
+        # 3. trg_view budget pruning with format: "json" preserving target
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(view_file),
+                    "line": 4,
+                    "context": 2,
+                    "max_result_bytes": actual_utf8_bytes - 10,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        v_budget = json.loads(p_2025.stdout.readline())["result"]
+        parsed_budget = json.loads(v_budget["content"][0]["text"])
+        assert parsed_budget["target_included"] is True
+        assert parsed_budget["truncated"] is True
+        assert parsed_budget["termination_reason"] == "max_result_bytes"
+        assert len(parsed_budget["records"]) < 5
+        budget_bytes = len(v_budget["content"][0]["text"].encode("utf-8"))
+        assert budget_bytes <= actual_utf8_bytes - 10
+        assert parsed_budget["content_bytes_emitted"] == budget_bytes
+        assert v_budget["_meta"]["bytes"] == budget_bytes
+
+        # 4. trg_view target overflow under format: "json" returns tool error json without corrupting
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(view_file),
+                    "line": 4,
+                    "max_result_bytes": 50,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        v_over = json.loads(p_2025.stdout.readline())["result"]
+        assert v_over["isError"] is True
+        assert "structuredContent" not in v_over, "Error response must NOT contain structuredContent (outputSchema violation)"
+        err_obj = json.loads(v_over["content"][0]["text"])
+        assert "target_exceeds_max_result_bytes" in err_obj["error"]
+
+        # 5. Digit boundary tests (999/1000, 9999/10000), exact capacity, Chinese/escaping, and linear pruning
+        multi_file = tdp / "multi.py"
+        multi_lines = [
+            f"line_{i:03d} = '测试内容第{i}行 \"quoted\" \\\\path\\\\to\\\\res'  # entry {i}"
+            for i in range(1, 150)
+        ]
+        multi_file.write_text("\n".join(multi_lines) + "\n", encoding="utf-8")
+
+        # 5a. max_result_bytes = 1000 boundary
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(multi_file),
+                    "line": 75,
+                    "context": 30,
+                    "max_result_bytes": 1000,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        res_1000 = json.loads(p_2025.stdout.readline())["result"]
+        assert res_1000.get("isError", False) is False, f"Unexpected error at limit 1000: {res_1000}"
+        actual_len_1000 = len(res_1000["content"][0]["text"].encode("utf-8"))
+        assert actual_len_1000 <= 1000, f"Byte budget violated: {actual_len_1000} > 1000"
+        parsed_1000 = json.loads(res_1000["content"][0]["text"])
+        assert parsed_1000 == res_1000["structuredContent"]
+        assert parsed_1000["content_bytes_emitted"] == actual_len_1000
+        assert res_1000["_meta"]["bytes"] == actual_len_1000
+        assert parsed_1000["target_included"] is True
+        # Verify Chinese & escape preservation
+        assert "测试内容" in parsed_1000["records"][0]["text"]
+        assert '"quoted"' in parsed_1000["records"][0]["text"]
+        assert r'\\path\\to\\res' in parsed_1000["records"][0]["text"]
+
+        # 5b. max_result_bytes = 999 boundary
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(multi_file),
+                    "line": 75,
+                    "context": 30,
+                    "max_result_bytes": 999,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        res_999 = json.loads(p_2025.stdout.readline())["result"]
+        assert res_999.get("isError", False) is False, f"Unexpected error at limit 999: {res_999}"
+        actual_len_999 = len(res_999["content"][0]["text"].encode("utf-8"))
+        assert actual_len_999 <= 999, f"Byte budget violated: {actual_len_999} > 999"
+        parsed_999 = json.loads(res_999["content"][0]["text"])
+        assert parsed_999["content_bytes_emitted"] == actual_len_999
+        assert res_999["_meta"]["bytes"] == actual_len_999
+
+        # 5c. Exact capacity boundary: pass exact actual_len_1000
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(multi_file),
+                    "line": 75,
+                    "context": 30,
+                    "max_result_bytes": actual_len_1000,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        res_exact = json.loads(p_2025.stdout.readline())["result"]
+        assert res_exact.get("isError", False) is False
+        actual_len_exact = len(res_exact["content"][0]["text"].encode("utf-8"))
+        assert actual_len_exact == actual_len_1000
+        parsed_exact = json.loads(res_exact["content"][0]["text"])
+        assert parsed_exact["content_bytes_emitted"] == actual_len_1000
+
+        # 5d. max_result_bytes = 10000 boundary
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 9, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(multi_file),
+                    "line": 75,
+                    "context": 70,
+                    "max_result_bytes": 10000,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        res_10000 = json.loads(p_2025.stdout.readline())["result"]
+        assert res_10000.get("isError", False) is False
+        actual_len_10000 = len(res_10000["content"][0]["text"].encode("utf-8"))
+        assert actual_len_10000 <= 10000
+        parsed_10000 = json.loads(res_10000["content"][0]["text"])
+        assert parsed_10000["content_bytes_emitted"] == actual_len_10000
+
+        # 5e. max_result_bytes = 9999 boundary
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(multi_file),
+                    "line": 75,
+                    "context": 70,
+                    "max_result_bytes": 9999,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        res_9999 = json.loads(p_2025.stdout.readline())["result"]
+        assert res_9999.get("isError", False) is False
+        actual_len_9999 = len(res_9999["content"][0]["text"].encode("utf-8"))
+        assert actual_len_9999 <= 9999
+        parsed_9999 = json.loads(res_9999["content"][0]["text"])
+        assert parsed_9999["content_bytes_emitted"] == actual_len_9999
+
+        # 5f. Range mode with budget control (bounded reader & linear pruning)
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(multi_file),
+                    "lines": [1, 140],
+                    "max_result_bytes": 1200,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        res_range = json.loads(p_2025.stdout.readline())["result"]
+        assert res_range.get("isError", False) is False
+        actual_len_range = len(res_range["content"][0]["text"].encode("utf-8"))
+        assert actual_len_range <= 1200
+        parsed_range = json.loads(res_range["content"][0]["text"])
+        assert parsed_range["mode"] == "range"
+        assert parsed_range["truncated"] is True
+        assert parsed_range["termination_reason"] == "max_result_bytes"
+        assert parsed_range["content_bytes_emitted"] == actual_len_range
+
+        # 5g. Range mode budget too small for even metadata
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 12, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(multi_file),
+                    "lines": [1, 10],
+                    "max_result_bytes": 20,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        res_range_over = json.loads(p_2025.stdout.readline())["result"]
+        assert res_range_over["isError"] is True
+        assert "structuredContent" not in res_range_over, "Range error must NOT emit structuredContent"
+        err_range = json.loads(res_range_over["content"][0]["text"])
+        assert "target_exceeds_max_result_bytes" in err_range["error"]
+
+        # 6. trg_search regex compile error under format: "json" produces error structured result
+        p_2025.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 13, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "(?unclosed",
+                    "mode": "regex",
+                    "path": str(view_file),
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2025.stdin.flush()
+        s_err = json.loads(p_2025.stdout.readline())["result"]
+        assert s_err["isError"] is True
+        s_err_parsed = json.loads(s_err["content"][0]["text"])
+        assert s_err_parsed == s_err["structuredContent"]
+        assert s_err_parsed["complete"] is False
+        assert s_err_parsed["termination_reason"] == "search_error"
+        assert len(s_err_parsed["errors"]) > 0
+
+        p_2025.stdin.close()
+        p_2025.wait()
+
+        # 7. Protocol 2024-11-05 with format: "json"
+        p_2024 = subprocess.Popen([trg, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        p_2024.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}}) + "\n")
+        p_2024.stdin.flush()
+        json.loads(p_2024.stdout.readline())
+        p_2024.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        p_2024.stdin.flush()
+
+        p_2024.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "trg_search",
+                "arguments": {
+                    "pattern": "val",
+                    "path": str(view_file),
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2024.stdin.flush()
+        s_2024 = json.loads(p_2024.stdout.readline())["result"]
+        assert "structuredContent" not in s_2024, "structuredContent leaked into 2024-11-05"
+        parsed_2024 = json.loads(s_2024["content"][0]["text"])
+        assert parsed_2024["schema"] == "trg-mcp-result-v2"
+        assert parsed_2024["stats"]["matches_emitted"] == 2
+
+        p_2024.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(view_file),
+                    "line": 4,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2024.stdin.flush()
+        v_2024 = json.loads(p_2024.stdout.readline())["result"]
+        assert "structuredContent" not in v_2024, "structuredContent leaked into 2024-11-05"
+        parsed_v_2024 = json.loads(v_2024["content"][0]["text"])
+        assert parsed_v_2024["schema"] == "trg-mcp-view-result-v1"
+        assert parsed_v_2024["requested_line"] == 4
+
+        # 7b. Protocol 2024-11-05 tool error under format: "json"
+        p_2024.stdin.write(json.dumps({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {
+                "name": "trg_view",
+                "arguments": {
+                    "path": str(view_file),
+                    "line": 4,
+                    "max_result_bytes": 50,
+                    "format": "json"
+                }
+            }
+        }) + "\n")
+        p_2024.stdin.flush()
+        v_err_2024 = json.loads(p_2024.stdout.readline())["result"]
+        assert v_err_2024["isError"] is True
+        assert "structuredContent" not in v_err_2024, "Error response under 2024 must NOT contain structuredContent"
+        err_2024_obj = json.loads(v_err_2024["content"][0]["text"])
+        assert "target_exceeds_max_result_bytes" in err_2024_obj["error"]
+
+        p_2024.stdin.close()
+        p_2024.wait()
+
     log("=" * 60)
-    log("ALL 170 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.13.1)!")
+    log("ALL 172 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.14.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 // Syntax and lexical analysis for trg: definitions, scopes, and delimiters.
 import core/str::{str}
 import std/vec::{Vec}
-import src/types::{ScopeFrame, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo}
+import src/types::{ScopeFrame, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo, BYTE_KIND_CODE, BYTE_KIND_STRING, BYTE_KIND_COMMENT}
+import core/option::{Option}
 import src/matcher::{SearchPlan}
 import src/file_types::{extract_file_extension}
 
@@ -181,12 +182,23 @@ pub fn compute_line_indent(line: str) -> usize {
 }
 
 pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDialect) -> LineLexicalInfo {
+    return scan_line_lexical_with_mask(line, depths#, dialect, false)
+}
+
+pub fn scan_line_lexical_with_mask(
+    line: str,
+    depths#: DelimiterDepths,
+    dialect: LexicalDialect,
+    with_mask: bool
+) -> LineLexicalInfo {
     auto depth_before_brace = depths.brace_depth
     auto depth_before_paren = depths.paren_depth
     auto was_in_comm_or_str = depths.in_str || depths.block_comment_depth > 0:usize
 
     auto out# = string::new()
     out#.ensure_capacity(line.len + 1:usize)
+
+    auto mask# = Vec<u8>::new()
 
     auto has_code_brace_closer# = false
     auto has_code_paren_closer# = false
@@ -209,6 +221,10 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
                 }
                 out#.push_char(' ')
                 out#.push_char(' ')
+                if with_mask {
+                    mask#.push(BYTE_KIND_COMMENT)
+                    mask#.push(BYTE_KIND_COMMENT)
+                }
                 i = i + 2:usize
                 continue
             }
@@ -218,10 +234,17 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
                 depths.block_comment_depth = depths.block_comment_depth + 1:usize
                 out#.push_char(' ')
                 out#.push_char(' ')
+                if with_mask {
+                    mask#.push(BYTE_KIND_COMMENT)
+                    mask#.push(BYTE_KIND_COMMENT)
+                }
                 i = i + 2:usize
                 continue
             }
             out#.push_char(' ')
+            if with_mask {
+                mask#.push(BYTE_KIND_COMMENT)
+            }
             i = i + 1:usize
             continue
         }
@@ -231,12 +254,18 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
             if depths.escape {
                 depths.escape = false
                 out#.push_char(' ')
+                if with_mask {
+                    mask#.push(BYTE_KIND_STRING)
+                }
                 i = i + 1:usize
                 continue
             }
             if ch == ('\\' as char) {
                 depths.escape = true
                 out#.push_char(' ')
+                if with_mask {
+                    mask#.push(BYTE_KIND_STRING)
+                }
                 i = i + 1:usize
                 continue
             }
@@ -250,6 +279,11 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
                     out#.push_char(' ')
                     out#.push_char(' ')
                     out#.push_char(' ')
+                    if with_mask {
+                        mask#.push(BYTE_KIND_STRING)
+                        mask#.push(BYTE_KIND_STRING)
+                        mask#.push(BYTE_KIND_STRING)
+                    }
                     i = i + 3:usize
                     continue
                 }
@@ -257,10 +291,16 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
                 depths.in_str = false
                 depths.str_char = 0:char
                 out#.push_char(' ')
+                if with_mask {
+                    mask#.push(BYTE_KIND_STRING)
+                }
                 i = i + 1:usize
                 continue
             }
             out#.push_char(' ')
+            if with_mask {
+                mask#.push(BYTE_KIND_STRING)
+            }
             i = i + 1:usize
             continue
         }
@@ -273,6 +313,10 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
             depths.block_comment_depth = depths.block_comment_depth + 1:usize
             out#.push_char(' ')
             out#.push_char(' ')
+            if with_mask {
+                mask#.push(BYTE_KIND_COMMENT)
+                mask#.push(BYTE_KIND_COMMENT)
+            }
             i = i + 2:usize
             continue
         }
@@ -283,6 +327,9 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
         if dialect == LexicalDialect::HashComment && ch == ('#' as char) {
             loop i < line.len {
                 out#.push_char(' ')
+                if with_mask {
+                    mask#.push(BYTE_KIND_COMMENT)
+                }
                 i = i + 1:usize
             }
             break
@@ -290,6 +337,9 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
         if dialect != LexicalDialect::HashComment && ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('/' as char) {
             loop i < line.len {
                 out#.push_char(' ')
+                if with_mask {
+                    mask#.push(BYTE_KIND_COMMENT)
+                }
                 i = i + 1:usize
             }
             break
@@ -317,6 +367,9 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
                             }
                             has_code = true
                             out#.push_char(ch)
+                            if with_mask {
+                                mask#.push(BYTE_KIND_CODE)
+                            }
                             i = i + 1:usize
                             loop i < line.len {
                                 auto ic = line.byte_at(i)
@@ -328,6 +381,9 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
                                     break
                                 }
                                 out#.push_char(ic)
+                                if with_mask {
+                                    mask#.push(BYTE_KIND_CODE)
+                                }
                                 i = i + 1:usize
                             }
                             continue
@@ -354,6 +410,11 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
                 out#.push_char(' ')
                 out#.push_char(' ')
                 out#.push_char(' ')
+                if with_mask {
+                    mask#.push(BYTE_KIND_STRING)
+                    mask#.push(BYTE_KIND_STRING)
+                    mask#.push(BYTE_KIND_STRING)
+                }
                 i = i + 3:usize
                 continue
             }
@@ -363,6 +424,9 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
             depths.is_triple_quote = false
             depths.escape = false
             out#.push_char(' ')
+            if with_mask {
+                mask#.push(BYTE_KIND_STRING)
+            }
             i = i + 1:usize
             continue
         }
@@ -393,6 +457,9 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
         }
 
         out#.push_char(ch)
+        if with_mask {
+            mask#.push(BYTE_KIND_CODE)
+        }
         i = i + 1:usize
     }
 
@@ -423,6 +490,13 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
     auto starts_block = is_block_construct(out.as_str())
     auto delimiter = detect_block_delimiter(out.as_str())
 
+    auto mask_opt# = Option<Vec<u8>>::None
+    if with_mask {
+        mask_opt = Option<Vec<u8>>::Some(cede mask)
+    }
+
+    auto is_in_comm_or_str_after = depths.in_str || depths.block_comment_depth > 0:usize
+
     return LineLexicalInfo(
         code_text = cede out,
         participates_in_indent = participates_in_indent,
@@ -435,7 +509,10 @@ pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDi
         has_code_paren_closer = has_code_paren_closer,
         is_scope_decl = is_scope_decl,
         starts_block = starts_block,
-        delimiter = delimiter
+        delimiter = delimiter,
+        byte_mask = cede mask_opt,
+        was_in_comm_or_str = was_in_comm_or_str,
+        is_in_comm_or_str_after = is_in_comm_or_str_after
     )
 }
 
