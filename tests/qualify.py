@@ -5258,7 +5258,9 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
 
         # --sort help synchronization
         r_help = run_cmd([trg, "--help"])
-        assert "--sort <TYPE>          Sort order: path, none (default: none)" in r_help.stdout
+        assert "--sort <TYPE>          Sort order: path, none (CLI: none, MCP: path)" in r_help.stdout
+        assert "--deduplicate-targets  Deduplicate target paths before traversal (CLI: off, MCP: on)" in r_help.stdout
+        assert "--no-deduplicate-targets Do not deduplicate target paths" in r_help.stdout
 
     # Test 157: Target preservation (-C 21 --max-lines 3) & OOB EOF gate
     log("Test 157: Target preservation (-C 21 --max-lines 3) & OOB EOF gate")
