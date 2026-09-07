@@ -34,8 +34,8 @@ class SafeReleaseUploadMockTest(unittest.TestCase):
         self.dist_dir = self.tmpdir / "dist"
         self.dist_dir.mkdir()
 
-        self.tag = "v0.15.0"
-        self.ver = "0.15.0"
+        self.tag = "v0.16.0"
+        self.ver = "0.16.0"
 
         # Generate six valid mandatory deliverables
         self.bin_linux = self.dist_dir / f"trg-{self.tag}-linux-x64.tar.gz"
@@ -66,7 +66,7 @@ class SafeReleaseUploadMockTest(unittest.TestCase):
         self._write_sums()
 
         self.notes_file = self.tmpdir / "release_notes.md"
-        self.notes_file.write_text("# Release Notes v0.15.0\n\nApproved test notes.\n")
+        self.notes_file.write_text("# Release Notes v0.16.0\n\nApproved test notes.\n")
 
         self.mock_state_file = self.tmpdir / "mock_state.json"
         self.mock_gh_script = self.tmpdir / "mock_gh.py"

@@ -17,7 +17,7 @@ class TestInstallPs1Contract(unittest.TestCase):
 
         # 1. Parameter bindings
         self.assertIn("[CmdletBinding()]", content)
-        self.assertIn('[string]$Version = "v0.15.0"', content)
+        self.assertIn('[string]$Version = "v0.16.0"', content)
         self.assertIn("-NoModifyPath", content)
         self.assertIn("-Help", content)
 

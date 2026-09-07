@@ -8,7 +8,7 @@ on:
       tag:
         description: 'Release tag to verify'
         required: false
-        default: 'v0.15.0'
+        default: 'v0.16.0'
 
 jobs:
   anonymous-audit-linux:
@@ -18,13 +18,14 @@ jobs:
       - name: Download all 6 assets anonymously
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || 'v0.15.0' }}"
+          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.0' }}"
+          ver="${tag#v}"
           base_url="https://github.com/tokalang/trg/releases/download/${tag}"
           mkdir -p dist && cd dist
           
           files=(
             "SHA256SUMS"
-            "trg-0.15.0.tar.gz"
+            "trg-${ver}.tar.gz"
             "trg-${tag}-linux-x64.tar.gz"
             "trg-${tag}-macos-arm64.tar.gz"
             "trg-${tag}-windows-x64.zip"
@@ -43,13 +44,14 @@ jobs:
       - name: Run consumer smoke test on linux-x64
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || 'v0.15.0' }}"
+          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.0' }}"
+          ver="${tag#v}"
           cd dist
           tar -xzf "trg-${tag}-linux-x64.tar.gz"
           cd "trg-${tag}-linux-x64"
           
           echo "Checking --version..."
-          ./trg --version | grep -F "0.15.0"
+          ./trg --version | grep -F "${ver}"
           
           echo "Testing search..."
           echo "hello world test token" > test.txt
@@ -63,7 +65,8 @@ jobs:
       - name: Download assets and run consumer smoke on macos-arm64
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || 'v0.15.0' }}"
+          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.0' }}"
+          ver="${tag#v}"
           base_url="https://github.com/tokalang/trg/releases/download/${tag}"
           mkdir -p dist && cd dist
           
@@ -81,7 +84,7 @@ jobs:
           tar -xzf "trg-${tag}-macos-arm64.tar.gz"
           cd "trg-${tag}-macos-arm64"
           
-          ./trg --version | grep -F "0.15.0"
+          ./trg --version | grep -F "${ver}"
           echo "hello macos search token" > test.txt
           ./trg "macos" test.txt | grep -F "hello macos"
           echo "macOS-arm64 consumer smoke passed!"
@@ -94,7 +97,8 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = if ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.15.0" }
+          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.16.0" }
+          $ver = $tag.TrimStart("v")
           $baseUrl = "https://github.com/tokalang/trg/releases/download/$tag"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Set-Location dist
@@ -114,10 +118,10 @@ jobs:
           Expand-Archive "trg-$tag-windows-x64.zip" -DestinationPath "."
           Set-Location "trg-$tag-windows-x64"
           
-          $ver = .\trg.exe --version
-          Write-Host "Binary version output: $ver"
-          if (-not ($ver -like "*0.15.0*")) {
-            Write-Error "Version output did not contain 0.15.0"
+          $ver_out = .\trg.exe --version
+          Write-Host "Binary version output: $ver_out"
+          if (-not ($ver_out -like "*$ver*")) {
+            Write-Error "Version output did not contain $ver"
             exit 1
           }
           
@@ -138,7 +142,8 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = if ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.15.0" }
+          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.16.0" }
+          $ver = $tag.TrimStart("v")
           $baseUrl = "https://github.com/tokalang/trg/releases/download/$tag"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Set-Location dist
@@ -158,10 +163,10 @@ jobs:
           Expand-Archive "trg-$tag-windows-arm64.zip" -DestinationPath "."
           Set-Location "trg-$tag-windows-arm64"
           
-          $ver = .\trg.exe --version
-          Write-Host "Binary version output: $ver"
-          if (-not ($ver -like "*0.15.0*")) {
-            Write-Error "Version output did not contain 0.15.0"
+          $ver_out = .\trg.exe --version
+          Write-Host "Binary version output: $ver_out"
+          if (-not ($ver_out -like "*$ver*")) {
+            Write-Error "Version output did not contain $ver"
             exit 1
           }
           
@@ -184,9 +189,11 @@ jobs:
       - name: Generate WinGet manifests
         shell: bash
         run: |
+          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.0' }}"
+          ver="${tag#v}"
           python3 scripts/generate_winget_manifest.py \
-            --version 0.15.0 \
-            --tag v0.15.0 \
+            --version "$ver" \
+            --tag "$tag" \
             --x64-sha "A66705073EA8AC64BB19753EE6D6CE83FB213AB2783D5B1EA8D7F7B73477387E" \
             --arm64-sha "4246D05B59DB36BA8EFFAA2FEC97D7FC5F7AAE6189CF7DD2D083373960A78CA4" \
             --output-dir winget
@@ -199,7 +206,9 @@ jobs:
       - name: Check winget CLI availability and validate manifest
         shell: powershell
         run: |
-          $manifestDir = "winget\manifests\t\Tokalang\trg\0.15.0"
+          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.16.0" }
+          $ver = $tag.TrimStart("v")
+          $manifestDir = "winget\manifests\t\Tokalang\trg\$ver"
           if (Get-Command winget -ErrorAction SilentlyContinue) {
             Write-Host "winget command found: $(Get-Command winget | Select-Object -ExpandProperty Source)"
             Write-Host "Validating manifest with official winget CLI..."

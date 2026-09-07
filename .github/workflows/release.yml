@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Tag name to build binaries for'
         required: true
-        default: 'v0.15.0'
+        default: 'v0.16.0'
 
 permissions:
   contents: write
@@ -344,8 +344,13 @@ jobs:
       - name: Verify package and run matrix
         run: |
           set -euo pipefail
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          ver_name="${tag_name#v}"
           tarball=$(ls trg-*-linux-x64.tar.gz | head -n 1)
-          python3 tests/verify_standalone_binary.py --archive "$tarball" --expected-version 0.15.0 --run-matrix
+          python3 tests/verify_standalone_binary.py --archive "$tarball" --expected-version "$ver_name" --run-matrix
           python3 tests/verify_installer.py
 
       - name: Upload verified archive
@@ -370,8 +375,13 @@ jobs:
       - name: Verify package and run matrix
         run: |
           set -euo pipefail
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          ver_name="${tag_name#v}"
           tarball=$(ls trg-*-macos-arm64.tar.gz | head -n 1)
-          python3 tests/verify_standalone_binary.py --archive "$tarball" --expected-version 0.15.0 --run-matrix
+          python3 tests/verify_standalone_binary.py --archive "$tarball" --expected-version "$ver_name" --run-matrix
           python3 tests/verify_installer.py
 
       - name: Upload verified archive
@@ -411,8 +421,13 @@ jobs:
       - name: Unpack and Verify package & DLL dependencies
         run: |
           set -euo pipefail
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          ver_name="${tag_name#v}"
           zipfile=$(ls trg-*-windows-x64.zip | head -n 1)
-          python3 tests/verify_standalone_binary.py --archive "$zipfile" --expected-version 0.15.0
+          python3 tests/verify_standalone_binary.py --archive "$zipfile" --expected-version "$ver_name"
           unzip -o "$zipfile"
           trg_path=$(find . -name "trg.exe" -path "*/trg-*-windows-x64/*" | head -n 1)
           python3 tests/test_windows_matrix.py --trg "$trg_path" --c-test test_c_write_x64.exe --arch x64
@@ -454,8 +469,13 @@ jobs:
       - name: Unpack and Verify package & DLL dependencies
         run: |
           set -euo pipefail
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          ver_name="${tag_name#v}"
           zipfile=$(ls trg-*-windows-arm64.zip | head -n 1)
-          python3 tests/verify_standalone_binary.py --archive "$zipfile" --expected-version 0.15.0
+          python3 tests/verify_standalone_binary.py --archive "$zipfile" --expected-version "$ver_name"
           unzip -o "$zipfile"
           trg_path=$(find . -name "trg.exe" -path "*/trg-*-windows-arm64/*" | head -n 1)
           python3 tests/test_windows_matrix.py --trg "$trg_path" --c-test test_c_write_arm64.exe --arch arm64
