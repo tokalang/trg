@@ -39,9 +39,8 @@ def ensure_fixtures():
             f.write("Line 1: Alpha header\nLine 2: Target keyword alpha\nLine 3: Beta footer\n")
 
     zh_path = os.path.join(SANDBOX, "clean_test_data", "中文目录", "测试.txt")
-    if not os.path.exists(zh_path):
-        with open(zh_path, "w", encoding="utf-8") as f:
-            f.write("第一行：测试标题\n第二行：关键字 目标\n第三行：结束\n")
+    with open(zh_path, "w", encoding="utf-8") as f:
+        f.write("第一行：测试标题\n第二行：关键字 目标 检索内核\n第三行：结束\n")
 
     space_path = os.path.join(SANDBOX, "clean_test_data", "path with spaces", "sample.txt")
     if not os.path.exists(space_path):
@@ -523,6 +522,8 @@ def main():
 
     ensure_fixtures()
 
+    c_test_abs = win_path(os.path.abspath(args.c_test)) if args.c_test else None
+
     if args.trg:
         abs_trg = win_path(os.path.abspath(args.trg))
         binaries = [(abs_trg, f"Target Binary ({abs_trg})")]
@@ -543,7 +544,7 @@ def main():
         test_error_handling(bin_path)
         test_true_broken_pipe(bin_path)
         test_mcp_lifecycle(bin_path)
-        test_broken_pipe_counter_examples(bin_path, explicit_c_test=args.c_test, explicit_arch=args.arch)
+        test_broken_pipe_counter_examples(bin_path, explicit_c_test=c_test_abs, explicit_arch=args.arch)
         test_path_resolution_failure_injection(bin_path)
         print()
 
