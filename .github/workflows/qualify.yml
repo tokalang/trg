@@ -78,3 +78,6 @@ jobs:
           toka publish
           archive_file=$(ls trg-*.tar.gz | head -n 1)
           python3 tests/verify_application_release.py --archive "$archive_file"
+
+      - name: Verify release asset publisher logic
+        run: python3 -m unittest tests/test_safe_release_upload.py

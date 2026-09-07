@@ -173,4 +173,8 @@ jobs:
           if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
             tag_name="${{ inputs.tag }}"
           fi
-          python3 tests/safe_release_upload.py --tag "$tag_name" --dist-dir dist
+          notes_file="docs/release_notes/${tag_name}.md"
+          if [ ! -f "$notes_file" ]; then
+            notes_file="docs/release_notes/v0.14.1.md"
+          fi
+          python3 tests/safe_release_upload.py --tag "$tag_name" --dist-dir dist --notes-file "$notes_file"
