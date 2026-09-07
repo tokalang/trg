@@ -274,9 +274,23 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
                 "Budget CLI: --max-total-matches limits printed matches exactly", "2 lines emitted")
 
     # CLI budget: --max-result-bytes (cite Test 107)
-    r_cli_bytes = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "100"])
-    assert_test(r_cli_bytes.returncode == 0 and "max_result_bytes limit reached" in r_cli_bytes.stderr and "1:2026-09-07" in r_cli_bytes.stdout,
-                "Budget CLI: --max-result-bytes reports early termination (cite Test 107)", "early termination emitted to stderr")
+    # Boundary 1: First record cannot fit (62 bytes < 63)
+    r_cli_62 = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "62"])
+    # Boundary 2: Exactly fits first record (63 bytes)
+    r_cli_63 = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "63"])
+    # Boundary 3: One byte short of second record (169 bytes vs 170 bytes)
+    r_cli_169 = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "169"])
+    r_cli_170 = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "170"])
+
+    cli_bytes_pass = (
+        r_cli_62.returncode == 0 and len(r_cli_62.stdout.encode("utf-8")) == 0 and "max_result_bytes limit reached" in r_cli_62.stderr and
+        r_cli_63.returncode == 0 and len(r_cli_63.stdout.encode("utf-8")) == 63 and r_cli_63.stdout == "1:2026-09-07T08:00:01.123Z [INFO] Service started on port 8080\n" and "max_result_bytes limit reached" in r_cli_63.stderr and
+        r_cli_169.returncode == 0 and len(r_cli_169.stdout.encode("utf-8")) == 63 and r_cli_169.stdout.endswith("\n") and
+        r_cli_170.returncode == 0 and len(r_cli_170.stdout.encode("utf-8")) == 170 and r_cli_170.stdout.endswith("\n")
+    )
+    assert_test(cli_bytes_pass,
+                "Budget CLI: --max-result-bytes exact bytes and record boundaries (cite Test 107)",
+                "verified 62B fail-closed (0B), 63B exact 1st line (63B), 169B short 2nd line (63B), 170B exact 2 lines (170B)")
 
     # MCP Search: limits canonical records in structuredContent
     mcp_bud_req = json.dumps({
@@ -289,16 +303,33 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     assert_test(sc["complete"] is False and sc["truncated"] is True and sc["termination_reason"] == "max_total_matches",
                 "Budget MCP Search: Truthful truncation metadata on max_total_matches", "truncated=true, reason=max_total_matches")
 
-    # MCP Search: max_result_bytes (cite Test 107)
-    mcp_bytes_req = json.dumps({
-        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
-        "params": {"name": "trg_search", "arguments": {"paths": [str(fixtures_dir / "service.log")], "pattern": "INFO", "max_result_bytes": 200}}
-    }) + "\n"
-    r_mcp_bytes = run_trg_cmd(trg, ["--mcp"], input_data=init_req + notif + mcp_bytes_req)
-    resps_bytes = [json.loads(l) for l in r_mcp_bytes.stdout.strip().split("\n") if l.strip()]
-    sc_bytes = resps_bytes[1]["result"]["structuredContent"]
-    assert_test(sc_bytes["complete"] is False and sc_bytes["truncated"] is True and sc_bytes["termination_reason"] == "max_result_bytes",
-                "Budget MCP Search: max_result_bytes enforces truncation metadata (cite Test 107)", "complete=false, truncated=true, reason=max_result_bytes")
+    # MCP Search: max_result_bytes canonical record byte accounting & boundaries (cite Test 107)
+    # Boundary 1: First record cannot fit (352 bytes < 353)
+    # Boundary 2: Exactly fits first record (353 bytes)
+    # Boundary 3: One byte short of second record (629 bytes vs 630 bytes)
+    def call_mcp_search_bytes(byte_val):
+        req = json.dumps({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"paths": [str(fixtures_dir / "service.log")], "pattern": "[INFO]", "max_result_bytes": byte_val}}
+        }) + "\n"
+        r = run_trg_cmd(trg, ["--mcp"], input_data=init_req + notif + req)
+        resps = [json.loads(l) for l in r.stdout.strip().split("\n") if l.strip()]
+        return resps[1]["result"]["structuredContent"]
+
+    sc_352 = call_mcp_search_bytes(352)
+    sc_353 = call_mcp_search_bytes(353)
+    sc_629 = call_mcp_search_bytes(629)
+    sc_630 = call_mcp_search_bytes(630)
+
+    mcp_bytes_pass = (
+        sc_352["stats"]["matches_emitted"] == 0 and sc_352["stats"]["budgeted_record_bytes_emitted"] == 0 and sc_352["truncated"] is True and sc_352["termination_reason"] == "max_result_bytes" and
+        sc_353["stats"]["matches_emitted"] == 1 and sc_353["stats"]["budgeted_record_bytes_emitted"] == 353 and sc_353["truncated"] is True and sc_353["termination_reason"] == "max_result_bytes" and
+        sc_629["stats"]["matches_emitted"] == 1 and sc_629["stats"]["budgeted_record_bytes_emitted"] == 353 and sc_629["truncated"] is True and sc_629["termination_reason"] == "max_result_bytes" and
+        sc_630["stats"]["matches_emitted"] == 2 and sc_630["stats"]["budgeted_record_bytes_emitted"] == 630 and sc_630["truncated"] is True and sc_630["termination_reason"] == "max_result_bytes"
+    )
+    assert_test(mcp_bytes_pass,
+                "Budget MCP Search: Canonical record bytes accounting & boundaries (cite Test 107)",
+                "verified 352B fail-closed (0B), 353B exact 1st record (353B), 629B short 2nd record (353B), 630B exact 2 records (630B)")
 
     # MCP View JSON: bounds content[0].text UTF-8 serialized length with truthful truncation
     view_bud_req = json.dumps({
@@ -485,8 +516,11 @@ def classify_gap1_result(
     if returncode not in (0, 1):
         return "unexpected_failure", f"Unexpected exit code {returncode}, stderr: {stderr.strip()}"
 
-    if returncode == 1 and stdout.strip() == "":
-        return "reproduced", "Matches silently filtered out because detect_lexical_dialect fell back to Generic (treating '//' as comment)"
+    if returncode == 1:
+        if stdout.strip() == "" and stderr.strip() == "":
+            return "reproduced", "Matches silently filtered out because detect_lexical_dialect fell back to Generic (treating '//' as comment)"
+        else:
+            return "unexpected_failure", f"Exit 1 with unexpected stdout ({stdout!r}) or stderr ({stderr!r})"
     elif returncode == 0:
         expected_line = "2:2026-09-07T08:00:02.456Z [INFO] Incoming request: GET http://api.domain.internal/v1/health//check#status"
         if expected_line in stdout:
@@ -508,7 +542,7 @@ def classify_gap2_result(
     Returns (status, actual_behavior).
     status must strictly be one of: 'reproduced', 'resolved', 'unexpected_failure'.
     Checks crashes/signals/errors first before classifying gap features.
-    Verifies full target line integrity on 'resolved'.
+    Verifies valid block format and full target line integrity on BOTH 'reproduced' and 'resolved'.
     """
     if timed_out or exception_msg is not None:
         return "unexpected_failure", f"Process execution failed: {exception_msg or 'timeout'}"
@@ -519,7 +553,12 @@ def classify_gap2_result(
 
     expected_line = "3:Special characters: [brackets], {braces}, (parens), $dollar, *star."
     if "[block:" in stdout:
-        return "reproduced", "Synthesized [block: ...] on non-code plain text because detect_syntax_family fell back to Brace"
+        import re
+        has_valid_block_header = bool(re.search(r"^\[block:\s*L\d+(-L\d+)?\]", stdout, re.MULTILINE))
+        if has_valid_block_header and expected_line in stdout:
+            return "reproduced", "Synthesized [block: ...] on non-code plain text because detect_syntax_family fell back to Brace"
+        else:
+            return "unexpected_failure", f"Corrupted block header or missing/truncated target line on reproduction: {stdout!r}"
     else:
         if expected_line in stdout:
             return "resolved", "Safely fell back to plain lines without block synthesis and preserved target line"
@@ -528,7 +567,7 @@ def classify_gap2_result(
 
 
 def run_gap_reporter_self_tests():
-    log("Running 12 anomaly self-tests on gap classifiers...")
+    log("Running 15 anomaly self-tests on gap classifiers...")
     # Gap 1 tests:
     # 1. Normal reproduced
     st1, _ = classify_gap1_result(1, "", "")
@@ -558,28 +597,40 @@ def run_gap_reporter_self_tests():
     st7, _ = classify_gap1_result(0, "", "", timed_out=True)
     assert st7 == "unexpected_failure", f"Self-test 7 failed: {st7}"
 
+    # 8. Anomaly: exit 1 with corrupted non-empty stdout
+    st8_extra, _ = classify_gap1_result(1, "unexpected text output on exit 1", "")
+    assert st8_extra == "unexpected_failure", f"Self-test 8 failed: {st8_extra}"
+
     # Gap 2 tests:
-    # 8. Normal reproduced (synthesized block)
+    # 9. Normal reproduced (synthesized block)
     st8, _ = classify_gap2_result(0, "[block: L1-L5]\n3:Special characters: [brackets], {braces}, (parens), $dollar, *star.\n", "")
-    assert st8 == "reproduced", f"Self-test 8 failed: {st8}"
+    assert st8 == "reproduced", f"Self-test 9 failed: {st8}"
 
-    # 9. Normal resolved (plain line without block header)
+    # 10. Normal resolved (plain line without block header)
     st9, _ = classify_gap2_result(0, "3:Special characters: [brackets], {braces}, (parens), $dollar, *star.\n", "")
-    assert st9 == "resolved", f"Self-test 9 failed: {st9}"
+    assert st9 == "resolved", f"Self-test 10 failed: {st9}"
 
-    # 10. Anomaly: exit code 1 (search missed)
+    # 11. Anomaly: exit code 1 (search missed)
     st10, _ = classify_gap2_result(1, "", "")
-    assert st10 == "unexpected_failure", f"Self-test 10 failed: {st10}"
+    assert st10 == "unexpected_failure", f"Self-test 11 failed: {st10}"
 
-    # 11. Anomaly: crash by signal (e.g. SIGABRT, rc = -6)
+    # 12. Anomaly: crash by signal (e.g. SIGABRT, rc = -6)
     st11, _ = classify_gap2_result(-6, "", "")
-    assert st11 == "unexpected_failure", f"Self-test 11 failed: {st11}"
+    assert st11 == "unexpected_failure", f"Self-test 12 failed: {st11}"
 
-    # 12. Anomaly: exit 0 without [block: but truncated/corrupted stdout
+    # 13. Anomaly: exit 0 without [block: but truncated/corrupted stdout
     st12, _ = classify_gap2_result(0, "3:Special characters truncated", "")
-    assert st12 == "unexpected_failure", f"Self-test 12 failed: {st12}"
+    assert st12 == "unexpected_failure", f"Self-test 13 failed: {st12}"
 
-    log("  [PASS] Gap classifier anomaly self-tests passed (12/12 scenarios verified).")
+    # 14. Anomaly: broken block header format (e.g. injected '[block: BROKEN')
+    st13, _ = classify_gap2_result(0, "[block: BROKEN", "")
+    assert st13 == "unexpected_failure", f"Self-test 14 failed: {st13}"
+
+    # 15. Anomaly: valid block header but missing target line
+    st14, _ = classify_gap2_result(0, "[block: L1-L5]\nOther text entirely\n", "")
+    assert st14 == "unexpected_failure", f"Self-test 15 failed: {st14}"
+
+    log("  [PASS] Gap classifier anomaly self-tests passed (15/15 scenarios verified).")
 
 
 def run_known_gaps_reporter(trg: str, fixtures_dir: pathlib.Path) -> dict:
