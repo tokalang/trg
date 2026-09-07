@@ -11,6 +11,7 @@ Requires explicit --trg <path_to_binary>. Fails closed if --trg is omitted or in
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -50,6 +51,18 @@ def run_trg_cmd(trg_bin: str, args: list, cwd: str = None, input_data: str = Non
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        timeout=timeout
+    )
+
+
+def run_trg_cmd_raw(trg_bin: str, args: list, cwd: str = None, input_data: bytes = None, timeout: int = 30) -> subprocess.CompletedProcess:
+    cmd = [trg_bin] + args
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        input=input_data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         timeout=timeout
     )
 
@@ -110,6 +123,145 @@ def measure_isolated_rss_mib(trg_bin: str, args: list, cwd: str = None, timeout:
                 return raw_rss / 1024.0
         else:
             raise RuntimeError(f"Child process failed with status: {status}")
+
+
+def compute_canonical_budgeted_bytes(sc: dict) -> int:
+    """Independently computes the canonical budgeted bytes from actual files, segments, and records
+    according to trg's canonical record budgeting specification (cite Test 107 / src/printer.tk)."""
+    files = sc.get("files", [])
+    segments = sc.get("segments", [])
+    if not files and not segments:
+        return 0
+    total_bytes = 0
+    for i, f in enumerate(files):
+        if i > 0:
+            total_bytes += 1
+        fe_str = json.dumps({"id": f.get("id", 0), "path": f.get("path", ""), "kind": f.get("kind", "workspace_relative")}, separators=(",", ":"))
+        total_bytes += len(fe_str.encode("utf-8"))
+    for si, seg in enumerate(segments):
+        if si > 0:
+            total_bytes += 1
+        fid = seg.get("file_id", 0)
+        spass = seg.get("pass", "all")
+        seg_open = "{\"file_id\":" + str(fid) + ",\"pass\":\"" + str(spass) + "\",\"records\":["
+        total_bytes += len(seg_open.encode("utf-8")) + 2  # closing ]}
+        records = seg.get("records", [])
+        for ri, rec in enumerate(records):
+            if ri > 0:
+                total_bytes += 1
+            rec_dict = {
+                "kind": rec.get("kind", "match"),
+                "group_id": rec.get("group_id", 0),
+                "line_number": rec.get("line_number", 0),
+                "absolute_offset": rec.get("absolute_offset", 0),
+                "text": rec.get("text", "")
+            }
+            if rec.get("kind") == "match":
+                rec_dict["submatches"] = rec.get("submatches", [])
+                rec_dict["scope"] = rec.get("scope")
+                rec_dict["block_truncated"] = rec.get("block_truncated", False)
+                if "block_range" in rec and rec["block_range"] is not None:
+                    rec_dict["block_range"] = rec["block_range"]
+                if "snippet" in rec and rec["snippet"] is not None:
+                    rec_dict["snippet"] = rec["snippet"]
+            else:
+                rec_dict["block_truncated"] = rec.get("block_truncated", False)
+            rec_json = json.dumps(rec_dict, separators=(",", ":"))
+            total_bytes += len(rec_json.encode("utf-8"))
+    return total_bytes
+
+
+def validate_mcp_budget_case(sc: dict, max_result_bytes: int, expected_matches: int, expected_records: list) -> tuple[bool, str]:
+    """Validates structural correctness, truthful truncation metadata, record contents,
+    and compares independently calculated canonical bytes against both reported stats
+    and max_result_bytes limit."""
+    if not (sc.get("truncated") is True and sc.get("termination_reason") == "max_result_bytes"):
+        return False, "Truncation metadata invalid"
+
+    stats = sc.get("stats", {})
+    if stats.get("matches_emitted") != expected_matches:
+        return False, f"stats.matches_emitted ({stats.get('matches_emitted')}) != expected ({expected_matches})"
+
+    calc_bytes = compute_canonical_budgeted_bytes(sc)
+    reported_bytes = stats.get("budgeted_record_bytes_emitted")
+    if calc_bytes != reported_bytes:
+        return False, f"Calculated bytes {calc_bytes} != reported bytes {reported_bytes}"
+    if calc_bytes > max_result_bytes:
+        return False, f"Calculated bytes {calc_bytes} exceeds budget limit {max_result_bytes}"
+
+    files = sc.get("files", [])
+    segments = sc.get("segments", [])
+
+    if expected_matches == 0:
+        if len(files) != 0:
+            return False, f"Files array not empty on 0 matches ({len(files)} items)"
+        if len(segments) != 0 and any(len(s.get("records", [])) > 0 for s in segments):
+            return False, "Segments array contains records when 0 matches expected"
+        return True, "Valid 0 matches (fail-closed)"
+
+    if len(files) != 1 or not files[0].get("path", "").endswith("service.log"):
+        return False, f"Invalid files table: {files!r}"
+    if len(segments) != 1 or segments[0].get("file_id") != 0:
+        return False, f"Invalid segments table: {segments!r}"
+
+    actual_recs = segments[0].get("records", [])
+    if len(actual_recs) != expected_matches:
+        return False, f"Actual records count {len(actual_recs)} != expected {expected_matches}"
+
+    for i, exp in enumerate(expected_records):
+        act = actual_recs[i]
+        for key in ["kind", "group_id", "line_number", "absolute_offset", "text", "submatches", "scope", "block_truncated"]:
+            if act.get(key) != exp.get(key):
+                return False, f"Record {i} field '{key}' mismatch: expected {exp.get(key)!r}, got {act.get(key)!r}"
+
+    return True, "Valid"
+
+
+def run_budget_validator_self_tests():
+    log("Running anomaly self-tests on budget validator...")
+    dummy_sc = {
+        "truncated": True,
+        "termination_reason": "max_result_bytes",
+        "stats": {
+            "matches_emitted": 1,
+            "budgeted_record_bytes_emitted": 353
+        },
+        "files": [{"id": 0, "path": "tests/fixtures/multi_lang/service.log", "kind": "workspace_relative"}],
+        "segments": [{
+            "file_id": 0, "pass": "all",
+            "records": [{
+                "kind": "match", "group_id": 0, "line_number": 1, "absolute_offset": 0,
+                "text": "2026-09-07T08:00:01.123Z [INFO] Service started on port 8080",
+                "submatches": [{"match_text": "[INFO]", "start": 25, "end": 31}],
+                "scope": None, "block_truncated": False
+            }]
+        }]
+    }
+    exp_rec = dummy_sc["segments"][0]["records"][0]
+
+    # 1. Genuine single-match case passes
+    ok1, _ = validate_mcp_budget_case(dummy_sc, 353, 1, [exp_rec])
+    assert ok1 is True, f"Self-test 1 failed: {ok1}"
+
+    # 2. Fault: records replaced with 10,000-char corrupted record while keeping stats
+    corrupt_sc = copy.deepcopy(dummy_sc)
+    corrupt_sc["segments"][0]["records"][0]["text"] = "X" * 10000
+    ok2, _ = validate_mcp_budget_case(corrupt_sc, 353, 1, [exp_rec])
+    assert ok2 is False, "Self-test 2 failed: validator must reject 10,000-char corrupted record"
+
+    # 3. Fault: stats spoofed to zero matches while records retained
+    spoofed_sc = copy.deepcopy(dummy_sc)
+    spoofed_sc["stats"]["matches_emitted"] = 0
+    spoofed_sc["stats"]["budgeted_record_bytes_emitted"] = 0
+    ok3, _ = validate_mcp_budget_case(spoofed_sc, 352, 0, [])
+    assert ok3 is False, "Self-test 3 failed: validator must reject non-empty records on 0 expected matches"
+
+    # 4. Fault: calculated canonical bytes exceed budget limit
+    over_limit_sc = copy.deepcopy(dummy_sc)
+    ok4, _ = validate_mcp_budget_case(over_limit_sc, 300, 1, [exp_rec])
+    assert ok4 is False, "Self-test 4 failed: validator must reject calculated bytes exceeding budget limit"
+
+    log("  [PASS] Budget validator anomaly self-tests passed (4/4 scenarios verified).")
 
 
 # ---------------------------------------------------------------------------
@@ -274,23 +426,24 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
                 "Budget CLI: --max-total-matches limits printed matches exactly", "2 lines emitted")
 
     # CLI budget: --max-result-bytes (cite Test 107)
+    # Using raw bytes execution to eliminate newline normalization
     # Boundary 1: First record cannot fit (62 bytes < 63)
-    r_cli_62 = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "62"])
+    r_cli_62 = run_trg_cmd_raw(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "62"])
     # Boundary 2: Exactly fits first record (63 bytes)
-    r_cli_63 = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "63"])
+    r_cli_63 = run_trg_cmd_raw(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "63"])
     # Boundary 3: One byte short of second record (169 bytes vs 170 bytes)
-    r_cli_169 = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "169"])
-    r_cli_170 = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "170"])
+    r_cli_169 = run_trg_cmd_raw(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "169"])
+    r_cli_170 = run_trg_cmd_raw(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "170"])
 
     cli_bytes_pass = (
-        r_cli_62.returncode == 0 and len(r_cli_62.stdout.encode("utf-8")) == 0 and "max_result_bytes limit reached" in r_cli_62.stderr and
-        r_cli_63.returncode == 0 and len(r_cli_63.stdout.encode("utf-8")) == 63 and r_cli_63.stdout == "1:2026-09-07T08:00:01.123Z [INFO] Service started on port 8080\n" and "max_result_bytes limit reached" in r_cli_63.stderr and
-        r_cli_169.returncode == 0 and len(r_cli_169.stdout.encode("utf-8")) == 63 and r_cli_169.stdout.endswith("\n") and
-        r_cli_170.returncode == 0 and len(r_cli_170.stdout.encode("utf-8")) == 170 and r_cli_170.stdout.endswith("\n")
+        r_cli_62.returncode == 0 and len(r_cli_62.stdout) == 0 and b"max_result_bytes limit reached" in r_cli_62.stderr and
+        r_cli_63.returncode == 0 and len(r_cli_63.stdout) == 63 and r_cli_63.stdout == b"1:2026-09-07T08:00:01.123Z [INFO] Service started on port 8080\n" and b"max_result_bytes limit reached" in r_cli_63.stderr and
+        r_cli_169.returncode == 0 and len(r_cli_169.stdout) == 63 and r_cli_169.stdout.endswith(b"\n") and
+        r_cli_170.returncode == 0 and len(r_cli_170.stdout) == 170 and r_cli_170.stdout.endswith(b"\n")
     )
     assert_test(cli_bytes_pass,
                 "Budget CLI: --max-result-bytes exact bytes and record boundaries (cite Test 107)",
-                "verified 62B fail-closed (0B), 63B exact 1st line (63B), 169B short 2nd line (63B), 170B exact 2 lines (170B)")
+                "verified 62B fail-closed (0B), 63B exact 1st line (63B), 169B short 2nd line (63B), 170B exact 2 lines (170B) via raw binary stream")
 
     # MCP Search: limits canonical records in structuredContent
     mcp_bud_req = json.dumps({
@@ -307,6 +460,20 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     # Boundary 1: First record cannot fit (352 bytes < 353)
     # Boundary 2: Exactly fits first record (353 bytes)
     # Boundary 3: One byte short of second record (629 bytes vs 630 bytes)
+    # Boundary 4: Exactly fits two records (630 bytes)
+    exp_rec1 = {
+        "kind": "match", "group_id": 0, "line_number": 1, "absolute_offset": 0,
+        "text": "2026-09-07T08:00:01.123Z [INFO] Service started on port 8080",
+        "submatches": [{"match_text": "[INFO]", "start": 25, "end": 31}],
+        "scope": None, "block_truncated": False
+    }
+    exp_rec2 = {
+        "kind": "match", "group_id": 1, "line_number": 2, "absolute_offset": 61,
+        "text": "2026-09-07T08:00:02.456Z [INFO] Incoming request: GET http://api.domain.internal/v1/health//check#status",
+        "submatches": [{"match_text": "[INFO]", "start": 25, "end": 31}],
+        "scope": None, "block_truncated": False
+    }
+
     def call_mcp_search_bytes(byte_val):
         req = json.dumps({
             "jsonrpc": "2.0", "id": 4, "method": "tools/call",
@@ -321,15 +488,56 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     sc_629 = call_mcp_search_bytes(629)
     sc_630 = call_mcp_search_bytes(630)
 
-    mcp_bytes_pass = (
-        sc_352["stats"]["matches_emitted"] == 0 and sc_352["stats"]["budgeted_record_bytes_emitted"] == 0 and sc_352["truncated"] is True and sc_352["termination_reason"] == "max_result_bytes" and
-        sc_353["stats"]["matches_emitted"] == 1 and sc_353["stats"]["budgeted_record_bytes_emitted"] == 353 and sc_353["truncated"] is True and sc_353["termination_reason"] == "max_result_bytes" and
-        sc_629["stats"]["matches_emitted"] == 1 and sc_629["stats"]["budgeted_record_bytes_emitted"] == 353 and sc_629["truncated"] is True and sc_629["termination_reason"] == "max_result_bytes" and
-        sc_630["stats"]["matches_emitted"] == 2 and sc_630["stats"]["budgeted_record_bytes_emitted"] == 630 and sc_630["truncated"] is True and sc_630["termination_reason"] == "max_result_bytes"
-    )
-    assert_test(mcp_bytes_pass,
+    v352, r352 = validate_mcp_budget_case(sc_352, 352, 0, [])
+    v353, r353 = validate_mcp_budget_case(sc_353, 353, 1, [exp_rec1])
+    v629, r629 = validate_mcp_budget_case(sc_629, 629, 1, [exp_rec1])
+    v630, r630 = validate_mcp_budget_case(sc_630, 630, 2, [exp_rec1, exp_rec2])
+
+    legit_all_pass = v352 and v353 and v629 and v630
+
+    # Fault Injection Verification: Assert validator strictly rejects corrupted / 10,000-char records
+    # while reported stats fields remain spoofed as valid.
+    fi_352 = copy.deepcopy(sc_352)
+    fi_352["files"] = [{"id": 0, "path": "service.log", "kind": "workspace_relative"}]
+    fi_352["segments"] = [{"file_id": 0, "pass": "all", "records": [{
+        "kind": "match", "group_id": 0, "line_number": 1, "absolute_offset": 0,
+        "text": "X" * 10000, "submatches": [{"match_text": "X", "start": 0, "end": 1}],
+        "scope": None, "block_truncated": False
+    }]}]
+    v_fi1, _ = validate_mcp_budget_case(fi_352, 352, 0, [])
+
+    fi_353 = copy.deepcopy(sc_353)
+    fi_353["segments"][0]["records"] = [{
+        "kind": "match", "group_id": 0, "line_number": 1, "absolute_offset": 0,
+        "text": "X" * 10000, "submatches": [{"match_text": "X", "start": 0, "end": 1}],
+        "scope": None, "block_truncated": False
+    }]
+    v_fi2, _ = validate_mcp_budget_case(fi_353, 353, 1, [exp_rec1])
+
+    fi_629 = copy.deepcopy(sc_629)
+    fi_629["segments"][0]["records"] = [{
+        "kind": "match", "group_id": 0, "line_number": 1, "absolute_offset": 0,
+        "text": "X" * 10000, "submatches": [{"match_text": "X", "start": 0, "end": 1}],
+        "scope": None, "block_truncated": False
+    }]
+    v_fi3, _ = validate_mcp_budget_case(fi_629, 629, 1, [exp_rec1])
+
+    fi_630 = copy.deepcopy(sc_630)
+    fi_630["segments"][0]["records"] = [
+        exp_rec1,
+        {
+            "kind": "match", "group_id": 1, "line_number": 2, "absolute_offset": 61,
+            "text": "X" * 10000, "submatches": [{"match_text": "X", "start": 0, "end": 1}],
+            "scope": None, "block_truncated": False
+        }
+    ]
+    v_fi4, _ = validate_mcp_budget_case(fi_630, 630, 2, [exp_rec1, exp_rec2])
+
+    faults_caught = (not v_fi1) and (not v_fi2) and (not v_fi3) and (not v_fi4)
+
+    assert_test(legit_all_pass and faults_caught,
                 "Budget MCP Search: Canonical record bytes accounting & boundaries (cite Test 107)",
-                "verified 352B fail-closed (0B), 353B exact 1st record (353B), 629B short 2nd record (353B), 630B exact 2 records (630B)")
+                "verified 352B fail-closed (0B), 353B exact 1st record (353B), 629B short 2nd record (353B), 630B exact 2 records (630B); 4 fault injections caught")
 
     # MCP View JSON: bounds content[0].text UTF-8 serialized length with truthful truncation
     view_bud_req = json.dumps({
@@ -723,8 +931,9 @@ def main():
     log(f"  Binary SHA-256:    {binary_sha256}")
     log(f"  Platform:          {platform.system()} {platform.machine()}")
 
-    # Run self-tests for gap classifier integrity
+    # Run self-tests for anomaly and integrity verification
     run_gap_reporter_self_tests()
+    run_budget_validator_self_tests()
 
     # Run Section 1: Core Regression Gate
     s1 = run_core_regression_gate(str(trg_path), fixtures_dir, repo_root)

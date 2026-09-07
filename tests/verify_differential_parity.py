@@ -42,7 +42,7 @@ def run_cli_binary(bin_path: str, args: list, cwd: str = None) -> subprocess.Com
     )
 
 
-def run_mcp_binary(bin_path: str, request_bytes: bytes, cwd: str = None) -> tuple[int, bytes, bytes]:
+def run_mcp_binary(bin_path: str, request_bytes: bytes, cwd: str = None, timeout: float = 30.0) -> tuple[int, bytes, bytes]:
     cmd = [bin_path, "--mcp"]
     p = subprocess.Popen(
         cmd,
@@ -58,8 +58,57 @@ def run_mcp_binary(bin_path: str, request_bytes: bytes, cwd: str = None) -> tupl
         "jsonrpc": "2.0", "method": "notifications/initialized"
     }).encode("utf-8") + b"\n"
 
-    stdout, stderr = p.communicate(input=init_bytes + notif_bytes + request_bytes, timeout=30)
+    try:
+        stdout, stderr = p.communicate(input=init_bytes + notif_bytes + request_bytes, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        stdout, stderr = p.communicate()
+        raise
     return p.returncode, stdout, stderr
+
+
+def check_mcp_parity(rc_b: int, rc_c: int, out_b: bytes, out_c: bytes, err_b: bytes, err_c: bytes, base_version: str, cand_version: str) -> tuple[bool, str]:
+    if rc_b != rc_c:
+        return False, f"returncode mismatch: base={rc_b}, cand={rc_c}"
+    if err_b != err_c:
+        return False, f"stderr mismatch: base={len(err_b)} bytes, cand={len(err_c)} bytes"
+    if out_b == out_c:
+        return True, f"exact binary match ({len(out_b)} bytes stdout, {len(err_b)} bytes stderr)"
+
+    # If outputs differ, verify that only declared serverInfo.version changed while tool response is 100% byte-identical
+    lines_b = [l for l in out_b.strip().split(b"\n") if l.strip()]
+    lines_c = [l for l in out_c.strip().split(b"\n") if l.strip()]
+    if len(lines_b) != len(lines_c) or len(lines_b) < 2:
+        return False, f"line count mismatch: base={len(lines_b)}, cand={len(lines_c)}"
+
+    for idx in range(1, len(lines_b)):
+        if lines_b[idx] != lines_c[idx]:
+            return False, f"tool response line {idx} byte mismatch (base={len(lines_b[idx])}B, cand={len(lines_c[idx])}B)"
+
+    try:
+        init_b = json.loads(lines_b[0].decode("utf-8"))
+        init_c = json.loads(lines_c[0].decode("utf-8"))
+    except Exception as e:
+        return False, f"JSON parse error on initialize response: {e}"
+
+    import re
+    m_b = re.search(r"(\d+\.\d+\.\d+)", base_version)
+    m_c = re.search(r"(\d+\.\d+\.\d+)", cand_version)
+    b_semver = m_b.group(1) if m_b else base_version
+    c_semver = m_c.group(1) if m_c else cand_version
+
+    b_ver = init_b.get("result", {}).get("serverInfo", {}).get("version")
+    c_ver = init_c.get("result", {}).get("serverInfo", {}).get("version")
+    if b_ver != b_semver or c_ver != c_semver:
+        return False, f"Unexpected serverInfo.version: base={b_ver} (expected {b_semver}), cand={c_ver} (expected {c_semver})"
+
+    import copy
+    init_c_norm = copy.deepcopy(init_c)
+    init_c_norm["result"]["serverInfo"]["version"] = b_ver
+    if init_b != init_c_norm:
+        return False, "Non-version fields in initialize response differ"
+
+    return True, f"exact binary match with declared version delta ({b_semver} -> {c_semver})"
 
 
 def main():
@@ -177,14 +226,12 @@ def main():
     rc_b, out_b, err_b = run_mcp_binary(str(base_path), req_search, cwd=str(repo_root))
     rc_c, out_c, err_c = run_mcp_binary(str(cand_path), req_search, cwd=str(repo_root))
 
-    mcp_search_passed = (rc_b == rc_c and out_b == out_c and err_b == err_c)
+    mcp_search_passed, m_detail = check_mcp_parity(rc_b, rc_c, out_b, out_c, err_b, err_c, base_version, cand_version)
     if not mcp_search_passed:
         all_passed = False
         m_status = "FAIL"
-        m_detail = f"rc_match={rc_b == rc_c}, out_match={out_b == out_c}, err_match={err_b == err_c}"
     else:
         m_status = "PASS"
-        m_detail = f"exact binary match ({len(out_b)} bytes stdout, {len(err_b)} bytes stderr)"
 
     results.append({
         "id": "MCP-01",
@@ -204,14 +251,12 @@ def main():
     rc_b, out_b, err_b = run_mcp_binary(str(base_path), req_view, cwd=str(repo_root))
     rc_c, out_c, err_c = run_mcp_binary(str(cand_path), req_view, cwd=str(repo_root))
 
-    mcp_view_passed = (rc_b == rc_c and out_b == out_c and err_b == err_c)
+    mcp_view_passed, mv_detail = check_mcp_parity(rc_b, rc_c, out_b, out_c, err_b, err_c, base_version, cand_version)
     if not mcp_view_passed:
         all_passed = False
         mv_status = "FAIL"
-        mv_detail = f"rc_match={rc_b == rc_c}, out_match={out_b == out_c}, err_match={err_b == err_c}"
     else:
         mv_status = "PASS"
-        mv_detail = f"exact binary match ({len(out_b)} bytes stdout, {len(err_b)} bytes stderr)"
 
     results.append({
         "id": "MCP-02",
