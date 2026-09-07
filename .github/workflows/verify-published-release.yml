@@ -191,11 +191,15 @@ jobs:
         run: |
           tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.0' }}"
           ver="${tag#v}"
+          base_url="https://github.com/tokalang/trg/releases/download/${tag}"
+          curl -fsSL -o SHA256SUMS "$base_url/SHA256SUMS"
+          x64_sha=$(grep "trg-${tag}-windows-x64.zip" SHA256SUMS | awk '{print $1}')
+          arm64_sha=$(grep "trg-${tag}-windows-arm64.zip" SHA256SUMS | awk '{print $1}')
           python3 scripts/generate_winget_manifest.py \
             --version "$ver" \
             --tag "$tag" \
-            --x64-sha "A66705073EA8AC64BB19753EE6D6CE83FB213AB2783D5B1EA8D7F7B73477387E" \
-            --arm64-sha "4246D05B59DB36BA8EFFAA2FEC97D7FC5F7AAE6189CF7DD2D083373960A78CA4" \
+            --x64-sha "$x64_sha" \
+            --arm64-sha "$arm64_sha" \
             --output-dir winget
 
       - name: Validate manifest contracts locally
