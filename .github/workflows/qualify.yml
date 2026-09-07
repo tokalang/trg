@@ -169,7 +169,7 @@ jobs:
           set -euo pipefail
           windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
           clang -c build_win/trg_win_compat.c -O2 -o build_win/trg_win_compat.o
-          clang -c build_win/toka_rt.c -O2 -o build_win/toka_rt.o
+          clang -c build_win/toka_rt.c -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
           clang build_win/trg_x64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o trg.exe -lbcrypt -lws2_32 -lshell32
           ./trg.exe -V | grep -F "0.15.0"
@@ -229,7 +229,7 @@ jobs:
           set -euo pipefail
           windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
           clang -c build_win/trg_win_compat.c -O2 -o build_win/trg_win_compat.o
-          clang -c build_win/toka_rt.c -O2 -o build_win/toka_rt.o
+          clang -c build_win/toka_rt.c -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
           clang build_win/trg_arm64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o trg.exe -lbcrypt -lws2_32 -lshell32
           ./trg.exe -V | grep -F "0.15.0"
