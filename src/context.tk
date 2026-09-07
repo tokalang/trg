@@ -153,7 +153,7 @@ pub fn calculate_block_context_start(
             auto p_depth# = 0:i32
             auto found_opener# = false
             auto scan_up# = check_idx
-            loop scan_up > 0 {
+            loop true {
                 auto up_actual = (head + scan_up) % capacity
                 auto &up_l = lines.borrow(up_actual)
                 auto up_trimmed = up_l.text.as_str().trim()
@@ -173,6 +173,9 @@ pub fn calculate_block_context_start(
                 if p_depth <= 0 && (up_trimmed.starts_with("@") || up_trimmed.starts_with("#[")) {
                     found_opener = true
                     cur_snap = scan_up
+                    break
+                }
+                if scan_up == 0 {
                     break
                 }
                 scan_up = scan_up - 1

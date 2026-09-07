@@ -184,6 +184,12 @@ export const complexCalc = (x: number): number => {
     return intermediate + 1;
 };
 
+export const renderItem: (item: string) => string = (item) => {
+    return item.toUpperCase();
+};
+
+export const fnType: (x: number) => number = myFunc;
+
 export class Calculator {
     multiply = (a: number, b: number) => a * b;
 }
@@ -198,8 +204,27 @@ export class Calculator {
         calc_sym = next(s for s in syms if s["name"] == "complexCalc")
         assert calc_sym["range"] == [4, 7]  # block body
 
+        render_sym = next(s for s in syms if s["name"] == "renderItem")
+        assert render_sym["range"] == [9, 11]  # block body with function type annotation
+
+        # Non-arrow variable fnType should not be classified as a symbol
+        assert not any(s["name"] == "fnType" for s in syms)
+
         cls_sym = next(s for s in syms if s["name"] == "Calculator")
         assert cls_sym["kind"] == "class"
+
+    # Also test file without trailing newline
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        no_nl = tmp / "no_nl.tk"
+        no_nl.write_bytes(b"fn first() {}\nfn second() {}")
+        r_nonl = subprocess.run([TRG_BIN, "symbols", str(no_nl), "--json"], capture_output=True, text=True)
+        assert r_nonl.returncode == 0, r_nonl.stderr
+        syms_nonl = json.loads(r_nonl.stdout)
+        assert len(syms_nonl) == 2
+        assert syms_nonl[0]["name"] == "first"
+        assert syms_nonl[1]["name"] == "second"
+        assert syms_nonl[1]["range"] == [2, 2]
 
 def test_cli_options():
     syntax_file = REPO_ROOT / "src" / "syntax.tk"

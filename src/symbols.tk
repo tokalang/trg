@@ -20,7 +20,7 @@ import src/syntax::{
     is_decorator_or_attr_line,
     is_multiline_decorator_closer,
     check_is_self_closed_structured,
-    index_of_arrow
+    find_arrow_function_pos
 }
 import src/printer::{u64_to_string, json_escape}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
@@ -222,18 +222,27 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
         auto *buf = raw_buf.unwrap()
         auto line_buf# = string::new()
         auto cur_line# = 1:usize
+        auto at_eof# = false
 
         loop true {
-            auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            auto n# = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            auto chunk_str# = string::new()
             if n == 0 {
                 if posix_ferror((*file) as Addr) {
                     read_err = true
+                    break
                 }
-                break
+                if line_buf.len() > 0 && !at_eof {
+                    at_eof = true
+                    chunk_str = string::from("\n")
+                } else {
+                    break
+                }
+            } else {
+                auto *c_ptr = ((*buf) as Addr) as *char
+                chunk_str = string::from_with_len(*c_ptr, n)
             }
 
-            auto *c_ptr = ((*buf) as Addr) as *char
-            auto chunk_str = string::from_with_len(*c_ptr, n)
             auto chunk_view = chunk_str.as_str()
             auto cursor# = 0:usize
 
@@ -339,7 +348,7 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                         is_self_closed = true
                     }
                     if pat_text.starts_with("const ") || pat_text.starts_with("let ") {
-                        auto arr_opt = index_of_arrow(pat_text)
+                        auto arr_opt = find_arrow_function_pos(pat_text)
                         if arr_opt.is_some() {
                             auto arr_idx = arr_opt.unwrap()
                             auto after_arr = pat_text.substr(arr_idx + 2:usize, pat_text.len - arr_idx - 2:usize).trim()
