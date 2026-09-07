@@ -8,6 +8,12 @@ import std/math::{is_finite, floor}
 import src/types::{CliOptions, OutputFormat, SearchReport, SearchDiagnostic, BudgetState, BlockRange}
 import src/path_norm::{normalize_cwd, resolves_to_root, compute_identity_key}
 import src/view::{ViewOptions, ViewResult, ViewLineRecord, execute_view_operation, parse_range_spec}
+import src/symbols::{
+    SymbolsOptions,
+    outline_symbols_file,
+    format_symbols_text_tree,
+    format_symbols_structured
+}
 import src/parse::{parse_size_bytes_strict}
 import src/syntax::{is_valid_utf8}
 import src/posix::{posix_write_stdout, posix_read_stdin_line}
@@ -654,7 +660,7 @@ pub fn run_mcp_server() -> i32 {
                                             continue
                                         }
                                     }
-                                    if tool_name.as_str() != "trg_search" && tool_name.as_str() != "trg_view" {
+                                    if tool_name.as_str() != "trg_search" && tool_name.as_str() != "trg_view" && tool_name.as_str() != "trg_symbols" {
                                         send_error(id_str.as_str(), -32602, "Invalid params: Unknown tool")
                                         continue
                                     }
@@ -1159,6 +1165,300 @@ pub fn run_mcp_server() -> i32 {
                                                             resp#.push_str("false,\"truncated\":true,\"termination_reason\":\"")
                                                             if vr.reason.len() > 0 {
                                                                 resp#.push_str(vr.reason.as_str())
+                                                            } else {
+                                                                resp#.push_str("truncated")
+                                                            }
+                                                            resp#.push_str("\"")
+                                                        } else {
+                                                            resp#.push_str("true,\"truncated\":false,\"termination_reason\":\"completed\"")
+                                                        }
+                                                        resp#.push_str("}}}}")
+                                                        resp#.push_str("\n")
+                                                        send_mcp_response(resp.as_str())
+                                                        continue
+                                                    }
+                                                    _ => {
+                                                        send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
+                                                        continue
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
+                                                continue
+                                            }
+                                        }
+                                    }
+
+                                    if tool_name.as_str() == "trg_symbols" {
+                                        match p_map.try_borrow(string::from("arguments")) {
+                                            auto Option<&JsonNode>::Some(&a_val) => {
+                                                match a_val {
+                                                    auto JsonNode::ObjectNode(&arg_map) => {
+                                                        auto iter# = arg_map.iter()
+                                                        auto unexp_opt# = Option<string>::None
+                                                        loop true {
+                                                            auto nxt = iter#.next_ref()
+                                                            if nxt.is_none() { break }
+                                                            auto entry = nxt.unwrap()
+                                                            auto k = entry.key().as_str()
+                                                            if k != "path" && k != "kinds" && k != "max_symbols" && k != "max_result_bytes" && k != "max_bytes" && k != "format" {
+                                                                unexp_opt = Option<string>::Some(entry.key().clone())
+                                                                break
+                                                            }
+                                                        }
+                                                        if unexp_opt.is_some() {
+                                                            auto err# = string::from("Invalid params: unexpected property '")
+                                                            err#.push_str(unexp_opt.unwrap().as_str())
+                                                            err#.push_str("'")
+                                                            send_error(id_str.as_str(), -32602, err.as_str())
+                                                            continue
+                                                        }
+
+                                                        auto path_str# = string::new()
+                                                        auto has_path# = false
+                                                        match arg_map.try_borrow(string::from("path")) {
+                                                            auto Option<&JsonNode>::Some(&pn) => {
+                                                                match pn {
+                                                                    auto JsonNode::StrNode(&ps) => {
+                                                                        if ps.len() > 0 {
+                                                                            path_str = ps.clone()
+                                                                            has_path = true
+                                                                        }
+                                                                    }
+                                                                    _ => {}
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if !has_path {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'path' is required and must be a non-empty string")
+                                                            continue
+                                                        }
+
+                                                        if startup_cwd.as_str() == "/" && !path_str.as_str().starts_with("/") {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: relative path cannot be safely resolved when MCP server working directory is root ('/'); please provide an absolute path")
+                                                            continue
+                                                        }
+                                                        if resolves_to_root(startup_cwd.as_str(), path_str.as_str()) {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: target path resolves to filesystem root ('/'); outlining symbols on root is not allowed in MCP mode")
+                                                            continue
+                                                        }
+
+                                                        auto kinds_opt# = Option<Vec<string>>::None
+                                                        auto kinds_err# = false
+                                                        match arg_map.try_borrow(string::from("kinds")) {
+                                                            auto Option<&JsonNode>::Some(&kn) => {
+                                                                match kn {
+                                                                    auto JsonNode::ArrayNode(&k_arr) => {
+                                                                        if k_arr.len() == 0 {
+                                                                            kinds_err = true
+                                                                        } else {
+                                                                            auto k_vec# = Vec<string>::new()
+                                                                            auto ki# = 0:usize
+                                                                            loop ki < k_arr.len() {
+                                                                                auto &k_elem = k_arr.borrow(ki)
+                                                                                match k_elem {
+                                                                                    auto JsonNode::StrNode(&ks) => {
+                                                                                        k_vec#.push(ks.clone())
+                                                                                    }
+                                                                                    _ => {
+                                                                                        kinds_err = true
+                                                                                        break
+                                                                                    }
+                                                                                }
+                                                                                ki = ki + 1
+                                                                            }
+                                                                            if !kinds_err {
+                                                                                kinds_opt = Option<Vec<string>>::Some(cede k_vec)
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {}
+                                                                    _ => {
+                                                                        kinds_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if kinds_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'kinds' must be a non-empty array of strings or null")
+                                                            continue
+                                                        }
+
+                                                        auto max_symbols_opt# = Option<usize>::None
+                                                        auto max_symbols_err# = false
+                                                        match arg_map.try_borrow(string::from("max_symbols")) {
+                                                            auto Option<&JsonNode>::Some(&ms_node) => {
+                                                                match ms_node {
+                                                                    auto JsonNode::NumNode(n) => {
+                                                                        if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 10000.0 {
+                                                                            max_symbols_opt = Option<usize>::Some(n as usize)
+                                                                        } else {
+                                                                            max_symbols_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {}
+                                                                    _ => {
+                                                                        max_symbols_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if max_symbols_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'max_symbols' must be an integer between 1 and 10000 or null")
+                                                            continue
+                                                        }
+
+                                                        auto has_mrb = arg_map.try_borrow(string::from("max_result_bytes")).is_some()
+                                                        auto has_mb = arg_map.try_borrow(string::from("max_bytes")).is_some()
+                                                        if has_mrb && has_mb {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: Cannot provide both 'max_bytes' and 'max_result_bytes'")
+                                                            continue
+                                                        }
+
+                                                        auto max_bytes_opt# = Option<usize>::Some(65536:usize)
+                                                        auto max_bytes_err# = false
+                                                        auto max_bytes_err_msg# = string::from("Invalid params: 'max_result_bytes' must be a size string (e.g. '64K'), non-negative integer, or null")
+
+                                                        auto check_bytes_node# = Option<&JsonNode>::None
+                                                        auto key_used# = "max_result_bytes"
+                                                        if has_mrb {
+                                                            check_bytes_node = arg_map.try_borrow(string::from("max_result_bytes"))
+                                                        } else if has_mb {
+                                                            check_bytes_node = arg_map.try_borrow(string::from("max_bytes"))
+                                                            key_used = "max_bytes"
+                                                        }
+
+                                                        match check_bytes_node {
+                                                            auto Option<&JsonNode>::Some(&mbn) => {
+                                                                match mbn {
+                                                                    auto JsonNode::NumNode(n) => {
+                                                                        if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
+                                                                            max_bytes_opt = Option<usize>::Some(n as usize)
+                                                                        } else {
+                                                                            max_bytes_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::StrNode(&s) => {
+                                                                        auto p_res = parse_size_bytes_strict(s.as_str(), key_used)
+                                                                        if p_res.is_ok() {
+                                                                            max_bytes_opt = Option<usize>::Some(p_res.unwrap())
+                                                                        } else {
+                                                                            max_bytes_err = true
+                                                                            max_bytes_err_msg = string::from("Invalid params: ")
+                                                                            max_bytes_err_msg#.push_str(p_res.unwrap_err().as_str())
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {
+                                                                        max_bytes_opt = Option<usize>::None
+                                                                    }
+                                                                    _ => {
+                                                                        max_bytes_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if max_bytes_err {
+                                                            send_error(id_str.as_str(), -32602, max_bytes_err_msg.as_str())
+                                                            continue
+                                                        }
+
+                                                        auto format_is_json# = false
+                                                        auto format_err# = false
+                                                        match arg_map.try_borrow(string::from("format")) {
+                                                            auto Option<&JsonNode>::Some(&fmn) => {
+                                                                match fmn {
+                                                                    auto JsonNode::StrNode(&fms) => {
+                                                                        if fms.as_str() == "json" {
+                                                                            format_is_json = true
+                                                                        } else if fms.as_str() == "text" {
+                                                                            format_is_json = false
+                                                                        } else {
+                                                                            format_err = true
+                                                                        }
+                                                                    }
+                                                                    _ => {
+                                                                        format_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if format_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'format' must be one of [\"text\", \"json\"]")
+                                                            continue
+                                                        }
+
+                                                        auto target_res = compute_identity_key(startup_cwd.as_str(), path_str.as_str())
+                                                        if target_res.is_err() {
+                                                            if format_is_json {
+                                                                send_tool_error_json(id_str.as_str(), "Failed to resolve target path")
+                                                            } else {
+                                                                send_tool_error(id_str.as_str(), "Failed to resolve target path")
+                                                            }
+                                                            continue
+                                                        }
+                                                        auto target_path = target_res.unwrap()
+
+                                                        auto sym_opts = SymbolsOptions(
+                                                            file_path = cede target_path,
+                                                            kinds = cede kinds_opt,
+                                                            max_symbols = max_symbols_opt,
+                                                            max_result_bytes = max_bytes_opt,
+                                                            json_output = format_is_json
+                                                        )
+                                                        auto sym_res = outline_symbols_file(sym_opts)
+                                                        if sym_res.is_err() {
+                                                            if format_is_json {
+                                                                send_tool_error_json(id_str.as_str(), sym_res.unwrap_err().as_str())
+                                                            } else {
+                                                                send_tool_error(id_str.as_str(), sym_res.unwrap_err().as_str())
+                                                            }
+                                                            continue
+                                                        }
+                                                        auto sr = sym_res.unwrap()
+
+                                                        auto text_content# = string::new()
+                                                        if format_is_json {
+                                                            text_content = format_symbols_structured(sr)
+                                                        } else {
+                                                            text_content = format_symbols_text_tree(sr)
+                                                        }
+
+                                                        auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
+                                                        resp#.push_str(id_str.as_str())
+                                                        resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+                                                        resp#.push_str(json_escape(text_content.as_str()).as_str())
+                                                        resp#.push_str("\"}],\"isError\":false")
+
+                                                        if server_state.negotiated_version.as_str() == "2025-11-25" {
+                                                            resp#.push_str(",\"structuredContent\":")
+                                                            resp#.push_str(format_symbols_structured(sr).as_str())
+                                                        }
+
+                                                        resp#.push_str(",\"_meta\":{\"truncated\":")
+                                                        if sr.truncated {
+                                                            resp#.push_str("true,\"reason\":\"")
+                                                            if sr.termination_reason.len() > 0 {
+                                                                resp#.push_str(sr.termination_reason.as_str())
+                                                            } else {
+                                                                resp#.push_str("truncated")
+                                                            }
+                                                            resp#.push_str("\"")
+                                                        } else {
+                                                            resp#.push_str("false,\"reason\":null")
+                                                        }
+                                                        resp#.push_str(",\"total_symbols\":")
+                                                        resp#.push_str(u64_to_string(sr.total_symbols as u64).as_str())
+                                                        resp#.push_str(",\"summary\":{\"complete\":")
+                                                        if sr.truncated {
+                                                            resp#.push_str("false,\"truncated\":true,\"termination_reason\":\"")
+                                                            if sr.termination_reason.len() > 0 {
+                                                                resp#.push_str(sr.termination_reason.as_str())
                                                             } else {
                                                                 resp#.push_str("truncated")
                                                             }

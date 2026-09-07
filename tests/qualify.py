@@ -6487,8 +6487,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         assert gap["status"] in ("reproduced", "resolved"), f"Gap {gap['gap_id']} unexpected status: {gap['status']}"
     log("Test 173 passed: 38/38 core tests passed, memory scaling verified, 2 known gaps confirmed reproduced.")
 
+    # Test 174: Instant Symbol Outline & Semantic Alignment
+    log("Test 174: Instant Symbol Outline & Semantic Alignment (trg symbols & trg_symbols)")
+    symbols_script = repo_root / "tests" / "test_symbols.py"
+    assert symbols_script.exists(), f"Symbols test script not found at {symbols_script}"
+    env_sym = dict(os.environ)
+    env_sym["TRG_BIN"] = str(pkg_bin_path)
+    r_symbols = subprocess.run([
+        sys.executable,
+        str(symbols_script)
+    ], cwd=str(repo_root), env=env_sym, capture_output=True, text=True)
+    assert r_symbols.returncode == 0, f"Symbols test suite failed (exit {r_symbols.returncode}):\n{r_symbols.stderr}\n{r_symbols.stdout}"
+    log("Test 174 passed: Instant symbol outline and semantic alignment verified.")
+
     log("=" * 60)
-    log("ALL 173 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.15.0)!")
+    log("ALL 174 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.15.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

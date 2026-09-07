@@ -17,6 +17,14 @@ pub fn get_mcp_view_output_schema() -> string {
     return string::from("{\"$id\":\"trg-mcp-view-result-v1\",\"type\":\"object\",\"properties\":{\"schema\":{\"type\":\"string\",\"const\":\"trg-mcp-view-result-v1\"},\"mode\":{\"type\":\"string\",\"enum\":[\"point\",\"range\",\"block\"]},\"path\":{\"type\":\"string\"},\"requested_line\":{\"type\":[\"integer\",\"null\"],\"minimum\":1},\"requested_range\":{\"type\":[\"array\",\"null\"],\"items\":{\"type\":\"integer\",\"minimum\":1},\"minItems\":2,\"maxItems\":2},\"detected_block_range\":{\"type\":[\"array\",\"null\"],\"items\":{\"type\":\"integer\",\"minimum\":1},\"minItems\":2,\"maxItems\":2},\"emitted_range\":{\"type\":[\"array\",\"null\"],\"items\":{\"type\":\"integer\",\"minimum\":1},\"minItems\":2,\"maxItems\":2},\"target_included\":{\"type\":[\"boolean\",\"null\"]},\"content_omitted\":{\"type\":\"boolean\"},\"complete\":{\"type\":\"boolean\"},\"eof_reached\":{\"type\":\"boolean\"},\"truncated\":{\"type\":\"boolean\"},\"termination_reason\":{\"type\":\"string\",\"enum\":[\"completed\",\"max_lines\",\"max_result_bytes\",\"max_block_lines\"]},\"lines_emitted\":{\"type\":\"integer\",\"minimum\":0},\"content_bytes_emitted\":{\"type\":\"integer\",\"minimum\":0},\"records\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"line_number\":{\"type\":\"integer\",\"minimum\":1},\"kind\":{\"type\":\"string\",\"enum\":[\"target\",\"context\"]},\"text\":{\"type\":\"string\"}},\"required\":[\"line_number\",\"kind\",\"text\"],\"additionalProperties\":false}}},\"required\":[\"schema\",\"mode\",\"path\",\"requested_line\",\"requested_range\",\"detected_block_range\",\"emitted_range\",\"target_included\",\"content_omitted\",\"complete\",\"eof_reached\",\"truncated\",\"termination_reason\",\"lines_emitted\",\"content_bytes_emitted\",\"records\"],\"additionalProperties\":false}")
 }
 
+pub fn get_mcp_symbols_input_schema() -> string {
+    return string::from("{\"type\":\"object\",\"required\":[\"path\"],\"properties\":{\"path\":{\"type\":\"string\",\"description\":\"File path to outline symbols from.\"},\"kinds\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"minItems\":1,\"description\":\"Array of symbol kinds to include (e.g. ['function', 'method', 'class', 'struct', 'interface']).\"},\"max_symbols\":{\"type\":[\"integer\",\"null\"],\"minimum\":1,\"maximum\":10000,\"default\":null,\"description\":\"Maximum number of symbols to return. Default: unlimited.\"},\"max_result_bytes\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"integer\",\"minimum\":0},{\"type\":\"null\"}],\"default\":\"64K\",\"description\":\"Maximum canonical bytes to return (default: 64K). Pass explicit null for unlimited.\"},\"max_bytes\":{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"integer\",\"minimum\":0},{\"type\":\"null\"}],\"description\":\"Deprecated alias for max_result_bytes.\"},\"format\":{\"type\":\"string\",\"enum\":[\"text\",\"json\"],\"default\":\"text\",\"description\":\"Result format in content[0].text: 'text' (default) or 'json' (canonical structured result serialized as JSON).\"}},\"additionalProperties\":false}")
+}
+
+pub fn get_mcp_symbols_output_schema() -> string {
+    return string::from("{\"$id\":\"trg-mcp-symbols-result-v1\",\"type\":\"object\",\"properties\":{\"schema\":{\"type\":\"string\",\"const\":\"trg-mcp-symbols-result-v1\"},\"path\":{\"type\":\"string\"},\"complete\":{\"type\":\"boolean\"},\"truncated\":{\"type\":\"boolean\"},\"termination_reason\":{\"type\":\"string\",\"enum\":[\"completed\",\"max_symbols\",\"max_result_bytes\"]},\"total_symbols\":{\"type\":\"integer\",\"minimum\":0},\"symbols\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\"},\"line\":{\"type\":\"integer\",\"minimum\":1},\"range\":{\"type\":\"array\",\"items\":{\"type\":[\"integer\",\"null\"],\"minimum\":1},\"minItems\":2,\"maxItems\":2},\"scope\":{\"type\":\"string\"},\"detail\":{\"type\":\"string\"}},\"required\":[\"name\",\"kind\",\"line\",\"range\",\"scope\",\"detail\"],\"additionalProperties\":false}}},\"required\":[\"schema\",\"path\",\"complete\",\"truncated\",\"termination_reason\",\"total_symbols\",\"symbols\"],\"additionalProperties\":false}")
+}
+
 pub fn format_tools_list_response(id_val: string, proto_version: str) -> string {
     auto res# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
     res#.push_str(id_val.as_str())
@@ -32,6 +40,13 @@ pub fn format_tools_list_response(id_val: string, proto_version: str) -> string 
     if proto_version == "2025-11-25" {
         res#.push_str(",\"outputSchema\":")
         res#.push_str(get_mcp_view_output_schema().as_str())
+        res#.push_str(",\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}")
+    }
+    res#.push_str("},{\"name\":\"trg_symbols\",\"description\":\"Instant symbol outline to inspect functions, methods, classes, and types with edit-ready ranges in O(1) memory.\",\"inputSchema\":")
+    res#.push_str(get_mcp_symbols_input_schema().as_str())
+    if proto_version == "2025-11-25" {
+        res#.push_str(",\"outputSchema\":")
+        res#.push_str(get_mcp_symbols_output_schema().as_str())
         res#.push_str(",\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}")
     }
     res#.push_str("}]}}\n")

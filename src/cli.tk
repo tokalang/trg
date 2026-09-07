@@ -25,6 +25,7 @@ pub fn print_help() {
     println("  trg --type-list")
     println("  trg view <PATH>:<LINE> [-C N] [--block]")
     println("  trg view <PATH> --lines <M-N>")
+    println("  trg symbols <PATH> [--json] [-k <KIND>] [--max-symbols N]")
     println("")
     println("Options:")
     println("  -e, --regexp <PATTERN>     Use PATTERN for matching (can be repeated)")

@@ -527,6 +527,20 @@ pub fn update_brace_depth(line: str, depth#: usize, dialect: LexicalDialect) {
     depth = d.brace_depth
 }
 
+pub fn index_of_arrow(s: str) -> Option<usize> {
+    if s.len < 2:usize {
+        return Option<usize>::None
+    }
+    auto i# = 0:usize
+    loop i + 1:usize < s.len {
+        if s.byte_at(i) == ('=' as char) && s.byte_at(i + 1:usize) == ('>' as char) {
+            return Option<usize>::Some(i)
+        }
+        i = i + 1
+    }
+    return Option<usize>::None
+}
+
 pub fn extract_declared_identifier(line: str) -> string {
     auto trimmed = line.trim()
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
@@ -556,7 +570,16 @@ pub fn extract_declared_identifier(line: str) -> string {
 
     auto kw_len# = 0:usize
     auto is_impl# = false
-    if s.starts_with("fn ") { kw_len = 3:usize }
+    auto is_arrow# = false
+    if s.starts_with("const ") || s.starts_with("let ") {
+        if index_of_arrow(s).is_some() {
+            is_arrow = true
+        }
+    }
+    if is_arrow {
+        if s.starts_with("const ") { kw_len = 6:usize } else { kw_len = 4:usize }
+    }
+    else if s.starts_with("fn ") { kw_len = 3:usize }
     else if s.starts_with("def ") { kw_len = 4:usize }
     else if s.starts_with("func ") { kw_len = 5:usize }
     else if s.starts_with("function ") { kw_len = 9:usize }
@@ -571,6 +594,51 @@ pub fn extract_declared_identifier(line: str) -> string {
     else { return string::from("") }
 
     auto rem# = s.substr(kw_len, s.len - kw_len).trim()
+
+    if s.starts_with("func ") && rem.starts_with("(") {
+        auto p_depth# = 0:usize
+        auto p_idx# = 0:usize
+        loop p_idx < rem.len {
+            auto c = rem.byte_at(p_idx)
+            if c == ('(' as char) {
+                p_depth = p_depth + 1
+            } else if c == (')' as char) {
+                if p_depth > 0 { p_depth = p_depth - 1 }
+                if p_depth == 0 {
+                    p_idx = p_idx + 1
+                    break
+                }
+            }
+            p_idx = p_idx + 1
+        }
+        rem = rem.substr(p_idx, rem.len - p_idx).trim()
+        if rem.len == 0 {
+            return string::from("")
+        }
+        auto first_c = rem.byte_at(0)
+        auto is_ident_start = (first_c >= ('a' as char) && first_c <= ('z' as char)) ||
+                             (first_c >= ('A' as char) && first_c <= ('Z' as char)) ||
+                             first_c == ('_' as char)
+        if !is_ident_start {
+            return string::from("")
+        }
+        auto m_end# = 0:usize
+        loop m_end < rem.len {
+            auto mc = rem.byte_at(m_end)
+            auto is_v = (mc >= ('a' as char) && mc <= ('z' as char)) ||
+                        (mc >= ('A' as char) && mc <= ('Z' as char)) ||
+                        (mc >= ('0' as char) && mc <= ('9' as char)) ||
+                        mc == ('_' as char)
+            if !is_v {
+                break
+            }
+            m_end = m_end + 1
+        }
+        auto rest_after_m = rem.substr(m_end, rem.len - m_end).trim()
+        if !rest_after_m.starts_with("(") && !rest_after_m.starts_with("[") {
+            return string::from("")
+        }
+    }
 
     if rem.starts_with("<") {
         auto g_depth# = 0:usize
@@ -605,7 +673,7 @@ pub fn extract_declared_identifier(line: str) -> string {
         auto is_valid_char = (c >= ('a' as char) && c <= ('z' as char)) ||
                              (c >= ('A' as char) && c <= ('Z' as char)) ||
                              (c >= ('0' as char) && c <= ('9' as char)) ||
-                             c == ('_' as char)
+                             c == ('_' as char) || c == ('$' as char)
         if !is_valid_char {
             break
         }
@@ -657,6 +725,16 @@ pub fn is_scope_declaration(line: str) -> bool {
        s.starts_with("interface ") || s.starts_with("trait ") || s.starts_with("type ") ||
        s.starts_with("enum ") || s.starts_with("impl ") {
         return true
+    }
+    if s.starts_with("const ") || s.starts_with("let ") {
+        auto arr_opt = index_of_arrow(s)
+        if arr_opt.is_some() {
+            auto arr_idx = arr_opt.unwrap()
+            auto after_arr = s.substr(arr_idx + 2:usize, s.len - arr_idx - 2:usize).trim()
+            if after_arr.starts_with("{") {
+                return true
+            }
+        }
     }
     return false
 }
@@ -747,6 +825,14 @@ pub fn detect_block_delimiter(line: str) -> BlockDelimiter {
         return BlockDelimiter::Paren
     }
     if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
+        auto arr_opt = index_of_arrow(s)
+        if arr_opt.is_some() {
+            auto arr_idx = arr_opt.unwrap()
+            auto after_arr = s.substr(arr_idx + 2:usize, s.len - arr_idx - 2:usize).trim()
+            if after_arr.starts_with("{") {
+                return BlockDelimiter::Brace
+            }
+        }
         auto eq_idx = s.index_of('=' as char)
         if eq_idx.is_some() {
             auto eq_pos = eq_idx.unwrap()
@@ -850,6 +936,72 @@ pub fn check_is_self_closed_line(
     }
 }
 
+pub fn is_decorator_or_attr_line(line: str) -> bool {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 {
+        return false
+    }
+    return trimmed.starts_with("@") || trimmed.starts_with("#[")
+}
+
+pub fn is_multiline_decorator_closer(line: str) -> bool {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 {
+        return false
+    }
+    return trimmed.ends_with(")") || trimmed.ends_with("]")
+}
+
+pub fn classify_symbol_kind(line: str) -> string {
+    auto trimmed = line.trim()
+    auto s# = trimmed
+    if s.starts_with("pub ") {
+        s = s.substr(4:usize, s.len - 4:usize).trim()
+    } else if s.starts_with("pub(") {
+        auto close_paren = s.index_of(')' as char)
+        if close_paren.is_some() {
+            auto idx = close_paren.unwrap() + 1:usize
+            s = s.substr(idx, s.len - idx).trim()
+        }
+    }
+    if s.starts_with("export default ") {
+        s = s.substr(15:usize, s.len - 15:usize).trim()
+    } else if s.starts_with("export ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
+    if s.starts_with("async ") {
+        s = s.substr(6:usize, s.len - 6:usize).trim()
+    }
+    if s.starts_with("inline ") {
+        s = s.substr(7:usize, s.len - 7:usize).trim()
+    }
+
+    if s.starts_with("class ") { return string::from("class") }
+    if s.starts_with("struct ") { return string::from("struct") }
+    if s.starts_with("shape ") { return string::from("shape") }
+    if s.starts_with("interface ") { return string::from("interface") }
+    if s.starts_with("trait ") { return string::from("trait") }
+    if s.starts_with("enum ") { return string::from("enum") }
+    if s.starts_with("type ") { return string::from("type") }
+    if s.starts_with("impl ") { return string::from("impl") }
+    if s.starts_with("func ") {
+        auto rem = s.substr(5:usize, s.len - 5:usize).trim()
+        if rem.starts_with("(") {
+            return string::from("method")
+        }
+        return string::from("function")
+    }
+    if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("function ") {
+        return string::from("function")
+    }
+    if (s.starts_with("const ") || s.starts_with("let ")) {
+        if index_of_arrow(s).is_some() {
+            return string::from("function")
+        }
+    }
+    return string::from("symbol")
+}
+
 pub fn detect_declaration_scope(line: str) -> string {
     auto trimmed = line.trim()
     if !is_scope_declaration(trimmed) {
@@ -870,12 +1022,34 @@ pub fn detect_declaration_scope(line: str) -> string {
         s = s.substr(6:usize, s.len - 6:usize).trim()
     }
 
-    auto is_callable = s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("function ")
+    auto is_callable = s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("function ") || s.starts_with("func ")
     auto start_search_idx = trimmed.len - s.len
 
     if is_callable {
+        auto search_pos# = start_search_idx
+        if s.starts_with("func ") {
+            auto rem_func = s.substr(5:usize, s.len - 5:usize).trim()
+            if rem_func.starts_with("(") {
+                auto p_depth# = 0:usize
+                auto p_idx# = 0:usize
+                loop p_idx < rem_func.len {
+                    auto c = rem_func.byte_at(p_idx)
+                    if c == ('(' as char) {
+                        p_depth = p_depth + 1
+                    } else if c == (')' as char) {
+                        if p_depth > 0 { p_depth = p_depth - 1 }
+                        if p_depth == 0 {
+                            p_idx = p_idx + 1
+                            break
+                        }
+                    }
+                    p_idx = p_idx + 1
+                }
+                search_pos = (trimmed.len - rem_func.len) + p_idx
+            }
+        }
         auto paren_pos# = trimmed.len
-        auto i# = start_search_idx
+        auto i# = search_pos
         loop i < trimmed.len {
             auto ch = trimmed.byte_at(i)
             if ch == ('(' as char) || ch == ('{' as char) || ch == (':' as char) {

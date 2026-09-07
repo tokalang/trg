@@ -1,0 +1,744 @@
+// Instant Symbol Outline Engine (trg symbols / trg_symbols)
+import core/str::{str}
+import core/string::{string}
+import core/option::{Option}
+import core/result::{Result}
+import std/vec::{Vec}
+import std/io::{println}
+import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
+import src/posix::{posix_ferror, print_err, posix_write_stdout}
+import src/types::{BlockDelimiter, SyntaxFamily}
+import src/syntax::{
+    detect_syntax_family,
+    detect_lexical_dialect,
+    scan_line_lexical,
+    DelimiterDepths,
+    extract_declared_identifier,
+    classify_symbol_kind,
+    detect_block_delimiter,
+    is_scope_declaration,
+    is_decorator_or_attr_line,
+    is_multiline_decorator_closer,
+    check_is_self_closed_structured,
+    index_of_arrow
+}
+import src/printer::{u64_to_string, json_escape}
+import src/parse::{parse_usize_strict, parse_size_bytes_strict}
+
+pub shape SymbolRecord (
+    name: string,
+    kind: string,
+    line: usize,
+    range_start: usize,
+    range_end: Option<usize>,
+    scope: string,
+    detail: string
+)
+
+pub shape SymbolsOptions (
+    file_path: string,
+    kinds: Option<Vec<string>>,
+    max_symbols: Option<usize>,
+    max_result_bytes: Option<usize>,
+    json_output: bool
+)
+
+pub shape SymbolsResult (
+    path: string,
+    symbols: Vec<SymbolRecord>,
+    total_symbols: usize,
+    complete: bool,
+    truncated: bool,
+    termination_reason: string
+)
+
+shape OpenSymbolEntry (
+    symbol_index: Option<usize>,
+    name: string,
+    delimiter: BlockDelimiter,
+    depth: usize,
+    indent: usize
+)
+
+fn extract_go_receiver_type(line: str) -> string {
+    auto trimmed = line.trim()
+    auto s# = trimmed
+    if s.starts_with("pub ") {
+        s = s.substr(4:usize, s.len - 4:usize).trim()
+    }
+    if !s.starts_with("func ") {
+        return string::new()
+    }
+    auto rem = s.substr(5:usize, s.len - 5:usize).trim()
+    if !rem.starts_with("(") {
+        return string::new()
+    }
+    auto p_close = rem.index_of(')' as char)
+    if p_close.is_none() {
+        return string::new()
+    }
+    auto inner = rem.substr(1:usize, p_close.unwrap() - 1:usize).trim()
+    auto star_idx = inner.index_of('*' as char)
+    auto type_part# = inner
+    if star_idx.is_some() {
+        auto si = star_idx.unwrap()
+        type_part = inner.substr(si + 1:usize, inner.len - si - 1:usize).trim()
+    } else {
+        auto space_idx = inner.index_of(' ' as char)
+        if space_idx.is_some() {
+            auto spi = space_idx.unwrap()
+            type_part = inner.substr(spi + 1:usize, inner.len - spi - 1:usize).trim()
+        }
+    }
+    auto bracket_idx = type_part.index_of('[' as char)
+    if bracket_idx.is_some() {
+        type_part = type_part.substr(0:usize, bracket_idx.unwrap()).trim()
+    }
+    return string::from(type_part)
+}
+
+fn snap_symbol_start_decorators(
+    decl_line: usize,
+    first_stored_line: usize,
+    recent_lines: Vec<string>
+) -> usize {
+    auto cur_snap# = decl_line
+    loop cur_snap > first_stored_line {
+        auto check_line_no = cur_snap - 1:usize
+        auto idx = check_line_no - first_stored_line
+        if idx >= recent_lines.len() {
+            break
+        }
+        auto &raw_line = recent_lines.borrow(idx)
+        auto trimmed = raw_line.as_str().trim()
+        if trimmed.len == 0 {
+            break
+        }
+        if is_decorator_or_attr_line(trimmed) {
+            cur_snap = check_line_no
+            continue
+        }
+        if is_multiline_decorator_closer(trimmed) {
+            auto p_depth# = 0:i32
+            auto found_opener# = false
+            auto scan_up# = check_line_no
+            loop scan_up >= first_stored_line {
+                auto up_idx = scan_up - first_stored_line
+                if up_idx >= recent_lines.len() {
+                    break
+                }
+                auto &up_line = recent_lines.borrow(up_idx)
+                auto up_trimmed = up_line.as_str().trim()
+                if up_trimmed.len == 0 {
+                    break
+                }
+                auto c_i# = up_trimmed.len
+                loop c_i > 0 {
+                    c_i = c_i - 1
+                    auto ch = up_trimmed.byte_at(c_i)
+                    if ch == (')' as char) || ch == (']' as char) {
+                        p_depth = p_depth + 1
+                    } else if ch == ('(' as char) || ch == ('[' as char) {
+                        p_depth = p_depth - 1
+                    }
+                }
+                if p_depth <= 0 && is_decorator_or_attr_line(up_trimmed) {
+                    found_opener = true
+                    cur_snap = scan_up
+                    break
+                }
+                if scan_up == first_stored_line {
+                    break
+                }
+                scan_up = scan_up - 1
+            }
+            if found_opener {
+                continue
+            }
+        }
+        break
+    }
+    return cur_snap
+}
+
+pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, string> {
+    auto path_str = string::from(opts.file_path.as_str())
+    auto mode_buf# = [0:char; 4]
+    mode_buf[0] = 'r' as char
+    mode_buf[1] = 'b' as char
+    mode_buf[2] = 0 as char
+
+    auto max_syms_val# = 0:usize
+    auto has_max_syms# = false
+    match opts.max_symbols {
+        auto Option<usize>::Some(v) => {
+            max_syms_val = v
+            has_max_syms = true
+        }
+        _ => {}
+    }
+
+    auto max_bytes_val# = 0:usize
+    auto has_max_bytes# = false
+    match opts.max_result_bytes {
+        auto Option<usize>::Some(v) => {
+            max_bytes_val = v
+            has_max_bytes = true
+        }
+        _ => {}
+    }
+
+    auto family = detect_syntax_family(opts.file_path.as_str())
+    auto dialect = detect_lexical_dialect(opts.file_path.as_str())
+
+    auto d# = DelimiterDepths::new()
+    auto open_stack# = Vec<OpenSymbolEntry>::new()
+    auto all_symbols# = Vec<SymbolRecord>::new()
+    auto recent_lines# = Vec<string>::new()
+    auto first_stored_line# = 1:usize
+
+    auto read_err# = false
+    auto truncated# = false
+    auto term_reason# = string::from("completed")
+    auto total_lines# = 0:usize
+    auto approx_bytes_accum# = 0:usize
+
+    unsafe {
+        auto *mode_ptr = &mode_buf[0] as *char
+        auto *path_c = path_str.c_str()
+        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
+        if *fp == null {
+            auto err# = string::from("Failed to open file '")
+            err#.push_str(opts.file_path.as_str())
+            err#.push_str("': No such file or directory or permission denied")
+            return Result<SymbolsResult, string>::Err(cede err)
+        }
+        auto *file = fp.unwrap()
+        auto nul *raw_buf = libc_malloc(65536:usize)
+        if *raw_buf == null {
+            libc_fclose(*file)
+            return Result<SymbolsResult, string>::Err(string::from("Out of memory reading file"))
+        }
+        auto *buf = raw_buf.unwrap()
+        auto line_buf# = string::new()
+        auto cur_line# = 1:usize
+
+        loop true {
+            auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            if n == 0 {
+                if posix_ferror((*file) as Addr) {
+                    read_err = true
+                }
+                break
+            }
+
+            auto *c_ptr = ((*buf) as Addr) as *char
+            auto chunk_str = string::from_with_len(*c_ptr, n)
+            auto chunk_view = chunk_str.as_str()
+            auto cursor# = 0:usize
+
+            loop cursor < chunk_view.len {
+                auto rem = chunk_view.substr(cursor, chunk_view.len - cursor)
+                auto nl_opt = rem.index_of('\n' as char)
+                if nl_opt.is_none() {
+                    line_buf#.push_str(rem)
+                    break
+                }
+
+                auto nl_pos = nl_opt.unwrap()
+                auto chunk_slice = rem.substr(0, nl_pos)
+                line_buf#.push_str(chunk_slice)
+
+                auto line_str = line_buf.clone()
+                line_buf#.clear()
+
+                auto full_view = line_str.as_str()
+                auto pat_text# = full_view
+                if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                    pat_text = full_view.substr(0, full_view.len - 1)
+                }
+
+                total_lines = cur_line
+
+                auto lex = scan_line_lexical(pat_text, d#, dialect)
+
+                // 1. Pop closed symbols from open_stack
+                match family {
+                    auto SyntaxFamily::Brace => {
+                        loop open_stack.len() > 0:usize {
+                            auto top_idx = open_stack.len() - 1:usize
+                            auto should_pop# = false
+                            {
+                                auto &top = open_stack.borrow(top_idx)
+                                if top.delimiter == BlockDelimiter::Brace && lex.depth_after_brace <= top.depth && lex.has_code_brace_closer {
+                                    should_pop = true
+                                } else if top.delimiter == BlockDelimiter::Paren && lex.depth_after_paren <= top.depth && lex.has_code_paren_closer {
+                                    should_pop = true
+                                }
+                            }
+                            if should_pop {
+                                auto top_entry = open_stack#.pop().unwrap()
+                                match top_entry.symbol_index {
+                                    auto Option<usize>::Some(si) => {
+                                        auto &sym# = all_symbols#.borrow_mut(si)
+                                        sym.range_end = Option<usize>::Some(cur_line)
+                                    }
+                                    auto Option<usize>::None => {}
+                                }
+                            } else {
+                                break
+                            }
+                        }
+                    }
+                    auto SyntaxFamily::Indent => {
+                        if lex.participates_in_indent {
+                            loop open_stack.len() > 0:usize {
+                                auto top_idx = open_stack.len() - 1:usize
+                                if lex.statement_indent <= open_stack.borrow(top_idx).indent {
+                                    auto top_entry = open_stack#.pop().unwrap()
+                                    match top_entry.symbol_index {
+                                        auto Option<usize>::Some(si) => {
+                                            auto &sym# = all_symbols#.borrow_mut(si)
+                                            sym.range_end = Option<usize>::Some(cur_line - 1:usize)
+                                        }
+                                        auto Option<usize>::None => {}
+                                    }
+                                } else {
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Identify declarations on this line
+                auto ident = extract_declared_identifier(pat_text)
+                if ident.len() > 0 {
+                    auto kind_raw = classify_symbol_kind(pat_text)
+                    auto kind# = cede kind_raw
+                    auto scope_name# = string::new()
+
+                    if pat_text.starts_with("func ") {
+                        auto recv = extract_go_receiver_type(pat_text)
+                        if recv.len() > 0 {
+                            scope_name = cede recv
+                            kind = string::from("method")
+                        }
+                    } else if open_stack.len() > 0:usize {
+                        auto top_idx = open_stack.len() - 1:usize
+                        auto top_name = open_stack.borrow(top_idx).name.clone()
+                        scope_name = cede top_name
+                        if kind == "function" {
+                            kind = string::from("method")
+                        }
+                    }
+
+                    auto delim = detect_block_delimiter(pat_text)
+                    auto is_self_closed# = false
+                    if check_is_self_closed_structured(delim, lex.depth_after_brace, lex.depth_after_paren, lex.depth_before_brace, lex.has_code_brace_closer, lex.has_code_paren_closer) {
+                        is_self_closed = true
+                    }
+                    if pat_text.starts_with("const ") || pat_text.starts_with("let ") {
+                        auto arr_opt = index_of_arrow(pat_text)
+                        if arr_opt.is_some() {
+                            auto arr_idx = arr_opt.unwrap()
+                            auto after_arr = pat_text.substr(arr_idx + 2:usize, pat_text.len - arr_idx - 2:usize).trim()
+                            if !after_arr.starts_with("{") {
+                                is_self_closed = true
+                            }
+                        }
+                    }
+
+                    auto sym_idx_opt# = Option<usize>::None
+                    auto is_kind_match# = true
+                    match opts.kinds {
+                        auto Option<Vec<string>>::Some(&klist) => {
+                            is_kind_match = false
+                            auto ki# = 0:usize
+                            loop ki < klist.len() {
+                                if klist.borrow(ki).as_str() == kind.as_str() {
+                                    is_kind_match = true
+                                    break
+                                }
+                                ki = ki + 1
+                            }
+                        }
+                        auto Option<Vec<string>>::None => {}
+                    }
+
+                    if is_kind_match {
+                        // Check limits before adding
+                        if has_max_syms && all_symbols.len() >= max_syms_val {
+                            truncated = true
+                            term_reason = string::from("max_symbols")
+                            cursor = cursor + nl_pos + 1
+                            cur_line = cur_line + 1
+                            break
+                        }
+
+                        auto range_s = snap_symbol_start_decorators(cur_line, first_stored_line, recent_lines)
+                        auto r_end# = Option<usize>::None
+                        if is_self_closed {
+                            r_end = Option<usize>::Some(cur_line)
+                        }
+
+                        auto detail_str# = string::from(pat_text.trim())
+                        if detail_str.len() > 100:usize {
+                            detail_str = string::from(detail_str.as_str().substr(0, 97))
+                            detail_str#.push_str("...")
+                        }
+
+                        auto sym_idx = all_symbols.len()
+                        sym_idx_opt = Option<usize>::Some(sym_idx)
+                        all_symbols#.push(SymbolRecord(
+                            name = ident.clone(),
+                            kind = kind.clone(),
+                            line = cur_line,
+                            range_start = range_s,
+                            range_end = r_end,
+                            scope = scope_name.clone(),
+                            detail = cede detail_str
+                        ))
+
+                        // Approximate byte budget tracking
+                        approx_bytes_accum = approx_bytes_accum + 120:usize + ident.len() + scope_name.len()
+                        if has_max_bytes && approx_bytes_accum >= max_bytes_val {
+                            truncated = true
+                            term_reason = string::from("max_result_bytes")
+                            cursor = cursor + nl_pos + 1
+                            cur_line = cur_line + 1
+                            break
+                        }
+                    }
+
+                    if !is_self_closed && is_scope_declaration(pat_text) {
+                        auto d_val# = lex.depth_before_brace
+                        if delim == BlockDelimiter::Paren {
+                            d_val = lex.depth_before_paren
+                        }
+                        open_stack#.push(OpenSymbolEntry(
+                            symbol_index = sym_idx_opt,
+                            name = cede ident,
+                            delimiter = delim,
+                            depth = d_val,
+                            indent = lex.statement_indent
+                        ))
+                    }
+                }
+
+                // Maintain recent lines ring buffer (up to 40 lines for decorator snapping)
+                recent_lines#.push(string::from(pat_text))
+                if recent_lines.len() > 40:usize {
+                    recent_lines#.remove(0)
+                    first_stored_line = first_stored_line + 1:usize
+                }
+
+                cur_line = cur_line + 1
+                cursor = cursor + nl_pos + 1
+            }
+
+            if truncated || read_err {
+                break
+            }
+        }
+
+        libc_free(*buf)
+        libc_fclose(*file)
+    }
+
+    if read_err {
+        return Result<SymbolsResult, string>::Err(string::from("I/O error reading file"))
+    }
+
+    // Seal unclosed symbols at EOF only if NOT truncated early
+    if !truncated {
+        loop open_stack.len() > 0:usize {
+            auto top_entry = open_stack#.pop().unwrap()
+            match top_entry.symbol_index {
+                auto Option<usize>::Some(si) => {
+                    auto &sym# = all_symbols#.borrow_mut(si)
+                    if sym.range_end.is_none() {
+                        sym.range_end = Option<usize>::Some(total_lines)
+                    }
+                }
+                auto Option<usize>::None => {}
+            }
+        }
+    }
+
+    auto total = all_symbols.len()
+    return Result<SymbolsResult, string>::Ok(SymbolsResult(
+        path = string::from(opts.file_path.as_str()),
+        symbols = cede all_symbols,
+        total_symbols = total,
+        complete = !truncated,
+        truncated = truncated,
+        termination_reason = cede term_reason
+    ))
+}
+
+pub fn format_symbols_text_tree(res: SymbolsResult) -> string {
+    auto out# = string::new()
+    out#.push_str(res.path.as_str())
+    out#.push_str(":\n")
+    if res.symbols.len() == 0 {
+        out#.push_str("  (no symbols found)\n")
+        return cede out
+    }
+
+    auto i# = 0:usize
+    loop i < res.symbols.len() {
+        auto &s = res.symbols.borrow(i)
+        auto line_str# = string::from("  ")
+        line_str#.push_str(u64_to_string(s.range_start as u64).as_str())
+        line_str#.push_str(":")
+        match s.range_end {
+            auto Option<usize>::Some(re) => {
+                line_str#.push_str(u64_to_string(re as u64).as_str())
+            }
+            auto Option<usize>::None => {
+                line_str#.push_str("?")
+            }
+        }
+
+        // Align kind column (pad to 16 chars)
+        loop line_str.len() < 16:usize {
+            line_str#.push_str(" ")
+        }
+        line_str#.push_str(s.kind.as_str())
+        // Align symbol name column (pad to 28 chars)
+        loop line_str.len() < 28:usize {
+            line_str#.push_str(" ")
+        }
+
+        if s.scope.len() > 0 {
+            line_str#.push_str(s.scope.as_str())
+            line_str#.push_str("::")
+        }
+        line_str#.push_str(s.name.as_str())
+        line_str#.push_str("\n")
+        out#.push_str(line_str.as_str())
+        i = i + 1
+    }
+
+    if res.truncated {
+        out#.push_str("  [truncated: reason=")
+        out#.push_str(res.termination_reason.as_str())
+        out#.push_str("]\n")
+    }
+
+    return cede out
+}
+
+pub fn format_symbols_json(res: SymbolsResult) -> string {
+    auto out# = string::from("[")
+    auto i# = 0:usize
+    loop i < res.symbols.len() {
+        if i > 0 {
+            out#.push_str(",")
+        }
+        auto &s = res.symbols.borrow(i)
+        out#.push_str("{\"name\":\"")
+        out#.push_str(json_escape(s.name.as_str()).as_str())
+        out#.push_str("\",\"kind\":\"")
+        out#.push_str(json_escape(s.kind.as_str()).as_str())
+        out#.push_str("\",\"line\":")
+        out#.push_str(u64_to_string(s.line as u64).as_str())
+        out#.push_str(",\"range\":[")
+        out#.push_str(u64_to_string(s.range_start as u64).as_str())
+        out#.push_str(",")
+        match s.range_end {
+            auto Option<usize>::Some(re) => {
+                out#.push_str(u64_to_string(re as u64).as_str())
+            }
+            auto Option<usize>::None => {
+                out#.push_str("null")
+            }
+        }
+        out#.push_str("],\"scope\":\"")
+        out#.push_str(json_escape(s.scope.as_str()).as_str())
+        out#.push_str("\",\"detail\":\"")
+        out#.push_str(json_escape(s.detail.as_str()).as_str())
+        out#.push_str("\"}")
+        i = i + 1
+    }
+    out#.push_str("]")
+    return cede out
+}
+
+pub fn format_symbols_structured(res: SymbolsResult) -> string {
+    auto out# = string::from("{\"schema\":\"trg-mcp-symbols-result-v1\",\"path\":\"")
+    out#.push_str(json_escape(res.path.as_str()).as_str())
+    out#.push_str("\",\"complete\":")
+    if res.complete { out#.push_str("true") } else { out#.push_str("false") }
+    out#.push_str(",\"truncated\":")
+    if res.truncated { out#.push_str("true") } else { out#.push_str("false") }
+    out#.push_str(",\"termination_reason\":\"")
+    out#.push_str(res.termination_reason.as_str())
+    out#.push_str("\",\"total_symbols\":")
+    out#.push_str(u64_to_string(res.total_symbols as u64).as_str())
+    out#.push_str(",\"symbols\":")
+    out#.push_str(format_symbols_json(res).as_str())
+    out#.push_str("}")
+    return cede out
+}
+
+fn push_split_kinds(target#: Vec<string>, arg: str) {
+    auto start# = 0:usize
+    auto i# = 0:usize
+    loop i < arg.len {
+        if arg.byte_at(i) == (',' as char) {
+            if i > start {
+                auto part = arg.substr(start, i - start).trim()
+                if part.len > 0 {
+                    target#.push(string::from(part))
+                }
+            }
+            start = i + 1:usize
+        }
+        i = i + 1
+    }
+    if start < arg.len {
+        auto part = arg.substr(start, arg.len - start).trim()
+        if part.len > 0 {
+            target#.push(string::from(part))
+        }
+    }
+}
+
+pub fn execute_symbols_cli(raw_args: Vec<string>) -> i32 {
+    if raw_args.len() < 3:usize {
+        println("Usage: trg symbols <PATH> [OPTIONS]")
+        println("")
+        println("Options:")
+        println("      --json                 Output symbols in JSON array format")
+        println("  -k, --kind <KIND>          Filter symbols by kind (function, method, class, struct, etc.)")
+        println("      --max-symbols <N>      Maximum number of symbols to output")
+        println("      --max-bytes <SIZE>     Maximum output bytes (e.g. 64K, 1M)")
+        return 2
+    }
+
+    auto path_val# = string::new()
+    auto json_out# = false
+    auto kinds# = Vec<string>::new()
+    auto has_kinds# = false
+    auto max_syms# = Option<usize>::None
+    auto max_bytes# = Option<usize>::None
+
+    auto i# = 2:usize
+    loop i < raw_args.len() {
+        auto arg = raw_args.borrow(i).as_str()
+        if arg == "-h" || arg == "--help" {
+            println("Usage: trg symbols <PATH> [OPTIONS]")
+            println("")
+            println("Options:")
+            println("      --json                 Output symbols in JSON array format")
+            println("  -k, --kind <KIND>          Filter symbols by kind (function, method, class, struct, etc.)")
+            println("      --max-symbols <N>      Maximum number of symbols to output")
+            println("      --max-bytes <SIZE>     Maximum output bytes (e.g. 64K, 1M)")
+            return 0
+        } else if arg == "--json" {
+            json_out = true
+        } else if arg == "-k" || arg == "--kind" {
+            if i + 1 >= raw_args.len() {
+                print_err("Error: --kind requires an argument")
+                return 2
+            }
+            i = i + 1
+            push_split_kinds(kinds#, raw_args.borrow(i).as_str())
+            has_kinds = true
+        } else if arg.starts_with("--kind=") {
+            auto kv = arg.substr(7:usize, arg.len - 7:usize)
+            push_split_kinds(kinds#, kv)
+            has_kinds = true
+        } else if arg == "--max-symbols" {
+            if i + 1 >= raw_args.len() {
+                print_err("Error: --max-symbols requires an integer argument")
+                return 2
+            }
+            i = i + 1
+            auto parsed = parse_usize_strict(raw_args.borrow(i).as_str(), "--max-symbols")
+            if parsed.is_err() {
+                print_err(parsed.unwrap_err().as_str())
+                return 2
+            }
+            max_syms = Option<usize>::Some(parsed.unwrap())
+        } else if arg.starts_with("--max-symbols=") {
+            auto v = arg.substr(14:usize, arg.len - 14:usize)
+            auto parsed = parse_usize_strict(v, "--max-symbols")
+            if parsed.is_err() {
+                print_err(parsed.unwrap_err().as_str())
+                return 2
+            }
+            max_syms = Option<usize>::Some(parsed.unwrap())
+        } else if arg == "--max-bytes" {
+            if i + 1 >= raw_args.len() {
+                print_err("Error: --max-bytes requires a size argument")
+                return 2
+            }
+            i = i + 1
+            auto parsed = parse_size_bytes_strict(raw_args.borrow(i).as_str(), "--max-bytes")
+            if parsed.is_err() {
+                print_err(parsed.unwrap_err().as_str())
+                return 2
+            }
+            max_bytes = Option<usize>::Some(parsed.unwrap())
+        } else if arg.starts_with("--max-bytes=") {
+            auto v = arg.substr(12:usize, arg.len - 12:usize)
+            auto parsed = parse_size_bytes_strict(v, "--max-bytes")
+            if parsed.is_err() {
+                print_err(parsed.unwrap_err().as_str())
+                return 2
+            }
+            max_bytes = Option<usize>::Some(parsed.unwrap())
+        } else if path_val.len() == 0 && !arg.starts_with("-") {
+            path_val = string::from(arg)
+        } else {
+            auto err# = string::from("Error: unrecognized argument '")
+            err#.push_str(arg)
+            err#.push_str("'")
+            print_err(err.as_str())
+            return 2
+        }
+        i = i + 1
+    }
+
+    if path_val.len() == 0 {
+        print_err("Error: target path required")
+        return 2
+    }
+
+    auto kinds_opt# = Option<Vec<string>>::None
+    if has_kinds {
+        kinds_opt = Option<Vec<string>>::Some(cede kinds)
+    }
+
+    auto opts = SymbolsOptions(
+        file_path = cede path_val,
+        kinds = cede kinds_opt,
+        max_symbols = max_syms,
+        max_result_bytes = max_bytes,
+        json_output = json_out
+    )
+
+    auto res = outline_symbols_file(opts)
+    if res.is_err() {
+        print_err(res.unwrap_err().as_str())
+        return 2
+    }
+
+    auto sym_res = res.unwrap()
+    auto formatted# = string::new()
+    if json_out {
+        formatted = format_symbols_json(sym_res)
+        formatted#.push_str("\n")
+    } else {
+        formatted = format_symbols_text_tree(sym_res)
+    }
+
+    auto out_bytes = posix_write_stdout(formatted.as_str())
+    if out_bytes < 0 {
+        return 0 // Broken pipe -> exit 0
+    }
+    return 0
+}

@@ -1361,6 +1361,70 @@ shape IndentStackFrame (
     indent: usize
 )
 
+fn snap_block_start_decorators(
+    initial_start: usize,
+    first_stored_line: usize,
+    before_ring: Vec<string>
+) -> usize {
+    auto cur_snap# = initial_start
+    loop cur_snap > first_stored_line {
+        auto check_line_no = cur_snap - 1:usize
+        auto idx = check_line_no - first_stored_line
+        if idx >= before_ring.len() {
+            break
+        }
+        auto &raw_line = before_ring.borrow(idx)
+        auto trimmed = raw_line.as_str().trim()
+        if trimmed.len == 0 {
+            break
+        }
+        if trimmed.starts_with("@") || trimmed.starts_with("#[") {
+            cur_snap = check_line_no
+            continue
+        }
+        if trimmed.ends_with(")") || trimmed.ends_with("]") {
+            auto p_depth# = 0:i32
+            auto found_opener# = false
+            auto scan_up# = check_line_no
+            loop scan_up >= first_stored_line {
+                auto up_idx = scan_up - first_stored_line
+                if up_idx >= before_ring.len() {
+                    break
+                }
+                auto &up_line = before_ring.borrow(up_idx)
+                auto up_trimmed = up_line.as_str().trim()
+                if up_trimmed.len == 0 {
+                    break
+                }
+                auto c_i# = up_trimmed.len
+                loop c_i > 0 {
+                    c_i = c_i - 1
+                    auto ch = up_trimmed.byte_at(c_i)
+                    if ch == (')' as char) || ch == (']' as char) {
+                        p_depth = p_depth + 1
+                    } else if ch == ('(' as char) || ch == ('[' as char) {
+                        p_depth = p_depth - 1
+                    }
+                }
+                if p_depth <= 0 && (up_trimmed.starts_with("@") || up_trimmed.starts_with("#[")) {
+                    found_opener = true
+                    cur_snap = scan_up
+                    break
+                }
+                if scan_up == first_stored_line {
+                    break
+                }
+                scan_up = scan_up - 1
+            }
+            if found_opener {
+                continue
+            }
+        }
+        break
+    }
+    return cur_snap
+}
+
 fn execute_view_stream_block(
     opts: ViewOptions,
     target_line: usize
@@ -1646,6 +1710,7 @@ fn execute_view_stream_block(
                             }
                         }
                     }
+                    block_start = snap_block_start_decorators(block_start, first_stored_line, before_ring)
                 } else {
                     // cur_line > target_line: scan forward to find block_end
                     if cur_line <= target_line + max_block_cap {
@@ -1838,6 +1903,7 @@ fn execute_view_stream_block(
                         }
                     }
                 }
+                block_start = snap_block_start_decorators(block_start, first_stored_line, before_ring)
             } else if cur_line > target_line {
                 if cur_line <= target_line + max_block_cap {
                     after_lines#.push(string::from(pat_text))

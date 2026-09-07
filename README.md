@@ -7,6 +7,8 @@ Designed for modern AI coding agents and developers, `trg` recursively searches 
 ### Key Highlights
 
 - **Universal Code Search**: Recursively searches repositories in any programming language with literal fast-paths, smart case sensitivity, and non-backtracking regular expressions.
+- **Instant Symbol Outline (`trg symbols`, `trg_symbols`)**: Streaming single-pass $O(1)$ memory symbol extractor providing edit-ready ranges `[start, end]`, Go receiver methods, TypeScript arrow functions, and decorator upward snapping.
+- **Stateless Point Hydration (`trg view`, `trg_view`)**: Sub-3ms target line inspection with surrounding context (`-C N`) or full syntactic block expansion (`--block`).
 - **Native Stdio MCP Server (`--mcp`)**: Built-in JSON-RPC 2.0 server over stdio for Claude Desktop, Cursor, Antigravity, and AI agent frameworks—zero Node.js or Python runtime required.
 - **LLM Context Protection**: Hard result payload budgets (`--max-result-bytes`, `--max-total-matches`), token-efficient compact JSON mode (`--json=compact`), and atomic context window framing prevent context runaway.
 - **Syntactic Block Hydration (`--block`, `--scope`, `--def-first`)**: Expands matches into full enclosing functions/classes and prioritizes symbol definitions over usages for instant code comprehension.
@@ -14,6 +16,20 @@ Designed for modern AI coding agents and developers, `trg` recursively searches 
 
 ## Features & Guarantees
 
+- **Instant Symbol Outline (`trg symbols <path> [options]`, `trg_symbols` MCP Tool)**:
+  - Streaming single-pass symbol tree extractor with zero heavy AST or tree-sitter overhead, operating strictly in $O(1)$ memory.
+  - Automatically identifies symbol kind (`function`, `method`, `class`, `struct`, `interface`, `type`, `shape`, `impl`), symbol name, parent scope (`scope`), and exact edit-ready line range (`range: [start, end]`).
+  - **Go Receiver Method Extraction**: Accurately recognizes Go methods with value/pointer receivers and generics (`func (s *Server[T]) Method()`), while ignoring anonymous function closures.
+  - **TypeScript / JavaScript Arrow Functions**: Distinguishes block-body arrow functions (`const f = () => { ... }`) from concise expression bodies (`const add = (a, b) => a + b;`).
+  - **Decorator & Attribute Upward Snapping**: Automatically snaps upward across preceding decorators (`@decorator`) and attributes (`#[derive(...)]`), including multiline expressions, with empty-line hard stops.
+  - **Kind Filtering (`-k / --kind <KINDS>`)**: Filter symbols by kind (e.g. `-k function,method` or `-k class`).
+  - **Fail-Closed Truncation Contracts**: Supports `--max-symbols` and `--max-bytes` budgets with truthful completeness flags (`complete`, `truncated`, `termination_reason`).
+  - Available via CLI (`trg symbols <path> [--json] [-k kinds] [--max-symbols N] [--max-bytes SIZE]`) and MCP stdio (`trg_symbols`).
+- **Stateless Point & Block Hydration (`trg view <path>:<line>`, `trg_view` MCP Tool)**:
+  - Sub-3ms stateless code hydration for inspecting lines and code blocks around target coordinates.
+  - Line context mode: `trg view <path>:<line> [-C N]` (default 10 lines).
+  - Syntactic block mode: `trg view <path>:<line> --block` (expands to the enclosing function/class with decorator snapping).
+  - Explicit line range: `trg view <path> --lines <start>-<end>`.
 - **Syntactic Block Context Expansion (`--context-block` / `--block`, `--max-block-lines`)**:
   - Automatically expands surrounding context to enclose complete syntactic code blocks (functions, methods, classes) without AST or tree-sitter overhead.
   - **Dual-Family Heuristic Engine**:
@@ -378,6 +394,24 @@ trg --json=compact --max-total-matches 10 "pub fn" src/
 
 # Output structured JSONL stream with scope metadata (trg-json-v2)
 trg --json --scope -E -C 1 "fn\\s+[a-z_]+" src
+
+# Outline symbols in a file with text tree presentation
+trg symbols src/main.tk
+
+# Outline only functions and methods
+trg symbols -k function,method src/view.tk
+
+# Output symbol outline as single-line JSON
+trg symbols --json src/symbols.tk
+
+# Bound symbol outline output by count and byte budget
+trg symbols --max-symbols 20 --max-bytes 16K src/syntax.tk
+
+# Hydrate code block around line 42 with enclosing function/class
+trg view src/syntax.tk:42 --block
+
+# Hydrate lines 10 to 30
+trg view src/syntax.tk --lines 10-30
 ```
 
 ---
