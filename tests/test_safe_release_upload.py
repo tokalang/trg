@@ -3,12 +3,13 @@
 test_safe_release_upload.py - Unit & Mock Verification Suite for safe_release_upload.py
 
 Tests:
-1. Missing deliverable or corrupt SHA256SUMS -> hard failure before any remote call.
-2. Published release (isDraft == False) -> immediate abort.
-3. Network/auth error during release query -> immediate abort without creating release.
-4. Existing remote asset digest conflict -> immediate abort before any uploads occur.
-5. Existing remote assets with matching digests -> skipped upload, succeeds.
-6. Clean draft upload -> creates/updates draft and uploads missing assets.
+1. Missing deliverable (including Windows ZIPs) -> hard failure before any remote call.
+2. Corrupt SHA256SUMS -> hard failure.
+3. Published release (isDraft == False) -> immediate abort.
+4. Network/auth error during release query -> immediate abort without creating release.
+5. Existing remote asset digest conflict -> immediate abort before any uploads occur.
+6. Existing remote assets with matching digests -> skipped upload, succeeds.
+7. Clean draft upload -> creates/updates draft and uploads all 6 missing assets.
 """
 
 import hashlib
@@ -33,31 +34,39 @@ class SafeReleaseUploadMockTest(unittest.TestCase):
         self.dist_dir = self.tmpdir / "dist"
         self.dist_dir.mkdir()
 
-        self.tag = "v0.14.1"
-        self.ver = "0.14.1"
+        self.tag = "v0.15.0"
+        self.ver = "0.15.0"
 
-        # Generate four valid deliverables
+        # Generate six valid mandatory deliverables
         self.bin_linux = self.dist_dir / f"trg-{self.tag}-linux-x64.tar.gz"
         self.bin_macos = self.dist_dir / f"trg-{self.tag}-macos-arm64.tar.gz"
+        self.bin_win_x64 = self.dist_dir / f"trg-{self.tag}-windows-x64.zip"
+        self.bin_win_arm64 = self.dist_dir / f"trg-{self.tag}-windows-arm64.zip"
         self.src_tarball = self.dist_dir / f"trg-{self.ver}.tar.gz"
         self.sums_file = self.dist_dir / "SHA256SUMS"
 
         self.linux_content = b"fake-linux-binary-content-12345"
         self.macos_content = b"fake-macos-binary-content-67890"
+        self.win_x64_content = b"fake-windows-x64-zip-content-1111"
+        self.win_arm64_content = b"fake-windows-arm64-zip-content-2222"
         self.src_content = b"fake-source-tarball-content-abcde"
 
         self.bin_linux.write_bytes(self.linux_content)
         self.bin_macos.write_bytes(self.macos_content)
+        self.bin_win_x64.write_bytes(self.win_x64_content)
+        self.bin_win_arm64.write_bytes(self.win_arm64_content)
         self.src_tarball.write_bytes(self.src_content)
 
         self.linux_sha = sha256_bytes(self.linux_content)
         self.macos_sha = sha256_bytes(self.macos_content)
+        self.win_x64_sha = sha256_bytes(self.win_x64_content)
+        self.win_arm64_sha = sha256_bytes(self.win_arm64_content)
         self.src_sha = sha256_bytes(self.src_content)
 
         self._write_sums()
 
         self.notes_file = self.tmpdir / "release_notes.md"
-        self.notes_file.write_text("# Release Notes v0.14.1\n\nApproved test notes.\n")
+        self.notes_file.write_text("# Release Notes v0.15.0\n\nApproved test notes.\n")
 
         self.mock_state_file = self.tmpdir / "mock_state.json"
         self.mock_gh_script = self.tmpdir / "mock_gh.py"
@@ -72,6 +81,8 @@ class SafeReleaseUploadMockTest(unittest.TestCase):
         sums_text = (
             f"{self.linux_sha}  {self.bin_linux.name}\n"
             f"{self.macos_sha}  {self.bin_macos.name}\n"
+            f"{self.win_x64_sha}  {self.bin_win_x64.name}\n"
+            f"{self.win_arm64_sha}  {self.bin_win_arm64.name}\n"
             f"{self.src_sha}  {self.src_tarball.name}\n"
         )
         self.sums_file.write_text(sums_text)
@@ -93,98 +104,146 @@ if action == "release":
     if subaction == "view":
         tag = cmd_args[2]
         if state.get("simulated_error") == "network":
-            sys.stderr.write("fatal: unable to access 'https://github.com/tokalang/trg': Could not resolve host\n")
+            sys.stderr.write("fatal: unable to access https://github.com/tokalang/trg: Could not resolve host\n")
             sys.exit(1)
         if state.get("simulated_error") == "auth":
             sys.stderr.write("HTTP 401: Bad credentials\n")
             sys.exit(1)
+
         if not state.get("release_exists", False):
-            sys.stderr.write(f"release not found: {tag}\n")
+            sys.stderr.write(f"release {tag} not found\n")
             sys.exit(1)
-        # return release info
-        rel_info = {
+
+        # Return json representation
+        out = {
             "tagName": tag,
             "isDraft": state.get("is_draft", True),
             "assets": state.get("assets", [])
         }
-        sys.stdout.write(json.dumps(rel_info))
+        sys.stdout.write(json.dumps(out))
         sys.exit(0)
 
     elif subaction == "create":
+        # Tag name is cmd_args[2]
+        tag = cmd_args[2]
+        if state.get("release_exists", False):
+            sys.stderr.write(f"release {tag} already exists\n")
+            sys.exit(1)
         state["release_exists"] = True
-        state["is_draft"] = "--draft" in cmd_args
-        state.setdefault("created_calls", []).append(cmd_args)
+        state["is_draft"] = True
+        state["assets"] = []
+        with open(state_path, "w") as f:
+            json.dump(state, f)
+        sys.stdout.write(f"https://github.com/tokalang/trg/releases/tag/{tag}\n")
+        sys.exit(0)
+
+    elif subaction == "upload":
+        # cmd_args: release upload <tag> <file_path>
+        tag = cmd_args[2]
+        file_path = pathlib.Path(cmd_args[3])
+        if not file_path.exists():
+            sys.stderr.write(f"file not found: {file_path}\n")
+            sys.exit(1)
+
+        if "--clobber" in cmd_args:
+            sys.stderr.write("FATAL: --clobber flag is strictly forbidden!\n")
+            sys.exit(2)
+
+        # Check if asset already exists in mock state
+        existing = [a for a in state.get("assets", []) if a["name"] == file_path.name]
+        if existing:
+            sys.stderr.write(f"asset {file_path.name} already exists on release {tag}\n")
+            sys.exit(1)
+
+        # Record upload
+        uploaded = state.get("uploaded_files", [])
+        uploaded.append(file_path.name)
+        state["uploaded_files"] = uploaded
+
+        # Append to assets
+        assets = state.get("assets", [])
+        assets.append({
+            "name": file_path.name,
+            "size": file_path.stat().st_size
+        })
+        state["assets"] = assets
+
+        # Save asset contents for conflict checks
+        contents = state.get("asset_contents", {})
+        contents[file_path.name] = file_path.read_bytes().decode("latin1")
+        state["asset_contents"] = contents
+
         with open(state_path, "w") as f:
             json.dump(state, f)
         sys.exit(0)
 
     elif subaction == "edit":
-        state.setdefault("edit_calls", []).append(cmd_args)
-        with open(state_path, "w") as f:
-            json.dump(state, f)
+        # cmd_args: release edit <tag> --notes-file <notes>
+        tag = cmd_args[2]
+        if not state.get("release_exists", False):
+            sys.stderr.write(f"release {tag} not found\n")
+            sys.exit(1)
         sys.exit(0)
 
     elif subaction == "download":
+        # cmd_args: release download <tag> -p <asset_name> -D <dest_dir>
         tag = cmd_args[2]
-        pattern_idx = cmd_args.index("-p") + 1
-        dest_idx = cmd_args.index("-D") + 1
-        asset_name = cmd_args[pattern_idx]
-        dest_dir = pathlib.Path(cmd_args[dest_idx])
-        dest_file = dest_dir / asset_name
-        
-        # Look up asset in state
-        asset_data = state.get("asset_contents", {}).get(asset_name, "mock-remote-content")
-        dest_file.write_bytes(asset_data.encode("utf-8") if isinstance(asset_data, str) else asset_data)
-        sys.exit(0)
-
-    elif subaction == "upload":
-        tag = cmd_args[2]
-        file_to_upload = pathlib.Path(cmd_args[3])
-        state.setdefault("uploaded_files", []).append(file_to_upload.name)
-        assets = state.setdefault("assets", [])
-        if not any(a["name"] == file_to_upload.name for a in assets):
-            assets.append({"name": file_to_upload.name, "size": file_to_upload.stat().st_size})
-        with open(state_path, "w") as f:
-            json.dump(state, f)
+        asset_name = cmd_args[4]
+        dest_dir = pathlib.Path(cmd_args[6])
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        contents = state.get("asset_contents", {})
+        if asset_name not in contents:
+            sys.stderr.write(f"asset {asset_name} not found\n")
+            sys.exit(1)
+        (dest_dir / asset_name).write_bytes(contents[asset_name].encode("latin1"))
         sys.exit(0)
 
 sys.stderr.write(f"Unknown mock command: {cmd_args}\n")
-sys.exit(2)
+sys.exit(1)
 """
         self.mock_gh_script.write_text(script_code)
         self.mock_gh_script.chmod(0o755)
 
-        # Create wrapper runner shell script
-        self.gh_wrapper = self.tmpdir / "gh_runner.sh"
-        self.gh_wrapper.write_text(f'#!/bin/bash\nexec python3 "{self.mock_gh_script}" "{self.mock_state_file}" "$@"\n')
-        self.gh_wrapper.chmod(0o755)
-
-    def run_uploader(self) -> subprocess.CompletedProcess:
-        return subprocess.run([
+    def run_uploader(self, extra_args=None):
+        cmd = [
             sys.executable,
             str(self.uploader_script),
             "--tag", self.tag,
             "--dist-dir", str(self.dist_dir),
             "--notes-file", str(self.notes_file),
-            "--gh-cmd", str(self.gh_wrapper)
-        ], capture_output=True, text=True)
+            "--gh-cmd", f"{sys.executable} {self.mock_gh_script} {self.mock_state_file}"
+        ]
+        if extra_args:
+            cmd.extend(extra_args)
+        # Use shell execution since gh-cmd contains arguments
+        cmd_str = f'{sys.executable} {self.uploader_script} --tag {self.tag} --dist-dir {self.dist_dir} --notes-file {self.notes_file} --gh-cmd "{sys.executable} {self.mock_gh_script} {self.mock_state_file}"'
+        return subprocess.run(cmd_str, shell=True, capture_output=True, text=True)
 
-    def test_missing_deliverable_aborts(self):
-        # Remove source tarball
-        self.src_tarball.unlink()
+    def test_missing_mandatory_deliverable_aborts(self):
+        # Delete windows-x64 zip
+        self.bin_win_x64.unlink()
         r = self.run_uploader()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("Missing mandatory deliverable", r.stderr + r.stdout)
+        self.assertIn(self.bin_win_x64.name, r.stderr + r.stdout)
 
-    def test_corrupt_sums_aborts(self):
-        # Corrupt the digest in SHA256SUMS
+    def test_missing_windows_arm64_zip_aborts(self):
+        # Delete windows-arm64 zip
+        self.bin_win_arm64.unlink()
+        r = self.run_uploader()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("Missing mandatory deliverable", r.stderr + r.stdout)
+        self.assertIn(self.bin_win_arm64.name, r.stderr + r.stdout)
+
+    def test_corrupt_sha256sums_aborts(self):
+        # Tamper with SHA256SUMS
         self.sums_file.write_text(f"0000000000000000000000000000000000000000000000000000000000000000  {self.bin_linux.name}\n")
         r = self.run_uploader()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("Digest mismatch in SHA256SUMS", r.stderr + r.stdout)
 
-    def test_published_release_aborts(self):
-        # Simulate release exists and isDraft = False
+    def test_published_release_is_rejected(self):
+        # Release is NOT a draft (is_draft = False)
         self.mock_state_file.write_text(json.dumps({
             "release_exists": True,
             "is_draft": False,
@@ -192,9 +251,9 @@ sys.exit(2)
         }))
         r = self.run_uploader()
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("Release v0.14.1 is already published", r.stderr + r.stdout)
+        self.assertIn("already published", r.stderr + r.stdout)
 
-    def test_network_auth_failure_aborts_without_creating(self):
+    def test_network_auth_error_aborts(self):
         # Simulate network error
         self.mock_state_file.write_text(json.dumps({
             "simulated_error": "network"
@@ -231,26 +290,30 @@ sys.exit(2)
         self.assertEqual(state.get("uploaded_files", []), [])
 
     def test_idempotent_matching_assets_skip_upload(self):
-        # All 4 files already exist on remote with identical digests
+        # All 6 files already exist on remote with identical digests
         self.mock_state_file.write_text(json.dumps({
             "release_exists": True,
             "is_draft": True,
             "assets": [
                 {"name": self.bin_linux.name, "size": len(self.linux_content)},
                 {"name": self.bin_macos.name, "size": len(self.macos_content)},
+                {"name": self.bin_win_x64.name, "size": len(self.win_x64_content)},
+                {"name": self.bin_win_arm64.name, "size": len(self.win_arm64_content)},
                 {"name": self.src_tarball.name, "size": len(self.src_content)},
                 {"name": self.sums_file.name, "size": len(self.sums_file.read_bytes())},
             ],
             "asset_contents": {
                 self.bin_linux.name: self.linux_content.decode("latin1"),
                 self.bin_macos.name: self.macos_content.decode("latin1"),
+                self.bin_win_x64.name: self.win_x64_content.decode("latin1"),
+                self.bin_win_arm64.name: self.win_arm64_content.decode("latin1"),
                 self.src_tarball.name: self.src_content.decode("latin1"),
                 self.sums_file.name: self.sums_file.read_text(),
             }
         }))
         r = self.run_uploader()
         self.assertEqual(r.returncode, 0, f"Expected success but got: {r.stderr}\n{r.stdout}")
-        self.assertIn("All 4 mandatory deliverables safely verified", r.stdout)
+        self.assertIn("All 6 mandatory deliverables safely verified", r.stdout)
 
         # Ensure no uploads occurred because all were matching
         state = json.loads(self.mock_state_file.read_text())
@@ -263,51 +326,17 @@ sys.exit(2)
         }))
         r = self.run_uploader()
         self.assertEqual(r.returncode, 0, f"Expected success but got: {r.stderr}\n{r.stdout}")
-        self.assertIn("All 4 mandatory deliverables safely verified", r.stdout)
+        self.assertIn("All 6 mandatory deliverables safely verified", r.stdout)
 
         state = json.loads(self.mock_state_file.read_text())
         self.assertTrue(state.get("release_exists"))
         self.assertTrue(state.get("is_draft"))
-        # All 4 files were uploaded
+        # All 6 files were uploaded
         self.assertEqual(set(state.get("uploaded_files", [])), {
             self.bin_linux.name,
             self.bin_macos.name,
-            self.src_tarball.name,
-            self.sums_file.name
-        })
-
-    def test_six_deliverables_windows_support(self):
-        # Add Windows x64 and ARM64 zip archives
-        win_x64 = self.dist_dir / f"trg-{self.tag}-windows-x64.zip"
-        win_arm64 = self.dist_dir / f"trg-{self.tag}-windows-arm64.zip"
-        x64_bytes = b"fake-win-x64-zip-content"
-        arm64_bytes = b"fake-win-arm64-zip-content"
-        win_x64.write_bytes(x64_bytes)
-        win_arm64.write_bytes(arm64_bytes)
-
-        # Update SHA256SUMS to cover all 5 archives
-        sums_text = (
-            f"{self.linux_sha}  {self.bin_linux.name}\n"
-            f"{self.macos_sha}  {self.bin_macos.name}\n"
-            f"{sha256_bytes(x64_bytes)}  {win_x64.name}\n"
-            f"{sha256_bytes(arm64_bytes)}  {win_arm64.name}\n"
-            f"{self.src_sha}  {self.src_tarball.name}\n"
-        )
-        self.sums_file.write_text(sums_text)
-
-        self.mock_state_file.write_text(json.dumps({
-            "release_exists": False
-        }))
-        r = self.run_uploader()
-        self.assertEqual(r.returncode, 0, f"Expected success but got: {r.stderr}\n{r.stdout}")
-        self.assertIn("All 6 mandatory deliverables safely verified", r.stdout)
-
-        state = json.loads(self.mock_state_file.read_text())
-        self.assertEqual(set(state.get("uploaded_files", [])), {
-            self.bin_linux.name,
-            self.bin_macos.name,
-            win_x64.name,
-            win_arm64.name,
+            self.bin_win_x64.name,
+            self.bin_win_arm64.name,
             self.src_tarball.name,
             self.sums_file.name
         })

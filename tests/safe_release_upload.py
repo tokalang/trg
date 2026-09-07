@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -54,30 +55,24 @@ def parse_sha256sums(sums_path: pathlib.Path) -> dict[str, str]:
     return mapping
 
 
-def verify_local_deliverables_set(dist_dir: pathlib.Path, tag: str) -> dict[str, pathlib.Path]:
-    ver = tag.lstrip("v")
-    windows_archives = [
-        f"trg-{tag}-windows-x64.zip",
-        f"trg-{tag}-windows-arm64.zip",
-    ]
-    # Check if Windows packages are present or expected for v0.15.0+
-    has_windows = any((dist_dir / w).is_file() for w in windows_archives) or (ver >= "0.15.0" and any((dist_dir / w).exists() for w in windows_archives))
+MANDATORY_DELIVERABLES_TEMPLATES = [
+    "trg-{tag}-linux-x64.tar.gz",
+    "trg-{tag}-macos-arm64.tar.gz",
+    "trg-{tag}-windows-x64.zip",
+    "trg-{tag}-windows-arm64.zip",
+    "trg-{ver}.tar.gz",
+    "SHA256SUMS"
+]
 
-    expected_names = [
-        f"trg-{tag}-linux-x64.tar.gz",
-        f"trg-{tag}-macos-arm64.tar.gz",
-        f"trg-{ver}.tar.gz",
-        "SHA256SUMS"
-    ]
-    if has_windows:
-        expected_names = [
-            f"trg-{tag}-linux-x64.tar.gz",
-            f"trg-{tag}-macos-arm64.tar.gz",
-            f"trg-{tag}-windows-x64.zip",
-            f"trg-{tag}-windows-arm64.zip",
-            f"trg-{ver}.tar.gz",
-            "SHA256SUMS"
-        ]
+
+def verify_local_deliverables_set(
+    dist_dir: pathlib.Path,
+    tag: str,
+    required_templates: list[str] | None = None
+) -> dict[str, pathlib.Path]:
+    ver = tag.lstrip("v")
+    templates = required_templates or MANDATORY_DELIVERABLES_TEMPLATES
+    expected_names = [t.format(tag=tag, ver=ver) for t in templates]
 
     files_by_name = {}
     missing = []
@@ -126,9 +121,10 @@ def execute_safe_upload(
 ):
     log(f"Initiating safe release upload sequence for tag: {tag}")
     files = verify_local_four_piece_set(dist_dir, tag)
+    gh_base = shlex.split(gh_cmd)
 
     # 1. Inspect remote release state
-    view_proc = run_cmd([gh_cmd, "release", "view", tag, "--json", "isDraft,assets,tagName"])
+    view_proc = run_cmd(gh_base + ["release", "view", tag, "--json", "isDraft,assets,tagName"])
 
     if view_proc.returncode != 0:
         err_lower = view_proc.stderr.lower()
@@ -144,7 +140,7 @@ def execute_safe_upload(
             sys.exit(1)
 
         log(f"Release {tag} does not exist. Creating draft release...")
-        create_cmd = [gh_cmd, "release", "create", tag, "--draft", "--verify-tag", "--title", tag]
+        create_cmd = gh_base + ["release", "create", tag, "--draft", "--verify-tag", "--title", tag]
         if notes_file and notes_file.exists():
             create_cmd.extend(["--notes-file", str(notes_file)])
         else:
@@ -156,7 +152,7 @@ def execute_safe_upload(
             sys.exit(1)
         log(f"Draft release {tag} successfully created.")
 
-        view_proc = run_cmd([gh_cmd, "release", "view", tag, "--json", "isDraft,assets,tagName"])
+        view_proc = run_cmd(gh_base + ["release", "view", tag, "--json", "isDraft,assets,tagName"])
         if view_proc.returncode != 0:
             log(f"CRITICAL ERROR: Unable to view newly created release {tag}: {view_proc.stderr}")
             sys.exit(1)
@@ -172,7 +168,7 @@ def execute_safe_upload(
     # If notes_file provided, ensure notes are updated in draft
     if notes_file and notes_file.exists():
         log(f"Updating draft release notes from {notes_file}...")
-        edit_proc = run_cmd([gh_cmd, "release", "edit", tag, "--notes-file", str(notes_file)])
+        edit_proc = run_cmd(gh_base + ["release", "edit", tag, "--notes-file", str(notes_file)])
         if edit_proc.returncode != 0:
             log(f"CRITICAL ERROR: Failed to update draft release notes: {edit_proc.stderr}")
             sys.exit(1)
@@ -186,7 +182,7 @@ def execute_safe_upload(
         for fname, local_path in files.items():
             if fname in existing_assets:
                 log(f"Pre-check: Verifying existing remote asset '{fname}'...")
-                dl_proc = run_cmd([gh_cmd, "release", "download", tag, "-p", fname, "-D", str(tmp_path)])
+                dl_proc = run_cmd(gh_base + ["release", "download", tag, "-p", fname, "-D", str(tmp_path)])
                 if dl_proc.returncode != 0:
                     log(f"CRITICAL ERROR: Failed to download existing asset '{fname}' for verification: {dl_proc.stderr}")
                     sys.exit(1)
@@ -209,14 +205,14 @@ def execute_safe_upload(
         if fname not in existing_assets:
             local_sha = sha256_file(local_path)
             log(f"Uploading new asset '{fname}' ({local_sha})...")
-            up_proc = run_cmd([gh_cmd, "release", "upload", tag, str(local_path)])
+            up_proc = run_cmd(gh_base + ["release", "upload", tag, str(local_path)])
             if up_proc.returncode != 0:
                 log(f"CRITICAL ERROR: Failed to upload '{fname}': {up_proc.stderr}")
                 sys.exit(1)
             log(f"  Successfully uploaded '{fname}'")
 
     # 5. Phase 3: Final state verification
-    final_view = run_cmd([gh_cmd, "release", "view", tag, "--json", "isDraft,assets"])
+    final_view = run_cmd(gh_base + ["release", "view", tag, "--json", "isDraft,assets"])
     if final_view.returncode != 0:
         log(f"CRITICAL ERROR: Failed to query release after upload: {final_view.stderr}")
         sys.exit(1)

@@ -356,19 +356,39 @@ def test_mcp_lifecycle(trg_bin):
 
     print("  [PASS] MCP JSON-RPC 2.0 full lifecycle, Chinese search, and view hydration verified.")
 
-def test_broken_pipe_counter_examples(trg_bin):
+def detect_pe_arch(exe_path):
+    try:
+        with open(msys_adapt(exe_path), "rb") as f:
+            f.seek(0x3C)
+            e_lfanew = int.from_bytes(f.read(4), "little")
+            f.seek(e_lfanew + 4)
+            machine = int.from_bytes(f.read(2), "little")
+            if machine == 0xAA64:
+                return "arm64"
+            elif machine == 0x8664:
+                return "x64"
+    except Exception:
+        pass
+    if "arm64" in str(exe_path).lower():
+        return "arm64"
+    return "x64"
+
+def test_broken_pipe_counter_examples(trg_bin, explicit_c_test=None, explicit_arch=None):
     print(f"[{trg_bin}] Test 8: Broken pipe counter-examples (direct C bridge fault injection)...")
     
     # 1. Direct C bridge fault injection runner
-    is_arm64 = "arm64" in trg_bin.lower()
-    c_test_bin = os.path.join(SANDBOX, "test_c_write_arm64.exe" if is_arm64 else "test_c_write_x64.exe")
-    adapted_c_test = msys_adapt(c_test_bin)
-    if not os.path.exists(adapted_c_test):
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        c_src = os.path.join(repo_root, "tests", "test_c_bridge_write.c")
-        compat_src = os.path.join(repo_root, "src", "c", "trg_win_compat.c")
-        compile_cmd = ["clang", msys_adapt(compat_src), msys_adapt(c_src), "-o", adapted_c_test, "-lkernel32", "-lmsvcrt", "-O2"]
-        subprocess.run(compile_cmd, check=True)
+    arch = explicit_arch or detect_pe_arch(trg_bin)
+    if explicit_c_test and os.path.exists(msys_adapt(explicit_c_test)):
+        adapted_c_test = msys_adapt(explicit_c_test)
+    else:
+        c_test_bin = os.path.join(SANDBOX, f"test_c_write_{arch}.exe")
+        adapted_c_test = msys_adapt(c_test_bin)
+        if not os.path.exists(adapted_c_test):
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            c_src = os.path.join(repo_root, "tests", "test_c_bridge_write.c")
+            compat_src = os.path.join(repo_root, "src", "c", "trg_win_compat.c")
+            compile_cmd = ["clang", msys_adapt(compat_src), msys_adapt(c_src), "-o", adapted_c_test, "-lkernel32", "-lmsvcrt", "-O2"]
+            subprocess.run(compile_cmd, check=True)
     
     p_c = subprocess.run([adapted_c_test], capture_output=True, text=True, timeout=10)
     assert p_c.returncode == 0, f"C bridge write fault injection failed with code {p_c.returncode}: {p_c.stdout} {p_c.stderr}"
@@ -491,6 +511,8 @@ def main():
     parser = argparse.ArgumentParser(description="Windows Matrix Verification for trg")
     parser.add_argument("--trg", help="Path to trg binary under test")
     parser.add_argument("--sandbox", help="Working sandbox directory")
+    parser.add_argument("--c-test", help="Path to pre-compiled test_c_write binary")
+    parser.add_argument("--arch", choices=["x64", "arm64"], help="Architecture override")
     args = parser.parse_args()
 
     global SANDBOX, CLEAN_DATA
@@ -522,7 +544,7 @@ def main():
         test_error_handling(bin_path)
         test_true_broken_pipe(bin_path)
         test_mcp_lifecycle(bin_path)
-        test_broken_pipe_counter_examples(bin_path)
+        test_broken_pipe_counter_examples(bin_path, explicit_c_test=args.c_test, explicit_arch=args.arch)
         test_path_resolution_failure_injection(bin_path)
         print()
 

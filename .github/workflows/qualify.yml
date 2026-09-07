@@ -79,6 +79,9 @@ jobs:
           archive_file=$(ls trg-*.tar.gz | head -n 1)
           python3 tests/verify_application_release.py --archive "$archive_file"
 
+      - name: Verify WinGet package manifests
+        run: python3 -m unittest tests/test_winget_manifest.py
+
       - name: Verify release asset publisher logic
         run: python3 -m unittest tests/test_safe_release_upload.py
 
@@ -98,8 +101,14 @@ jobs:
           echo "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917  $archive" | shasum -a 256 --check
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           sdk="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64"
+          echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
           echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
           echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+          echo "PATH=$sdk/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Fetch Toka package dependencies
+        run: |
+          toka fetch
 
       - name: Cross-compile Windows COFF objects
         run: |
@@ -112,6 +121,7 @@ jobs:
           cp src/c/trg_win_compat.c build_win/
           cp src/c/trg.manifest build_win/
           cp src/c/trg.rc build_win/
+          cp tests/test_c_bridge_write.c build_win/
 
       - name: Upload Windows build inputs
         uses: actions/upload-artifact@v4
@@ -134,12 +144,19 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          update: true
+          update: false
           install: >-
             mingw-w64-x86_64-clang
             mingw-w64-x86_64-lld
             mingw-w64-x86_64-binutils
             mingw-w64-x86_64-python
+
+      - name: Verify locked toolchain provenance
+        run: |
+          echo "=== Windows x64 Toolchain Info ==="
+          clang --version
+          windres --version
+          pacman -Q mingw-w64-x86_64-clang mingw-w64-x86_64-binutils mingw-w64-x86_64-lld
 
       - name: Download Windows build inputs
         uses: actions/download-artifact@v4
@@ -147,7 +164,7 @@ jobs:
           name: windows-build-inputs
           path: build_win
 
-      - name: Link trg.exe (x64)
+      - name: Link trg.exe & compile C bridge test (x64)
         run: |
           set -euo pipefail
           windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
@@ -156,6 +173,8 @@ jobs:
           clang build_win/trg_x64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o trg.exe -lbcrypt -lws2_32 -lshell32
           ./trg.exe -V | grep -F "0.15.0"
+          clang build_win/trg_win_compat.c build_win/test_c_bridge_write.c \
+            -o test_c_write_x64.exe -lkernel32 -lmsvcrt -O2
 
       - name: Verify 0 third-party DLL dependencies
         run: |
@@ -168,7 +187,7 @@ jobs:
           "
 
       - name: Run Windows qualification matrix (native x64)
-        run: python3 tests/test_windows_matrix.py --trg trg.exe
+        run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_x64.exe --arch x64
 
   qualify-windows-arm64:
     name: trg qualification (windows-arm64 on windows-11-arm)
@@ -185,12 +204,19 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: CLANGARM64
-          update: true
+          update: false
           install: >-
             mingw-w64-clang-aarch64-clang
             mingw-w64-clang-aarch64-lld
             mingw-w64-clang-aarch64-binutils
             mingw-w64-clang-aarch64-python
+
+      - name: Verify locked toolchain provenance
+        run: |
+          echo "=== Windows ARM64 Toolchain Info ==="
+          clang --version
+          windres --version
+          pacman -Q mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-binutils mingw-w64-clang-aarch64-lld
 
       - name: Download Windows build inputs
         uses: actions/download-artifact@v4
@@ -198,7 +224,7 @@ jobs:
           name: windows-build-inputs
           path: build_win
 
-      - name: Link trg.exe (ARM64)
+      - name: Link trg.exe & compile C bridge test (ARM64)
         run: |
           set -euo pipefail
           windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
@@ -207,6 +233,8 @@ jobs:
           clang build_win/trg_arm64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o trg.exe -lbcrypt -lws2_32 -lshell32
           ./trg.exe -V | grep -F "0.15.0"
+          clang build_win/trg_win_compat.c build_win/test_c_bridge_write.c \
+            -o test_c_write_arm64.exe -lkernel32 -lmsvcrt -O2
 
       - name: Verify 0 third-party DLL dependencies
         run: |
@@ -219,7 +247,7 @@ jobs:
           "
 
       - name: Run Windows qualification matrix (native ARM64)
-        run: python3 tests/test_windows_matrix.py --trg trg.exe
+        run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_arm64.exe --arch arm64
 
   qualification-gate:
     name: Four-platform qualification gate

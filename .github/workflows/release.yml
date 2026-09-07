@@ -113,11 +113,12 @@ jobs:
           echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
           echo "PATH=$sdk/bin:$PATH" >> "$GITHUB_ENV"
 
-      - name: Build standalone release binary
+      - name: Build standalone release binary & run full qualification suite
         run: |
           toka fetch
           toka build
           ./target/debug/trg -V
+          python3 tests/qualify.py
 
       - name: Package standalone archive
         id: pack
@@ -159,8 +160,14 @@ jobs:
           echo "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917  $archive" | shasum -a 256 --check
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           sdk="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64"
+          echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
           echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
           echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+          echo "PATH=$sdk/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Fetch Toka package dependencies
+        run: |
+          toka fetch
 
       - name: Cross-compile Windows COFF objects
         run: |
@@ -175,6 +182,7 @@ jobs:
           cp src/c/trg.rc build_win/
           cp LICENSE build_win/
           cp README.md build_win/
+          cp tests/test_c_bridge_write.c build_win/
 
       - name: Upload Windows build inputs
         uses: actions/upload-artifact@v4
@@ -199,13 +207,20 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          update: true
+          update: false
           install: >-
             mingw-w64-x86_64-clang
             mingw-w64-x86_64-lld
             mingw-w64-x86_64-binutils
             mingw-w64-x86_64-python
             zip
+
+      - name: Verify locked toolchain provenance
+        run: |
+          echo "=== Windows x64 Toolchain Info ==="
+          clang --version
+          windres --version
+          pacman -Q mingw-w64-x86_64-clang mingw-w64-x86_64-binutils mingw-w64-x86_64-lld
 
       - name: Download Windows build inputs
         uses: actions/download-artifact@v4
@@ -233,11 +248,21 @@ jobs:
           cp build_win/README.md "$arch_dir/"
           zip -r "$arch_dir.zip" "$arch_dir"
 
-      - name: Upload artifact
+          # Compile C bridge test binary separately (NOT inside release ZIP)
+          clang build_win/trg_win_compat.c build_win/test_c_bridge_write.c \
+            -o test_c_write_x64.exe -lkernel32 -lmsvcrt -O2
+
+      - name: Upload release ZIP
         uses: actions/upload-artifact@v4
         with:
           name: package-windows-x64
           path: trg-*-windows-x64.zip
+
+      - name: Upload test tool binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-tool-windows-x64
+          path: test_c_write_x64.exe
 
   build-windows-arm64:
     name: Build & Package Windows ARM64 (windows-11-arm)
@@ -256,13 +281,20 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: CLANGARM64
-          update: true
+          update: false
           install: >-
             mingw-w64-clang-aarch64-clang
             mingw-w64-clang-aarch64-lld
             mingw-w64-clang-aarch64-binutils
             mingw-w64-clang-aarch64-python
             zip
+
+      - name: Verify locked toolchain provenance
+        run: |
+          echo "=== Windows ARM64 Toolchain Info ==="
+          clang --version
+          windres --version
+          pacman -Q mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-binutils mingw-w64-clang-aarch64-lld
 
       - name: Download Windows build inputs
         uses: actions/download-artifact@v4
@@ -290,11 +322,21 @@ jobs:
           cp build_win/README.md "$arch_dir/"
           zip -r "$arch_dir.zip" "$arch_dir"
 
-      - name: Upload artifact
+          # Compile C bridge test binary separately (NOT inside release ZIP)
+          clang build_win/trg_win_compat.c build_win/test_c_bridge_write.c \
+            -o test_c_write_arm64.exe -lkernel32 -lmsvcrt -O2
+
+      - name: Upload release ZIP
         uses: actions/upload-artifact@v4
         with:
           name: package-windows-arm64
           path: trg-*-windows-arm64.zip
+
+      - name: Upload test tool binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-tool-windows-arm64
+          path: test_c_write_arm64.exe
 
   verify-linux-x64:
     name: Verify final package (linux-x64 on ubuntu-22.04)
@@ -369,13 +411,18 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          update: true
+          update: false
           install: mingw-w64-x86_64-python unzip
 
       - name: Download package
         uses: actions/download-artifact@v4
         with:
           name: package-windows-x64
+
+      - name: Download test tool
+        uses: actions/download-artifact@v4
+        with:
+          name: test-tool-windows-x64
 
       - name: Unpack and Verify package & DLL dependencies
         run: |
@@ -384,7 +431,7 @@ jobs:
           python3 tests/verify_standalone_binary.py --archive "$zipfile" --expected-version 0.15.0
           unzip -o "$zipfile"
           trg_path=$(find . -name "trg.exe" -path "*/trg-*-windows-x64/*" | head -n 1)
-          python3 tests/test_windows_matrix.py --trg "$trg_path"
+          python3 tests/test_windows_matrix.py --trg "$trg_path" --c-test test_c_write_x64.exe --arch x64
 
       - name: Upload verified archive
         uses: actions/upload-artifact@v4
@@ -409,13 +456,18 @@ jobs:
         uses: msys2/setup-msys2@v2
         with:
           msystem: CLANGARM64
-          update: true
+          update: false
           install: mingw-w64-clang-aarch64-python unzip
 
       - name: Download package
         uses: actions/download-artifact@v4
         with:
           name: package-windows-arm64
+
+      - name: Download test tool
+        uses: actions/download-artifact@v4
+        with:
+          name: test-tool-windows-arm64
 
       - name: Unpack and Verify package & DLL dependencies
         run: |
@@ -424,7 +476,7 @@ jobs:
           python3 tests/verify_standalone_binary.py --archive "$zipfile" --expected-version 0.15.0
           unzip -o "$zipfile"
           trg_path=$(find . -name "trg.exe" -path "*/trg-*-windows-arm64/*" | head -n 1)
-          python3 tests/test_windows_matrix.py --trg "$trg_path"
+          python3 tests/test_windows_matrix.py --trg "$trg_path" --c-test test_c_write_arm64.exe --arch arm64
 
       - name: Upload verified archive
         uses: actions/upload-artifact@v4
@@ -493,6 +545,10 @@ jobs:
             --arm64-zip "$win_arm64_zip" \
             --output-dir dist/winget
           tar -czf dist/trg-winget-manifests.tar.gz -C dist/winget manifests
+
+      - name: Validate WinGet manifest contracts
+        run: |
+          python3 -m unittest tests/test_winget_manifest.py
 
       - name: Verify release asset publisher logic against dist deliverables
         run: |

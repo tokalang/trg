@@ -92,29 +92,121 @@ def verify_archive_security(archive_path: pathlib.Path, expected_sha: str = None
     }
 
 
-ALLOWED_SYSTEM_DLLS = {
-    "kernel32.dll", "bcrypt.dll", "ws2_32.dll", "shell32.dll", "msvcrt.dll"
+import struct
+
+ALLOWED_SYSTEM_DLLS_X64 = {
+    "kernel32.dll", "msvcrt.dll", "shell32.dll", "ws2_32.dll", "bcrypt.dll"
 }
+
+ALLOWED_SYSTEM_DLLS_ARM64_PREFIXES = (
+    "api-ms-win-crt-",
+)
+ALLOWED_SYSTEM_DLLS_ARM64_EXACT = {
+    "kernel32.dll", "bcrypt.dll", "ws2_32.dll", "shell32.dll"
+}
+
+
+def parse_pe_imports_and_arch(bin_path: pathlib.Path) -> tuple[str, list[str]]:
+    data = bin_path.read_bytes()
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ValueError(f"{bin_path} is not a valid PE binary: missing MZ DOS header")
+
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    if e_lfanew + 24 > len(data):
+        raise ValueError(f"{bin_path} is corrupt: e_lfanew out of bounds")
+
+    pe_sig = data[e_lfanew:e_lfanew+4]
+    if pe_sig != b"PE\0\0":
+        raise ValueError(f"{bin_path} is not a valid PE binary: missing PE signature")
+
+    coff_offset = e_lfanew + 4
+    machine, num_sections, _, _, _, size_of_opt_hdr, _ = struct.unpack_from("<HHIIIHH", data, coff_offset)
+    if machine == 0x8664:
+        arch = "x64"
+    elif machine == 0xAA64:
+        arch = "arm64"
+    else:
+        raise ValueError(f"Unsupported PE machine architecture {hex(machine)} in {bin_path}")
+
+    opt_offset = coff_offset + 20
+    if size_of_opt_hdr < 128 or opt_offset + size_of_opt_hdr > len(data):
+        raise ValueError(f"Corrupt optional header in {bin_path}")
+
+    opt_magic = struct.unpack_from("<H", data, opt_offset)[0]
+    if opt_magic != 0x020B:
+        raise ValueError(f"Expected PE32+ 64-bit binary, got optional header magic {hex(opt_magic)}")
+
+    import_rva, import_size = struct.unpack_from("<II", data, opt_offset + 120)
+    if import_rva == 0 or import_size == 0:
+        raise ValueError(f"Suspicious executable {bin_path}: Import directory RVA is zero")
+
+    sections_offset = opt_offset + size_of_opt_hdr
+    sections = []
+    for i in range(num_sections):
+        s_offset = sections_offset + i * 40
+        if s_offset + 40 > len(data):
+            break
+        s_name, s_vsize, s_va, s_raw_size, s_raw_offset = struct.unpack_from("<8sIIII", data, s_offset)
+        sections.append((s_va, s_vsize, s_raw_offset, s_raw_size))
+
+    def rva_to_offset(rva):
+        for s_va, s_vsize, s_raw_offset, s_raw_size in sections:
+            if s_va <= rva < s_va + max(s_vsize, s_raw_size):
+                return s_raw_offset + (rva - s_va)
+        return None
+
+    import_desc_offset = rva_to_offset(import_rva)
+    if import_desc_offset is None or import_desc_offset >= len(data):
+        raise ValueError(f"Could not map import table RVA {hex(import_rva)} to file offset in {bin_path}")
+
+    imported_dlls = []
+    curr_desc = import_desc_offset
+    while curr_desc + 20 <= len(data):
+        orig_first_thunk, _, _, name_rva, _ = struct.unpack_from("<IIIII", data, curr_desc)
+        if orig_first_thunk == 0 and name_rva == 0:
+            break
+        name_offset = rva_to_offset(name_rva)
+        if name_offset is None or name_offset >= len(data):
+            raise ValueError(f"Could not map DLL name RVA {hex(name_rva)} in import descriptor")
+        end_idx = data.find(b"\0", name_offset)
+        if end_idx == -1:
+            raise ValueError(f"Unterminated DLL name at offset {name_offset}")
+        dll_name = data[name_offset:end_idx].decode("ascii", errors="replace").lower()
+        imported_dlls.append(dll_name)
+        curr_desc += 20
+
+    return arch, imported_dlls
 
 
 def verify_dll_dependencies(bin_path: pathlib.Path) -> dict:
     if not str(bin_path).lower().endswith(".exe"):
         return {"checked": False, "reason": "not a Windows PE executable"}
-    data = bin_path.read_bytes()
-    matches = re.findall(rb'[A-Za-z0-9_\-\.]+\.dll\b', data, re.IGNORECASE)
-    found_dlls = set()
-    disallowed_dlls = set()
-    for m in matches:
-        name = m.decode("ascii", errors="ignore").lower()
-        if name in ALLOWED_SYSTEM_DLLS or name.startswith("api-ms-win-crt-"):
-            found_dlls.add(name)
-        elif any(forbidden in name for forbidden in ["msvcp", "libgcc", "libwinpthread", "libstdc++"]):
-            disallowed_dlls.add(name)
-    if disallowed_dlls:
-        raise ValueError(f"Security violation: disallowed third-party DLL dependencies detected: {disallowed_dlls}")
+
+    arch, imported_dlls = parse_pe_imports_and_arch(bin_path)
+    if not imported_dlls:
+        raise ValueError(f"Zero imported DLLs found in {bin_path}, expected standard Windows system libraries")
+
+    unknown_dlls = []
+    for dll in imported_dlls:
+        if arch == "x64":
+            if dll not in ALLOWED_SYSTEM_DLLS_X64:
+                unknown_dlls.append(dll)
+        elif arch == "arm64":
+            if dll not in ALLOWED_SYSTEM_DLLS_ARM64_EXACT and not dll.startswith(ALLOWED_SYSTEM_DLLS_ARM64_PREFIXES):
+                unknown_dlls.append(dll)
+        else:
+            unknown_dlls.append(dll)
+
+    if unknown_dlls:
+        raise ValueError(
+            f"Security & Portability Violation: Binary {bin_path} ({arch}) imports unauthorized/third-party DLL(s): {unknown_dlls}. "
+            f"Only standard Windows system DLLs are permitted."
+        )
+
     return {
         "checked": True,
-        "allowed_dlls": sorted(list(found_dlls)),
+        "arch": arch,
+        "allowed_dlls": sorted(imported_dlls),
         "third_party_dll_count": 0
     }
 

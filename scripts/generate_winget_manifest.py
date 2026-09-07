@@ -99,7 +99,7 @@ ManifestVersion: 1.9.0
 
 PackageIdentifier: Tokalang.trg
 PackageVersion: {version}
-MinimumOSVersion: 10.0.0.0
+MinimumOSVersion: 10.0.18362.0
 InstallerType: zip
 NestedInstallerType: portable
 Commands:

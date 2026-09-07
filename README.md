@@ -194,18 +194,37 @@ You can also download standalone archives directly from [GitHub Releases](https:
 
 - **macOS (Apple Silicon / arm64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.11.0/trg-v0.11.0-macos-arm64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-macos-arm64.tar.gz
   ```
 
 - **Linux (x86_64)**:
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.11.0/trg-v0.11.0-linux-x64.tar.gz
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-linux-x64.tar.gz
   ```
+
+- **Windows (x64 / ARM64)**:
+  - x64: `trg-v0.15.0-windows-x64.zip`
+  - ARM64: `trg-v0.15.0-windows-arm64.zip`
 
 Download `SHA256SUMS` from the same release and verify the archive before
 extracting it. The automated installer above performs this check by default.
 
-### 4. Build from Source (via Toka Package Manager)
+### 4. Windows Installation (WinGet & Portable ZIP)
+
+#### WinGet Package Manager (Windows 10 1903+ / Windows 11)
+
+> [!NOTE]
+> `Tokalang.trg` manifests are generated and submitted with each release. Note that direct consumption via `winget install --id Tokalang.trg` becomes available after the upstream [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) catalog review and pull request is merged.
+
+Once the catalog pull request is merged upstream, install or upgrade directly via:
+```cmd
+winget install --id Tokalang.trg -e
+```
+
+#### Manual Extraction (x64 / ARM64)
+Download the standalone ZIP archive for your architecture (`windows-x64` or `windows-arm64`), extract `trg.exe`, and place it into any directory included in your system `PATH`.
+
+### 5. Build from Source (via Toka Package Manager)
 
 ```bash
 # Fetch dependencies and build
