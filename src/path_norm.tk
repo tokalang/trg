@@ -2,9 +2,59 @@ import core/str::{str}
 import std/vec::{Vec}
 import src/types::{PathStyle, PathKind, ResolvedPath}
 import src/posix::{posix_realpath}
+import sys/os/base as sys_base
 
-fn is_slash(b: u8) -> bool {
-    return b == 47:u8 // '/'
+extern fn trg_win_resolve_path(*rel_path: char, *out_buf: char, out_size: usize) -> i32
+
+pub fn is_windows_platform() -> bool {
+    return sys_base::path_sep() == ('\\' as char)
+}
+
+fn is_slash(c: char) -> bool {
+    if is_windows_platform() {
+        return c == ('/' as char) || c == ('\\' as char)
+    }
+    return c == ('/' as char)
+}
+
+fn has_drive_letter(s: str) -> bool {
+    if !is_windows_platform() || s.len < 2 {
+        return false
+    }
+    auto b0 = s.byte_at(0)
+    auto is_alpha = (b0 >= ('A' as char) && b0 <= ('Z' as char)) || (b0 >= ('a' as char) && b0 <= ('z' as char))
+    return is_alpha && s.byte_at(1) == (':' as char)
+}
+
+fn is_unc_path(s: str) -> bool {
+    if !is_windows_platform() || s.len < 5 {
+        return false
+    }
+    if is_slash(s.byte_at(0)) && is_slash(s.byte_at(1)) && !is_slash(s.byte_at(2)) {
+        return true
+    }
+    return false
+}
+
+fn is_drive_absolute(s: str) -> bool {
+    return has_drive_letter(s) && s.len >= 3 && is_slash(s.byte_at(2))
+}
+
+fn is_drive_relative(s: str) -> bool {
+    return has_drive_letter(s) && (s.len == 2 || !is_slash(s.byte_at(2)))
+}
+
+fn is_path_absolute(s: str) -> bool {
+    if s.len == 0 {
+        return false
+    }
+    if !is_windows_platform() {
+        return s.byte_at(0) == ('/' as char)
+    }
+    if is_unc_path(s) || is_drive_absolute(s) {
+        return true
+    }
+    return false
 }
 
 // Lexically normalizes an absolute or relative path into components,
@@ -45,50 +95,187 @@ fn split_and_normalize_components(path: str) -> Vec<string> {
     return parts
 }
 
-// Computes the normalized absolute identity key from (startup_cwd, target_path).
-pub fn compute_identity_key(startup_cwd: str, target_path: str) -> string {
-    auto full_path# = string::new()
-    if target_path.len > 0 && is_slash(target_path.byte_at(0)) {
-        // Target is already an absolute path
-        full_path#.push_str(target_path)
-    } else {
-        // Join with startup_cwd
-        full_path#.push_str(startup_cwd)
-        if startup_cwd.len == 0 || !is_slash(startup_cwd.byte_at(startup_cwd.len - 1)) {
-            full_path#.push_str("/")
+fn normalize_path_string(path: str) -> string {
+    if path.len == 0 {
+        if is_windows_platform() {
+            return string::from(".")
         }
-        full_path#.push_str(target_path)
-    }
-
-    auto comps = split_and_normalize_components(full_path.as_str())
-    if comps.is_empty() {
         return string::from("/")
     }
 
+    if !is_windows_platform() {
+        // POSIX path normalization: only '/' is a separator
+        auto prefix# = string::new()
+        auto rest# = path
+        if path.byte_at(0) == ('/' as char) {
+            prefix#.push_str("/")
+            rest = path.substr(1, path.len - 1)
+        }
+        auto comps = split_and_normalize_components(rest)
+        if comps.is_empty() {
+            if prefix.len() > 0 {
+                return cede prefix
+            }
+            return string::from(".")
+        }
+        auto res# = string::new()
+        if prefix.len() > 0 {
+            res#.push_str("/")
+        }
+        auto c_idx# = 0:usize
+        loop c_idx < comps.len() {
+            if c_idx > 0:usize {
+                res#.push_str("/")
+            }
+            res#.push_str(comps.borrow(c_idx).as_str())
+            c_idx = c_idx + 1
+        }
+        return cede res
+    }
+
+    // Windows path normalization
+    auto prefix# = string::new()
+    auto rest# = path
+
+    if is_unc_path(path) {
+        // \\server\share\rest
+        auto i# = 2:usize
+        loop i < path.len && !is_slash(path.byte_at(i)) {
+            i = i + 1
+        }
+        auto server = path.substr(2, i - 2)
+        loop i < path.len && is_slash(path.byte_at(i)) {
+            i = i + 1
+        }
+        auto share_start = i
+        loop i < path.len && !is_slash(path.byte_at(i)) {
+            i = i + 1
+        }
+        auto share = path.substr(share_start, i - share_start)
+        loop i < path.len && is_slash(path.byte_at(i)) {
+            i = i + 1
+        }
+        rest = path.substr(i, path.len - i)
+        prefix#.push_str("//")
+        prefix#.push_str(server)
+        prefix#.push_str("/")
+        prefix#.push_str(share)
+        prefix#.push_str("/")
+    } else if is_drive_absolute(path) {
+        auto mut_ch# = path.byte_at(0)
+        if mut_ch >= ('a' as char) && mut_ch <= ('z' as char) {
+            mut_ch = (mut_ch as u8 - 32:u8) as char // uppercase drive letter
+        }
+        prefix#.push_char(mut_ch)
+        prefix#.push_str(":/")
+        rest = path.substr(3, path.len - 3)
+    } else if is_drive_relative(path) {
+        auto mut_ch# = path.byte_at(0)
+        if mut_ch >= ('a' as char) && mut_ch <= ('z' as char) {
+            mut_ch = (mut_ch as u8 - 32:u8) as char // uppercase drive letter
+        }
+        prefix#.push_char(mut_ch)
+        prefix#.push_str(":")
+        rest = path.substr(2, path.len - 2)
+    } else if is_slash(path.byte_at(0)) {
+        prefix#.push_str("/")
+        rest = path.substr(1, path.len - 1)
+    }
+
+    auto comps = split_and_normalize_components(rest)
+    if comps.is_empty() {
+        if prefix.len() > 0 {
+            return cede prefix
+        }
+        return string::from(".")
+    }
+
     auto res# = string::new()
-    auto c_idx# = 0:usize
-    loop c_idx < comps.len() {
-        res#.push_str("/")
-        res#.push_str(comps.borrow(c_idx).as_str())
-        c_idx = c_idx + 1
+    if prefix.len() > 0 {
+        res#.push_str(prefix.as_str())
+        auto c_idx# = 0:usize
+        loop c_idx < comps.len() {
+            if c_idx > 0:usize {
+                res#.push_str("/")
+            }
+            res#.push_str(comps.borrow(c_idx).as_str())
+            c_idx = c_idx + 1
+        }
+    } else {
+        auto c_idx# = 0:usize
+        loop c_idx < comps.len() {
+            if c_idx > 0:usize {
+                res#.push_str("/")
+            }
+            res#.push_str(comps.borrow(c_idx).as_str())
+            c_idx = c_idx + 1
+        }
     }
     return cede res
 }
 
+// Computes the normalized absolute identity key from (startup_cwd, target_path).
+pub fn compute_identity_key(startup_cwd: str, target_path: str) -> Result<string, string> {
+    if is_windows_platform() {
+        auto buf = [0:char; 4096]
+        unsafe {
+            auto s_target = string::from(target_path)
+            auto *c_target = s_target.c_str()
+            auto *buf_ptr = &buf[0] as *char
+            auto res_len = trg_win_resolve_path(*c_target, *buf_ptr, 4096:usize)
+            if res_len > 0:i32 {
+                auto s# = string::new()
+                auto i# = 0:usize
+                loop i < (res_len as usize) {
+                    s#.push_char(buf[i])
+                    i = i + 1
+                }
+                if s.len() > 3:usize && s.as_str().ends_with("/") {
+                    s = string::from(s.as_str().substr(0, s.len() - 1))
+                }
+                return Result<string, string>::Ok(cede s)
+            }
+            // Explicitly fail-closed: do NOT guess or synthesize an unverified fallback identity!
+            return Result<string, string>::Err(string::from("Windows path resolution failed"))
+        }
+    }
+    auto full_path# = string::new()
+    if target_path.starts_with("/") {
+        full_path#.push_str(target_path)
+    } else {
+        full_path#.push_str(startup_cwd)
+        if startup_cwd.len == 0 || !startup_cwd.ends_with("/") {
+            full_path#.push_str("/")
+        }
+        full_path#.push_str(target_path)
+    }
+    return Result<string, string>::Ok(normalize_path_string(full_path.as_str()))
+}
+
 // Normalizes startup_cwd lexically so that containment checks are consistent.
 pub fn normalize_cwd(raw_cwd: str) -> string {
-    auto comps = split_and_normalize_components(raw_cwd)
-    if comps.is_empty() {
-        return string::from("/")
+    if is_windows_platform() {
+        auto buf = [0:char; 4096]
+        unsafe {
+            auto s_raw = string::from(raw_cwd)
+            auto *c_raw = s_raw.c_str()
+            auto *buf_ptr = &buf[0] as *char
+            auto res_len = trg_win_resolve_path(*c_raw, *buf_ptr, 4096:usize)
+            if res_len > 0:i32 {
+                auto s# = string::new()
+                auto i# = 0:usize
+                loop i < (res_len as usize) {
+                    s#.push_char(buf[i])
+                    i = i + 1
+                }
+                if s.len() > 3:usize && s.as_str().ends_with("/") {
+                    s = string::from(s.as_str().substr(0, s.len() - 1))
+                }
+                return cede s
+            }
+        }
     }
-    auto res# = string::new()
-    auto c_idx# = 0:usize
-    loop c_idx < comps.len() {
-        res#.push_str("/")
-        res#.push_str(comps.borrow(c_idx).as_str())
-        c_idx = c_idx + 1
-    }
-    return cede res
+    return normalize_path_string(raw_cwd)
 }
 
 // Checks if identity_key is strictly contained inside normalized_cwd with component boundary safety.
@@ -96,11 +283,22 @@ pub fn is_inside_base(identity_key: str, normalized_cwd: str) -> bool {
     if normalized_cwd == "/" {
         return true
     }
+    if has_drive_letter(normalized_cwd) && normalized_cwd.len == 3 && is_slash(normalized_cwd.byte_at(2)) {
+        if has_drive_letter(identity_key) && identity_key.len >= 2 {
+            auto d1 = normalized_cwd.byte_at(0)
+            auto d2 = identity_key.byte_at(0)
+            if d1 == d2 {
+                return true
+            }
+        }
+    }
     if identity_key == normalized_cwd {
         return true
     }
     if identity_key.starts_with(normalized_cwd) {
-        // Ensure exact directory boundary (i.e. followed by '/')
+        if normalized_cwd.ends_with("/") {
+            return true
+        }
         if identity_key.len > normalized_cwd.len && is_slash(identity_key.byte_at(normalized_cwd.len)) {
             return true
         }
@@ -113,74 +311,87 @@ pub fn resolve_path(
     normalized_cwd: str,
     target_path: str,
     style: PathStyle
-) -> ResolvedPath {
+) -> Result<ResolvedPath, string> {
     if target_path == "-" {
-        return ResolvedPath(
+        return Result<ResolvedPath, string>::Ok(ResolvedPath(
             identity_key = string::from("<stdin>"),
             display_path = string::from("<stdin>"),
             path_kind = PathKind::Stdin
-        )
+        ))
     }
 
-    auto identity_key = compute_identity_key(normalized_cwd, target_path)
+    auto id_res = compute_identity_key(normalized_cwd, target_path)
+    if id_res.is_err() {
+        return Result<ResolvedPath, string>::Err(id_res.unwrap_err())
+    }
+    auto identity_key = id_res.unwrap()
     auto inside = is_inside_base(identity_key.as_str(), normalized_cwd)
 
     match style {
         auto PathStyle::WorkspaceRelative => {
             if inside {
                 if identity_key.as_str() == normalized_cwd {
-                    return ResolvedPath(
+                    return Result<ResolvedPath, string>::Ok(ResolvedPath(
                         identity_key = cede identity_key,
                         display_path = string::from("."),
                         path_kind = PathKind::Relative
-                    )
+                    ))
                 }
                 auto prefix_len# = normalized_cwd.len
-                if normalized_cwd != "/" {
+                if !normalized_cwd.ends_with("/") {
                     prefix_len = prefix_len + 1:usize // strip the trailing '/'
-                } else {
-                    prefix_len = 1:usize
                 }
                 auto rel_len = identity_key.as_str().len - prefix_len
                 auto rel_str = string::from(identity_key.as_str().substr(prefix_len, rel_len))
-                return ResolvedPath(
+                return Result<ResolvedPath, string>::Ok(ResolvedPath(
                     identity_key = cede identity_key,
                     display_path = cede rel_str,
                     path_kind = PathKind::Relative
-                )
+                ))
             } else {
                 auto disp = identity_key.clone()
-                return ResolvedPath(
+                return Result<ResolvedPath, string>::Ok(ResolvedPath(
                     identity_key = cede identity_key,
                     display_path = cede disp,
                     path_kind = PathKind::Absolute
-                )
+                ))
             }
         }
         auto PathStyle::Absolute => {
             auto disp = identity_key.clone()
-            return ResolvedPath(
+            return Result<ResolvedPath, string>::Ok(ResolvedPath(
                 identity_key = cede identity_key,
                 display_path = cede disp,
                 path_kind = PathKind::Absolute
-            )
+            ))
         }
         auto PathStyle::AsGiven => {
-            auto is_abs = target_path.len > 0 && is_slash(target_path.byte_at(0))
+            auto is_abs = is_path_absolute(target_path)
             auto pkind# = PathKind::Relative
             if is_abs {
                 pkind = PathKind::Absolute
             }
-            return ResolvedPath(
+            return Result<ResolvedPath, string>::Ok(ResolvedPath(
                 identity_key = cede identity_key,
                 display_path = string::from(target_path),
                 path_kind = pkind
-            )
+            ))
         }
     }
 }
 
 pub fn join_raw_abs_path(startup_cwd: str, target_path: str) -> string {
+    if is_windows_platform() {
+        if has_drive_letter(target_path) || (target_path.len > 0 && is_slash(target_path.byte_at(0))) {
+            return string::from(target_path)
+        }
+        auto full# = string::from(startup_cwd)
+        if startup_cwd.len == 0 || (!startup_cwd.ends_with("/") && !startup_cwd.ends_with("\\")) {
+            full#.push_str("/")
+        }
+        full#.push_str(target_path)
+        return cede full
+    }
     if target_path.len > 0 && is_slash(target_path.byte_at(0)) {
         return string::from(target_path)
     }
@@ -197,7 +408,8 @@ pub fn resolves_to_root(startup_cwd: str, target_path: str) -> bool {
     auto raw_abs = join_raw_abs_path(startup_cwd, target_path)
     match posix_realpath(raw_abs) {
         auto Option<string>::Some(&canon) => {
-            if canon.as_str() == "/" {
+            auto s = canon.as_str()
+            if s == "/" || (has_drive_letter(s) && s.len == 3 && is_slash(s.byte_at(2))) {
                 return true
             }
         }
@@ -205,9 +417,14 @@ pub fn resolves_to_root(startup_cwd: str, target_path: str) -> bool {
     }
 
     // 2. Lexical resolution fallback (handles root aliases //, /./, /Users/..)
-    auto lex_id = compute_identity_key(startup_cwd, target_path)
-    if lex_id.as_str() == "/" {
-        return true
+    match compute_identity_key(startup_cwd, target_path) {
+        auto Result<string, string>::Ok(&lex_id) => {
+            auto ls = lex_id.as_str()
+            if ls == "/" || (has_drive_letter(ls) && ls.len == 3 && is_slash(ls.byte_at(2))) {
+                return true
+            }
+        }
+        _ => {}
     }
 
     return false

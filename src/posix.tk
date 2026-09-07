@@ -2,26 +2,30 @@
 import core/types::{usize, Addr, ADDR0, char}
 import core/result::{Result}
 import core/option::{Option}
-import sys/os/abi::{
-    toka_stat_impl,
-    toka_stat_mode,
-    toka_stat_size,
-    toka_stat_free,
-    toka_opendir_impl,
-    toka_readdir_impl,
-    toka_closedir_impl,
-    toka_readdir_name,
-    toka_get_last_error,
-    toka_set_errno_impl
-}
+import sys/os/fs as sys_fs
+import sys/os/base as sys_base
+
+extern fn toka_get_errno_impl() -> i32
+extern fn toka_set_errno_impl(err: i32) -> void
+extern fn toka_get_last_error() -> i32
+extern fn toka_setmode(fd: i32, mode: i32) -> i32
 
 extern fn isatty(fd: i32) -> i32
 extern fn read(fd: i32, *buf: void, count: usize) -> isize
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
+extern fn close(fd: i32) -> i32
 extern fn signal(sig: i32, handler: usize) -> usize
 extern fn readlink(*path: char, *buf: char, bufsiz: usize) -> isize
 extern fn realpath(*path: char, *resolved_path: char) -> Addr
 extern fn ferror(*stream: void) -> i32
+extern fn trg_win_clear_last_error() -> void
+extern fn trg_win_classify_reparse(*path: char) -> i32
+
+pub fn posix_close(fd: i32) -> i32 {
+    unsafe {
+        return close(fd)
+    }
+}
 
 pub shape StatInfo (
     mode: u32,
@@ -31,9 +35,17 @@ pub shape StatInfo (
     is_symlink: bool
 )
 
+pub fn is_windows_target() -> bool {
+    return sys_base::path_sep() == ('\\' as char)
+}
+
 pub fn posix_init_signals() {
     unsafe {
-        // Ignore SIGPIPE (13) so that writing to a closed pipe returns EPIPE instead of crashing
+        // Set standard streams to binary mode on Windows (0x8000 = _O_BINARY), no-op on Unix
+        toka_setmode(0:i32, 32768:i32)
+        toka_setmode(1:i32, 32768:i32)
+        toka_setmode(2:i32, 32768:i32)
+        // Ignore SIGPIPE (13) on POSIX so that writing to a closed pipe returns EPIPE instead of crashing
         signal(13:i32, 1:usize)
     }
 }
@@ -45,53 +57,105 @@ pub fn posix_ferror(stream: Addr) -> bool {
     }
 }
 
-pub fn posix_clear_errno() {
+// Retrieves CRT errno
+pub fn posix_get_crt_errno() -> i32 {
+    unsafe {
+        return toka_get_errno_impl()
+    }
+}
+
+pub fn posix_clear_crt_errno() {
     unsafe {
         toka_set_errno_impl(0:i32)
     }
 }
 
-pub fn posix_get_errno() -> i32 {
+// Retrieves target OS/system error (Win32 GetLastError on Windows, errno on Unix)
+pub fn posix_get_system_error() -> i32 {
     unsafe {
         return toka_get_last_error()
     }
 }
 
+pub fn posix_clear_system_error() {
+    unsafe {
+        if is_windows_target() {
+            trg_win_clear_last_error()
+        } else {
+            toka_set_errno_impl(0:i32)
+        }
+    }
+}
+
+pub fn posix_clear_errno() {
+    posix_clear_crt_errno()
+}
+
+pub fn posix_get_errno() -> i32 {
+    return posix_get_system_error()
+}
+
 pub fn posix_stat(path: string) -> Result<StatInfo, i32> {
     auto *cpath = path.c_str()
-    auto link_buf = [0:char; 1024]
     unsafe {
-        auto *buf_ptr = &link_buf[0] as *char
-        auto link_len = readlink(*cpath, *buf_ptr, 1024:usize)
-        if link_len > 0 {
-            // Symlink confirmed via portable readlink()
-            return Result<StatInfo, i32>::Ok(StatInfo(
-                mode = 40960:u32, // S_IFLNK
-                size = 0:u64,
-                is_dir = false,
-                is_file = false,
-                is_symlink = true
-            ))
+        if is_windows_target() {
+            auto reparse_cls = trg_win_classify_reparse(*cpath as Addr as *char)
+            if reparse_cls == 1:i32 {
+                // Symlink / junction / directory reparse point to skip
+                return Result<StatInfo, i32>::Ok(StatInfo(
+                    mode = 40960:u32, // S_IFLNK
+                    size = 0:u64,
+                    is_dir = false,
+                    is_file = false,
+                    is_symlink = true
+                ))
+            } else if reparse_cls < 0:i32 {
+                // Detection failure: do not treat as normal object!
+                auto err# = toka_get_last_error()
+                if err == 0:i32 {
+                    if reparse_cls == -2:i32 {
+                        err = 2:i32 // ERROR_FILE_NOT_FOUND
+                    } else {
+                        err = 5:i32 // ERROR_ACCESS_DENIED
+                    }
+                }
+                return Result<StatInfo, i32>::Err(err)
+            }
+            // reparse_cls == 0: normal object, proceed to runtime stat
+        } else {
+            auto link_buf = [0:char; 1024]
+            auto *buf_ptr = &link_buf[0] as *char
+            auto link_len = readlink(*cpath, *buf_ptr, 1024:usize)
+            if link_len > 0 {
+                // Symlink confirmed via portable readlink()
+                return Result<StatInfo, i32>::Ok(StatInfo(
+                    mode = 40960:u32, // S_IFLNK
+                    size = 0:u64,
+                    is_dir = false,
+                    is_file = false,
+                    is_symlink = true
+                ))
+            }
         }
 
         // Not a symlink: query target metadata via portable runtime stat
-        auto stat_ptr = toka_stat_impl(*cpath as Addr)
+        posix_clear_system_error()
+        auto stat_ptr = sys_fs::stat_impl(*cpath as Addr)
         if stat_ptr == ADDR0 {
-            return Result<StatInfo, i32>::Err(toka_get_last_error())
+            auto err# = posix_get_system_error()
+            if err == 0:i32 { err = 2:i32 }
+            return Result<StatInfo, i32>::Err(err)
         }
 
-        auto mode = toka_stat_mode(stat_ptr)
-        auto size = toka_stat_size(stat_ptr)
-        toka_stat_free(stat_ptr)
-
-        // 0xF000 = 61440, 0x4000 = 16384 (DIR), 0x8000 = 32768 (REG)
-        auto file_type = mode & 61440:u32
-        auto is_dir = file_type == 16384:u32
-        auto is_file = file_type == 32768:u32
+        auto mode = sys_fs::stat_get_mode_impl(stat_ptr)
+        auto size = sys_fs::stat_get_size_impl(stat_ptr)
+        auto is_dir = sys_fs::stat_is_dir_impl(mode)
+        auto is_file = sys_fs::stat_is_file_impl(mode)
+        sys_fs::stat_free_impl(stat_ptr)
 
         return Result<StatInfo, i32>::Ok(StatInfo(
             mode = mode,
-            size = size as u64,
+            size = size,
             is_dir = is_dir,
             is_file = is_file,
             is_symlink = false
@@ -102,9 +166,12 @@ pub fn posix_stat(path: string) -> Result<StatInfo, i32> {
 pub fn posix_opendir(path: string) -> Result<Addr, i32> {
     auto *cpath = path.c_str()
     unsafe {
-        auto dir = toka_opendir_impl(*cpath as Addr)
+        posix_clear_system_error()
+        auto dir = sys_fs::opendir_impl(*cpath as Addr)
         if dir == ADDR0 {
-            return Result<Addr, i32>::Err(toka_get_last_error())
+            auto err# = posix_get_system_error()
+            if err == 0:i32 { err = 2:i32 }
+            return Result<Addr, i32>::Err(err)
         }
         return Result<Addr, i32>::Ok(dir)
     }
@@ -113,19 +180,35 @@ pub fn posix_opendir(path: string) -> Result<Addr, i32> {
 pub fn posix_readdir(dir: Addr) -> Result<Option<string>, i32> {
     unsafe {
         loop true {
-            posix_clear_errno()
-            auto entry = toka_readdir_impl(dir)
-            if entry == ADDR0 {
-                auto err = toka_get_last_error()
-                if err != 0:i32 {
-                    return Result<Option<string>, i32>::Err(err)
+            posix_clear_system_error()
+            posix_clear_crt_errno()
+            auto entry_opt = sys_fs::readdir_impl(dir)
+            match cede entry_opt {
+                auto Option<string>::Some('name) => {
+                    if 'name.as_str() != "." && 'name.as_str() != ".." {
+                        return Result<Option<string>, i32>::Ok(Option<string>::Some(cede 'name))
+                    }
                 }
-                return Result<Option<string>, i32>::Ok(Option<string>::None)
-            }
-            auto *name_ptr = toka_readdir_name(entry) as *char
-            auto name = string::from_cstr(*name_ptr)
-            if name.as_str() != "." && name.as_str() != ".." {
-                return Result<Option<string>, i32>::Ok(Option<string>::Some(cede name))
+                Option<string>::None => {
+                    if is_windows_target() {
+                        auto err = posix_get_system_error()
+                        // On Windows, FindNextFileW returning FALSE sets GetLastError to ERROR_NO_MORE_FILES (18).
+                        // 0 is also clean EOF. Any other code (including ERROR_ACCESS_DENIED, etc.) is a real error.
+                        // We strictly check for 18, and do NOT swallow error 2 (ERROR_FILE_NOT_FOUND) or others!
+                        if err != 0:i32 && err != 18:i32 {
+                            return Result<Option<string>, i32>::Err(err)
+                        }
+                        return Result<Option<string>, i32>::Ok(Option<string>::None)
+                    } else {
+                        // On POSIX, readdir at EOF leaves errno unchanged (0).
+                        // An error sets errno != 0.
+                        auto err = posix_get_crt_errno()
+                        if err != 0:i32 {
+                            return Result<Option<string>, i32>::Err(err)
+                        }
+                        return Result<Option<string>, i32>::Ok(Option<string>::None)
+                    }
+                }
             }
         }
         return Result<Option<string>, i32>::Ok(Option<string>::None)
@@ -134,7 +217,7 @@ pub fn posix_readdir(dir: Addr) -> Result<Option<string>, i32> {
 
 pub fn posix_closedir(dir: Addr) {
     unsafe {
-        toka_closedir_impl(dir)
+        sys_fs::closedir_impl(dir)
     }
 }
 
@@ -153,13 +236,14 @@ pub fn posix_write_stdout(s: str) -> i32 {
         auto offset# = 0:usize
         loop rem > 0 {
             auto *p = (base_addr + offset) as *void
+            posix_clear_crt_errno()
             auto n = write(1:i32, *p, rem)
             if n < 0 {
-                auto err = toka_get_last_error()
+                auto err = posix_get_crt_errno()
                 if err == 4:i32 { // EINTR: retry
                     continue
                 }
-                if err == 32:i32 { // EPIPE: broken pipe
+                if err == 32:i32 { // EPIPE strictly
                     return 1
                 }
                 return 2 // Fatal I/O write error

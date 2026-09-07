@@ -1,11 +1,11 @@
 pub const PACKAGE = (
     name = "trg",
-    version = "0.14.1",
+    version = "0.15.0",
     kind = "application",
     license = "Apache-2.0",
     compiler = "1.0.0-rc.11",
     entry_modules = ["src/main.tk"],
-    targets = ["macos", "linux"],
+    targets = ["macos", "linux", "windows"],
     dependencies = (
         regex = "regex:0.3.0",
     ),

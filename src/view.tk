@@ -20,8 +20,9 @@ import src/syntax::{
     check_is_self_closed_structured
 }
 import src/printer::{u64_to_string, json_escape}
-
 import src/parse::{parse_size_bytes_strict}
+import std/env as env
+import src/path_norm::{normalize_cwd, compute_identity_key}
 
 pub shape ViewLineRecord (
     line_number: usize,
@@ -2465,8 +2466,20 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         return 2
     }
 
+    auto raw_path = path_opt.unwrap()
+    auto startup_cwd = normalize_cwd(env::current_dir().as_str())
+    auto id_res = compute_identity_key(startup_cwd.as_str(), raw_path.as_str())
+    if id_res.is_err() {
+        auto err# = string::from("trg: ")
+        err#.push_str(raw_path.as_str())
+        err#.push_str(": Failed to resolve target path")
+        print_err(err.as_str())
+        return 2
+    }
+    auto final_file_path = id_res.unwrap()
+
     auto opts = ViewOptions(
-        file_path = path_opt.unwrap(),
+        file_path = cede final_file_path,
         line = line_opt,
         context = context,
         block = block,

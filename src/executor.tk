@@ -61,7 +61,19 @@ pub fn execute_files_mode(
     loop f_idx < num_files {
         if budget_state.is_truncated { break }
         auto &path_str = files.borrow(f_idx)
-        auto resolved = resolve_path(startup_cwd.as_str(), path_str.as_str(), opts.path_style)
+        auto resolved_res = resolve_path(startup_cwd.as_str(), path_str.as_str(), opts.path_style)
+        if resolved_res.is_err() {
+            global_had_error = true
+            all_diagnostics#.push(SearchDiagnostic::new(
+                string::from("path"),
+                Option<string>::Some(path_str.clone()),
+                string::from("Failed to resolve target path"),
+                Option<i32>::Some(2:i32)
+            ))
+            f_idx = f_idx + 1
+            continue
+        }
+        auto resolved = resolved_res.unwrap()
         auto outcome = writer#.emit_files_mode_path(budget_state#, resolved.display_path.as_str())
         match outcome {
             EmitOutcome::Written => {}

@@ -1,9 +1,9 @@
-// True incremental 64KB chunk-buffered streaming scanner with O(1) circular BeforeRing, OpeningMatchBatch atomic preflight, and lazy JSON framing.
 import core/str::{str}
+import core/types::{Addr, ADDR0}
 import core/option::{Option}
 import std/vec::{Vec}
 import std/env
-import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
+import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread, libc_dup, libc_fdopen}
 import src/types::{
     CliOptions,
     MatchEvent,
@@ -29,7 +29,7 @@ import src/types::{
 }
 import src/path_norm::{resolve_path, normalize_cwd}
 import src/matcher::{SearchPlan}
-import src/posix::{posix_ferror, posix_get_errno}
+import src/posix::{posix_ferror, posix_get_errno, posix_get_crt_errno, posix_clear_crt_errno, posix_close}
 import src/printer::{
     OutputBudgetWriter,
     FileFrameState,
@@ -912,6 +912,47 @@ pub fn scan_file_stream(
     )
 }
 
+shape OpenStreamResult (
+    stream: Addr,
+    errno_code: i32
+)
+
+fn open_target_stream(is_stdin: bool, path_str: str) -> OpenStreamResult {
+    unsafe {
+        auto mode_buf# = [0:char; 4]
+        mode_buf[0] = 'r' as char
+        mode_buf[1] = 'b' as char
+        mode_buf[2] = 0 as char
+        auto *mode_ptr = &mode_buf[0] as *char
+
+        posix_clear_crt_errno()
+
+        if is_stdin {
+            auto dup_fd = libc_dup(0:i32)
+            if dup_fd < 0:i32 {
+                auto err = posix_get_crt_errno()
+                return OpenStreamResult(stream = ADDR0, errno_code = err)
+            }
+            auto nul *fp = libc_fdopen(dup_fd, *mode_ptr)
+            if *fp == null {
+                auto err = posix_get_crt_errno()
+                posix_close(dup_fd)
+                return OpenStreamResult(stream = ADDR0, errno_code = err)
+            }
+            return OpenStreamResult(stream = (*fp as Addr), errno_code = 0:i32)
+        }
+
+        auto s = string::from(path_str)
+        auto *path_c = s.c_str()
+        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
+        if *fp == null {
+            auto err = posix_get_crt_errno()
+            return OpenStreamResult(stream = ADDR0, errno_code = err)
+        }
+        return OpenStreamResult(stream = (*fp as Addr), errno_code = 0:i32)
+    }
+}
+
 pub fn scan_file_stream_with_pass(
     target_path: string,
     opts: CliOptions,
@@ -929,27 +970,37 @@ pub fn scan_file_stream_with_pass(
     }
 
     auto startup_cwd = normalize_cwd(env::current_dir().as_str())
-    auto resolved_path = resolve_path(startup_cwd.as_str(), target_path.as_str(), opts.path_style)
+    auto diagnostics# = Vec<SearchDiagnostic>::new()
+    auto resolved_res = resolve_path(startup_cwd.as_str(), target_path.as_str(), opts.path_style)
+    if resolved_res.is_err() {
+        diagnostics#.push(SearchDiagnostic::new(
+            string::from("path"),
+            Option<string>::Some(target_path.clone()),
+            string::from("Failed to resolve target path"),
+            Option<i32>::Some(2:i32)
+        ))
+        if !opts.mcp_mode {
+            log_scanner_err(target_path.as_str(), "Failed to resolve target path")
+        }
+        return ScanResult(
+            path = target_path.clone(),
+            matches_count = 0,
+            has_match = false,
+            is_binary = false,
+            had_error = true,
+            is_broken_pipe = false,
+            diagnostics = cede diagnostics
+        )
+    }
+    auto resolved_path = resolved_res.unwrap()
 
     auto is_stdin = target_path.as_str() == "-"
-    auto open_path# = target_path.clone()
-    if is_stdin {
-        open_path = string::from("/dev/stdin")
-    }
-
-    auto diagnostics# = Vec<SearchDiagnostic>::new()
-
-    auto mode_buf# = [0:char; 8]
-    mode_buf[0] = 'r' as char
-    mode_buf[1] = 'b' as char
-    mode_buf[2] = 0 as char
+    auto open_path = target_path.clone()
 
     unsafe {
-        auto *mode_ptr = &mode_buf[0] as *char
-        auto *path_c = open_path.c_str()
-        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
-        if *fp == null {
-            auto err_code = posix_get_errno()
+        auto open_res = open_target_stream(is_stdin, open_path.as_str())
+        if open_res.stream == ADDR0 {
+            auto err_code = open_res.errno_code
             diagnostics#.push(SearchDiagnostic::new(
                 string::from("open"),
                 Option<string>::Some(resolved_path.display_path.clone()),
@@ -970,7 +1021,7 @@ pub fn scan_file_stream_with_pass(
             )
         }
 
-        auto *file = fp.unwrap()
+        auto *file = (open_res.stream as *void)
         auto nul *raw_buf = libc_malloc(65536:usize)
         if *raw_buf == null {
             libc_fclose(*file)
@@ -1039,7 +1090,7 @@ pub fn scan_file_stream_with_pass(
             if bytes_read == 0 {
                 if posix_ferror((*file) as Addr) {
                     had_error = true
-                    auto err_code = posix_get_errno()
+                    auto err_code = posix_get_crt_errno()
                     diagnostics#.push(SearchDiagnostic::new(
                         string::from("read"),
                         Option<string>::Some(target_path.clone()),

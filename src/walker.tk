@@ -4,7 +4,7 @@ import core/result::{Result}
 import core/option::{Option}
 import std/vec::{Vec}
 import src/types::{CliOptions, GlobRule, SortMode, SearchDiagnostic}
-import src/posix::{posix_stat, posix_opendir, posix_readdir, posix_closedir, posix_get_errno}
+import src/posix::{posix_stat, posix_opendir, posix_readdir, posix_closedir, posix_get_errno, is_windows_target}
 import src/ignore::{IgnoreStack}
 import src/glob::{is_glob_allowed}
 import src/file_types::{match_type_filter}
@@ -122,13 +122,40 @@ fn build_child_path(parent: str, child: str) -> string {
     if parent == "." || parent == "" {
         return string::from(child)
     }
-    if parent.ends_with("/") {
+    if !is_windows_target() {
+        // POSIX: only '/' is a directory separator. Backslash is a normal character!
+        if parent.ends_with("/") {
+            auto p# = string::from(parent)
+            p#.push_str(child)
+            return cede p
+        }
+        auto p# = string::from(parent)
+        p#.push_str("/")
+        p#.push_str(child)
+        return cede p
+    }
+
+    // Windows target
+    if parent.ends_with("/") || parent.ends_with("\\") {
         auto p# = string::from(parent)
         p#.push_str(child)
         return cede p
     }
+    auto use_bs# = false
+    auto i# = 0:usize
+    loop i < parent.len {
+        if parent.byte_at(i) == ('\\' as char) {
+            use_bs = true
+            break
+        }
+        i = i + 1
+    }
     auto p# = string::from(parent)
-    p#.push_str("/")
+    if use_bs {
+        p#.push_str("\\")
+    } else {
+        p#.push_str("/")
+    }
     p#.push_str(child)
     return cede p
 }
@@ -258,6 +285,7 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
     auto files# = Vec<string>::new()
     auto diagnostics# = Vec<SearchDiagnostic>::new()
     auto num_paths = opts.paths.len()
+    auto startup_cwd = normalize_cwd(env::current_dir().as_str())
     auto had_error# = false
 
     auto i# = 0:usize
@@ -268,6 +296,22 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
         if path_view == "-" {
             // Stdin target
             files#.push(string::from("-"))
+            i = i + 1
+            continue
+        }
+
+        auto id_res = compute_identity_key(startup_cwd.as_str(), path_arg.as_str())
+        if id_res.is_err() {
+            diagnostics#.push(SearchDiagnostic::new(
+                string::from("path"),
+                Option<string>::Some(path_arg.clone()),
+                string::from("Failed to resolve target path"),
+                Option<i32>::Some(2:i32)
+            ))
+            if !opts.mcp_mode {
+                log_walker_err(path_view, "Failed to resolve target path")
+            }
+            had_error = true
             i = i + 1
             continue
         }
@@ -321,7 +365,10 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
             auto &f = result_files.borrow(idx)
             auto key# = f.clone()
             if f.as_str() != "-" {
-                key = compute_identity_key(startup_cwd.as_str(), f.as_str())
+                match compute_identity_key(startup_cwd.as_str(), f.as_str()) {
+                    auto Result<string, string>::Ok(&k) => { key = k.clone() }
+                    auto Result<string, string>::Err(_) => { key = f.clone() }
+                }
             }
             auto seen_opt = seen_keys.get(key.clone())
             match seen_opt {

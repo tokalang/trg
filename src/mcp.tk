@@ -605,7 +605,7 @@ pub fn run_mcp_server() -> i32 {
                     resp#.push_str(id_str.as_str())
                     resp#.push_str(",\"result\":{\"protocolVersion\":\"")
                     resp#.push_str(negotiated.as_str())
-                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.14.1\"}}}\n")
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.15.0\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
@@ -1031,7 +1031,16 @@ pub fn run_mcp_server() -> i32 {
                                                             continue
                                                         }
 
-                                                        auto target_path = compute_identity_key(startup_cwd.as_str(), path_str.as_str())
+                                                        auto target_res = compute_identity_key(startup_cwd.as_str(), path_str.as_str())
+                                                        if target_res.is_err() {
+                                                            if format_is_json {
+                                                                send_tool_error_json(id_str.as_str(), "Failed to resolve target path")
+                                                            } else {
+                                                                send_tool_error(id_str.as_str(), "Failed to resolve target path")
+                                                            }
+                                                            continue
+                                                        }
+                                                        auto target_path = target_res.unwrap()
                                                         auto exec_max_bytes = max_bytes_opt
                                                         auto view_opts = ViewOptions(
                                                             file_path = cede target_path,
