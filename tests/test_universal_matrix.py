@@ -136,7 +136,7 @@ def compute_canonical_budgeted_bytes(sc: dict) -> int:
     for i, f in enumerate(files):
         if i > 0:
             total_bytes += 1
-        fe_str = json.dumps({"id": f.get("id", 0), "path": f.get("path", ""), "kind": f.get("kind", "workspace_relative")}, separators=(",", ":"))
+        fe_str = json.dumps({"id": f.get("id", 0), "path": f.get("path", ""), "kind": f.get("kind", "workspace_relative")}, ensure_ascii=False, separators=(",", ":"))
         total_bytes += len(fe_str.encode("utf-8"))
     for si, seg in enumerate(segments):
         if si > 0:
@@ -166,12 +166,12 @@ def compute_canonical_budgeted_bytes(sc: dict) -> int:
                     rec_dict["snippet"] = rec["snippet"]
             else:
                 rec_dict["block_truncated"] = rec.get("block_truncated", False)
-            rec_json = json.dumps(rec_dict, separators=(",", ":"))
+            rec_json = json.dumps(rec_dict, ensure_ascii=False, separators=(",", ":"))
             total_bytes += len(rec_json.encode("utf-8"))
     return total_bytes
 
 
-def validate_mcp_budget_case(sc: dict, max_result_bytes: int, expected_matches: int, expected_records: list) -> tuple[bool, str]:
+def validate_mcp_budget_case(sc: dict, max_result_bytes: int, expected_matches: int, expected_records: list, expected_file_suffix: str = None) -> tuple[bool, str]:
     """Validates structural correctness, truthful truncation metadata, record contents,
     and compares independently calculated canonical bytes against both reported stats
     and max_result_bytes limit."""
@@ -199,7 +199,7 @@ def validate_mcp_budget_case(sc: dict, max_result_bytes: int, expected_matches: 
             return False, "Segments array contains records when 0 matches expected"
         return True, "Valid 0 matches (fail-closed)"
 
-    if len(files) != 1 or not files[0].get("path", "").endswith("service.log"):
+    if len(files) != 1 or (expected_file_suffix and not files[0].get("path", "").endswith(expected_file_suffix)):
         return False, f"Invalid files table: {files!r}"
     if len(segments) != 1 or segments[0].get("file_id") != 0:
         return False, f"Invalid segments table: {segments!r}"
@@ -261,7 +261,94 @@ def run_budget_validator_self_tests():
     ok4, _ = validate_mcp_budget_case(over_limit_sc, 300, 1, [exp_rec])
     assert ok4 is False, "Self-test 4 failed: validator must reject calculated bytes exceeding budget limit"
 
-    log("  [PASS] Budget validator anomaly self-tests passed (4/4 scenarios verified).")
+    # 5. Non-ASCII Chinese canonical UTF-8 byte accounting verification (cite multi_byte_utf8.txt)
+    dummy_zh_sc = {
+        "truncated": True,
+        "termination_reason": "max_result_bytes",
+        "stats": {
+            "matches_emitted": 1,
+            "budgeted_record_bytes_emitted": 386
+        },
+        "files": [{"id": 0, "path": "tests/fixtures/multi_lang/multi_byte_utf8.txt", "kind": "workspace_relative"}],
+        "segments": [{
+            "file_id": 0, "pass": "all",
+            "records": [{
+                "kind": "match", "group_id": 0, "line_number": 2, "absolute_offset": 23,
+                "text": "Line 2: 简体中文测试：检索内核应当精确计算 UTF-8 字节偏移",
+                "submatches": [{"match_text": "检索内核", "start": 29, "end": 41}],
+                "scope": None, "block_truncated": False
+            }]
+        }]
+    }
+    exp_zh_rec = dummy_zh_sc["segments"][0]["records"][0]
+    zh_calc = compute_canonical_budgeted_bytes(dummy_zh_sc)
+    assert zh_calc == 386, f"Self-test 5 failed: expected 386 canonical UTF-8 bytes for Chinese record, got {zh_calc}"
+    ok5, _ = validate_mcp_budget_case(dummy_zh_sc, 386, 1, [exp_zh_rec], "multi_byte_utf8.txt")
+    assert ok5 is True, f"Self-test 5 validation failed: {ok5}"
+
+    # Fault 5b: Reject naive ASCII-escaped calculation (461 bytes)
+    corrupt_zh_stats = copy.deepcopy(dummy_zh_sc)
+    corrupt_zh_stats["stats"]["budgeted_record_bytes_emitted"] = 461
+    ok5b, _ = validate_mcp_budget_case(corrupt_zh_stats, 500, 1, [exp_zh_rec], "multi_byte_utf8.txt")
+    assert ok5b is False, "Self-test 5b failed: validator must reject naive ASCII-escaped byte count (461)"
+
+    # 6. Non-ASCII 4-byte UTF-8 Emoji canonical byte accounting verification (🚀)
+    dummy_em_sc = {
+        "truncated": True,
+        "termination_reason": "max_result_bytes",
+        "stats": {
+            "matches_emitted": 1,
+            "budgeted_record_bytes_emitted": 365
+        },
+        "files": [{"id": 0, "path": "tests/fixtures/multi_lang/multi_byte_utf8.txt", "kind": "workspace_relative"}],
+        "segments": [{
+            "file_id": 0, "pass": "all",
+            "records": [{
+                "kind": "match", "group_id": 0, "line_number": 4, "absolute_offset": 126,
+                "text": "Line 4: Emoji test: 🚀 Antigravity Rocket and 🔍 Code Search",
+                "submatches": [{"match_text": "🚀", "start": 20, "end": 24}],
+                "scope": None, "block_truncated": False
+            }]
+        }]
+    }
+    exp_em_rec = dummy_em_sc["segments"][0]["records"][0]
+    em_calc = compute_canonical_budgeted_bytes(dummy_em_sc)
+    assert em_calc == 365, f"Self-test 6 failed: expected 365 canonical UTF-8 bytes for Emoji record, got {em_calc}"
+    ok6, _ = validate_mcp_budget_case(dummy_em_sc, 365, 1, [exp_em_rec], "multi_byte_utf8.txt")
+    assert ok6 is True, f"Self-test 6 validation failed: {ok6}"
+
+    # 7. Escaped quotes and backslashes canonical byte accounting verification
+    dummy_esc_sc = {
+        "truncated": True,
+        "termination_reason": "max_result_bytes",
+        "stats": {
+            "matches_emitted": 1,
+            "budgeted_record_bytes_emitted": 404
+        },
+        "files": [{"id": 0, "path": "tests/fixtures/multi_lang/rust_sample.rs", "kind": "workspace_relative"}],
+        "segments": [{
+            "file_id": 0, "pass": "all",
+            "records": [{
+                "kind": "match", "group_id": 0, "line_number": 17, "absolute_offset": 406,
+                "text": "        let raw = r#\"Raw string literal containing \"quotes\" and \\backslashes\\\"#;",
+                "submatches": [{"match_text": "backslashes", "start": 65, "end": 76}],
+                "scope": "pub fn inspect()", "block_truncated": False
+            }]
+        }]
+    }
+    exp_esc_rec = dummy_esc_sc["segments"][0]["records"][0]
+    esc_calc = compute_canonical_budgeted_bytes(dummy_esc_sc)
+    assert esc_calc == 404, f"Self-test 7 failed: expected 404 bytes for escaped quotes/backslashes, got {esc_calc}"
+    ok7, _ = validate_mcp_budget_case(dummy_esc_sc, 404, 1, [exp_esc_rec], "rust_sample.rs")
+    assert ok7 is True, f"Self-test 7 validation failed: {ok7}"
+
+    # 8. Mixed non-ASCII and escaped chars strictly rejects text mutation
+    corrupt_zh_text = copy.deepcopy(dummy_zh_sc)
+    corrupt_zh_text["segments"][0]["records"][0]["text"] = "Corrupted text"
+    ok8, _ = validate_mcp_budget_case(corrupt_zh_text, 386, 1, [exp_zh_rec], "multi_byte_utf8.txt")
+    assert ok8 is False, "Self-test 8 failed: validator must reject text content mutation"
+
+    log("  [PASS] Budget validator anomaly self-tests passed (8/8 scenarios verified).")
 
 
 # ---------------------------------------------------------------------------
@@ -533,11 +620,84 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     ]
     v_fi4, _ = validate_mcp_budget_case(fi_630, 630, 2, [exp_rec1, exp_rec2])
 
-    faults_caught = (not v_fi1) and (not v_fi2) and (not v_fi3) and (not v_fi4)
+    # MCP Search: Non-ASCII & escaped canonical record byte accounting & boundaries (Chinese, Emoji, Quotes, Backslashes)
+    # Chinese multi-match boundaries on "字" in multi_byte_utf8.txt:
+    # Boundary 1: Fail closed when budget cannot fit 1st Chinese record (376B < 377B)
+    # Boundary 2: Exactly fits 1st Chinese record (377B)
+    # Boundary 3: One byte short of 2nd Chinese record (618B < 619B)
+    # Boundary 4: Exactly fits 2 Chinese records (619B)
+    exp_zh_rec1 = {
+        "kind": "match", "group_id": 0, "line_number": 2, "absolute_offset": 23,
+        "text": "Line 2: 简体中文测试：检索内核应当精确计算 UTF-8 字节偏移",
+        "submatches": [{"match_text": "字", "start": 66, "end": 69}],
+        "scope": None, "block_truncated": False
+    }
 
-    assert_test(legit_all_pass and faults_caught,
+    def call_mcp_search_generic(path, pat, byte_val):
+        req = json.dumps({
+            "jsonrpc": "2.0", "id": 10, "method": "tools/call",
+            "params": {"name": "trg_search", "arguments": {"paths": [str(path)], "pattern": pat, "max_result_bytes": byte_val}}
+        }) + "\n"
+        r = run_trg_cmd(trg, ["--mcp"], input_data=init_req + notif + req)
+        resps = [json.loads(l) for l in r.stdout.strip().split("\n") if l.strip()]
+        return resps[1]["result"]["structuredContent"]
+
+    sc_zh_376 = call_mcp_search_generic(fixtures_dir / "multi_byte_utf8.txt", "字", 376)
+    sc_zh_377 = call_mcp_search_generic(fixtures_dir / "multi_byte_utf8.txt", "字", 377)
+    sc_zh_618 = call_mcp_search_generic(fixtures_dir / "multi_byte_utf8.txt", "字", 618)
+    sc_zh_619 = call_mcp_search_generic(fixtures_dir / "multi_byte_utf8.txt", "字", 619)
+
+    v_zh_376, _ = validate_mcp_budget_case(sc_zh_376, 376, 0, [], "multi_byte_utf8.txt")
+    v_zh_377, _ = validate_mcp_budget_case(sc_zh_377, 377, 1, [exp_zh_rec1], "multi_byte_utf8.txt")
+    v_zh_618, _ = validate_mcp_budget_case(sc_zh_618, 618, 1, [exp_zh_rec1], "multi_byte_utf8.txt")
+    calc_619 = compute_canonical_budgeted_bytes(sc_zh_619)
+    v_zh_619 = (sc_zh_619["stats"]["matches_emitted"] == 2 and
+                sc_zh_619["stats"]["budgeted_record_bytes_emitted"] == 619 and
+                calc_619 == 619 and
+                len(sc_zh_619["segments"][0]["records"]) == 2)
+
+    # Chinese search on "检索内核" verifying exact 386B canonical bytes (vs 461B naive ASCII)
+    sc_zh_single = call_mcp_search_generic(fixtures_dir / "multi_byte_utf8.txt", "检索内核", 386)
+    calc_zh_single = compute_canonical_budgeted_bytes(sc_zh_single)
+    v_zh_single = (sc_zh_single["stats"]["matches_emitted"] == 1 and
+                   sc_zh_single["stats"]["budgeted_record_bytes_emitted"] == 386 and
+                   calc_zh_single == 386)
+
+    # Emoji boundary on "🚀" in multi_byte_utf8.txt (364B fail closed, 365B exact 365B canonical match)
+    sc_em_fail = call_mcp_search_generic(fixtures_dir / "multi_byte_utf8.txt", "🚀", 364)
+    sc_em_ok = call_mcp_search_generic(fixtures_dir / "multi_byte_utf8.txt", "🚀", 365)
+    v_em_fail, _ = validate_mcp_budget_case(sc_em_fail, 364, 0, [], "multi_byte_utf8.txt")
+    calc_em_ok = compute_canonical_budgeted_bytes(sc_em_ok)
+    v_em_ok = (sc_em_ok["stats"]["matches_emitted"] == 1 and
+               sc_em_ok["stats"]["budgeted_record_bytes_emitted"] == 365 and
+               calc_em_ok == 365)
+
+    # Quotes & backslashes boundary on "backslashes" in rust_sample.rs (403B fail closed, 404B exact 404B canonical match)
+    sc_esc_fail = call_mcp_search_generic(fixtures_dir / "rust_sample.rs", "backslashes", 403)
+    sc_esc_ok = call_mcp_search_generic(fixtures_dir / "rust_sample.rs", "backslashes", 404)
+    v_esc_fail, _ = validate_mcp_budget_case(sc_esc_fail, 403, 0, [], "rust_sample.rs")
+    calc_esc_ok = compute_canonical_budgeted_bytes(sc_esc_ok)
+    v_esc_ok = (sc_esc_ok["stats"]["matches_emitted"] == 1 and
+                sc_esc_ok["stats"]["budgeted_record_bytes_emitted"] == 404 and
+                calc_esc_ok == 404)
+
+    # Fault injection on non-ASCII: verify validator rejects naive ASCII 461B calculation and text mutation
+    fi_zh = copy.deepcopy(sc_zh_377)
+    fi_zh["stats"]["budgeted_record_bytes_emitted"] = 461  # Spoof with naive ASCII json.dumps length
+    v_fi_ascii, _ = validate_mcp_budget_case(fi_zh, 500, 1, [exp_zh_rec1], "multi_byte_utf8.txt")
+
+    fi_zh_mut = copy.deepcopy(sc_zh_377)
+    fi_zh_mut["segments"][0]["records"][0]["text"] = "Corrupted text"
+    v_fi_mut, _ = validate_mcp_budget_case(fi_zh_mut, 377, 1, [exp_zh_rec1], "multi_byte_utf8.txt")
+
+    non_ascii_bud_pass = (v_zh_376 and v_zh_377 and v_zh_618 and v_zh_619 and v_zh_single and
+                          v_em_fail and v_em_ok and v_esc_fail and v_esc_ok)
+
+    faults_caught = (not v_fi1) and (not v_fi2) and (not v_fi3) and (not v_fi4) and (not v_fi_ascii) and (not v_fi_mut)
+
+    assert_test(legit_all_pass and non_ascii_bud_pass and faults_caught,
                 "Budget MCP Search: Canonical record bytes accounting & boundaries (cite Test 107)",
-                "verified 352B fail-closed (0B), 353B exact 1st record (353B), 629B short 2nd record (353B), 630B exact 2 records (630B); 4 fault injections caught")
+                "verified ASCII (352B/353B/629B/630B), Chinese (376B/377B/618B/619B, 386B), Emoji (364B/365B), Quotes/Backslashes (403B/404B), 6 fault injections caught")
 
     # MCP View JSON: bounds content[0].text UTF-8 serialized length with truthful truncation
     view_bud_req = json.dumps({

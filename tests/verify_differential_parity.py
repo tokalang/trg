@@ -75,19 +75,29 @@ def check_mcp_parity(rc_b: int, rc_c: int, out_b: bytes, out_c: bytes, err_b: by
     if out_b == out_c:
         return True, f"exact binary match ({len(out_b)} bytes stdout, {len(err_b)} bytes stderr)"
 
-    # If outputs differ, verify that only declared serverInfo.version changed while tool response is 100% byte-identical
-    lines_b = [l for l in out_b.strip().split(b"\n") if l.strip()]
-    lines_c = [l for l in out_c.strip().split(b"\n") if l.strip()]
-    if len(lines_b) != len(lines_c) or len(lines_b) < 2:
-        return False, f"line count mismatch: base={len(lines_b)}, cand={len(lines_c)}"
+    # Isolate line 0 (initialize response) by finding the first newline.
+    # Subsequent tool response MUST be compared as a raw byte stream without strip(), line filtering, or newline normalization.
+    first_nl_b = out_b.find(b"\n")
+    first_nl_c = out_c.find(b"\n")
+    if first_nl_b == -1 or first_nl_c == -1:
+        return False, "Missing newline terminating initialize response"
 
-    for idx in range(1, len(lines_b)):
-        if lines_b[idx] != lines_c[idx]:
-            return False, f"tool response line {idx} byte mismatch (base={len(lines_b[idx])}B, cand={len(lines_c[idx])}B)"
+    init_line_b = out_b[:first_nl_b]
+    init_line_c = out_c[:first_nl_c]
+    tail_b = out_b[first_nl_b + 1:]
+    tail_c = out_c[first_nl_c + 1:]
 
+    if len(tail_b) == 0:
+        return False, "Missing tool response stream after initialize response"
+
+    # Strictly assert exact raw byte stream identity for tool response (no strip, no crlf conversion)
+    if tail_b != tail_c:
+        return False, f"tool response stream byte mismatch (base={len(tail_b)} bytes, cand={len(tail_c)} bytes)"
+
+    # Parse initialize response JSON and verify only declared serverInfo.version changed
     try:
-        init_b = json.loads(lines_b[0].decode("utf-8"))
-        init_c = json.loads(lines_c[0].decode("utf-8"))
+        init_b = json.loads(init_line_b.decode("utf-8"))
+        init_c = json.loads(init_line_c.decode("utf-8"))
     except Exception as e:
         return False, f"JSON parse error on initialize response: {e}"
 
@@ -109,6 +119,38 @@ def check_mcp_parity(rc_b: int, rc_c: int, out_b: bytes, out_c: bytes, err_b: by
         return False, "Non-version fields in initialize response differ"
 
     return True, f"exact binary match with declared version delta ({b_semver} -> {c_semver})"
+
+
+def run_mcp_parity_self_tests():
+    log("Running anomaly self-tests on MCP parity checker...")
+    base_init = b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"trg","version":"0.14.0"}}}\n'
+    cand_init = b'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"trg","version":"0.14.1"}}}\n'
+    tool_resp = b'{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"tests/fixtures/multi_lang/service.log\\n1:2026-09-07T08:00:01.123Z [INFO] Service started on port 8080\\n"}],"isError":false}}\n'
+
+    valid_out_b = base_init + tool_resp
+    valid_out_c = cand_init + tool_resp
+
+    # Scenario 1: Baseline and candidate match with version delta -> PASS
+    ok1, msg1 = check_mcp_parity(0, 0, valid_out_b, valid_out_c, b"", b"", "0.14.0", "0.14.1")
+    assert ok1 is True, f"Parity self-test 1 (valid case) failed: {msg1}"
+
+    # Scenario 2: Extra trailing newline in candidate tail -> FAIL
+    corrupt_c_extra = cand_init + tool_resp + b"\n"
+    ok2, msg2 = check_mcp_parity(0, 0, valid_out_b, corrupt_c_extra, b"", b"", "0.14.0", "0.14.1")
+    assert ok2 is False, "Parity self-test 2 failed: validator must reject extra trailing newline"
+
+    # Scenario 3: Missing trailing newline in candidate tail -> FAIL
+    assert tool_resp.endswith(b"\n")
+    corrupt_c_missing = cand_init + tool_resp[:-1]
+    ok3, msg3 = check_mcp_parity(0, 0, valid_out_b, corrupt_c_missing, b"", b"", "0.14.0", "0.14.1")
+    assert ok3 is False, "Parity self-test 3 failed: validator must reject missing trailing newline"
+
+    # Scenario 4: CRLF mutation in candidate tool response -> FAIL
+    corrupt_c_crlf = cand_init + tool_resp.replace(b"\n", b"\r\n")
+    ok4, msg4 = check_mcp_parity(0, 0, valid_out_b, corrupt_c_crlf, b"", b"", "0.14.0", "0.14.1")
+    assert ok4 is False, "Parity self-test 4 failed: validator must reject CRLF newline mutation"
+
+    log("  [PASS] MCP parity checker anomaly self-tests passed (4/4 scenarios verified).")
 
 
 def main():
@@ -146,6 +188,9 @@ def main():
 
     base_version = r_b_ver.stdout.strip() if r_b_ver.returncode == 0 else "unknown"
     cand_version = r_c_ver.stdout.strip() if r_c_ver.returncode == 0 else "unknown"
+
+    # Run MCP parity validator anomaly self-tests first
+    run_mcp_parity_self_tests()
 
     log("Starting Differential Parity Verification")
     log(f"  Baseline:  {base_path} (version: {base_version})")
