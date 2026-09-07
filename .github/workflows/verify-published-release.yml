@@ -202,7 +202,10 @@ jobs:
           $manifestDir = "winget\manifests\t\Tokalang\trg\0.15.0"
           if (Get-Command winget -ErrorAction SilentlyContinue) {
             Write-Host "winget command found: $(Get-Command winget | Select-Object -ExpandProperty Source)"
+            Write-Host "Validating manifest with official winget CLI..."
             winget validate --manifest $manifestDir
+            Write-Host "Enabling LocalManifestFiles setting..."
+            winget settings --enable LocalManifestFiles
             Write-Host "Testing winget install with local manifest..."
             winget install --manifest $manifestDir --accept-package-agreements --accept-source-agreements --disable-interactivity
             $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
