@@ -1,0 +1,199 @@
+name: Verify Published Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to verify'
+        required: false
+        default: 'v0.15.0'
+
+jobs:
+  anonymous-audit-linux:
+    name: Anonymous Audit & Smoke (linux-x64 on ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all 6 assets anonymously
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || 'v0.15.0' }}"
+          base_url="https://github.com/tokalang/trg/releases/download/${tag}"
+          mkdir -p dist && cd dist
+          
+          files=(
+            "SHA256SUMS"
+            "trg-0.15.0.tar.gz"
+            "trg-${tag}-linux-x64.tar.gz"
+            "trg-${tag}-macos-arm64.tar.gz"
+            "trg-${tag}-windows-x64.zip"
+            "trg-${tag}-windows-arm64.zip"
+          )
+          
+          for f in "${files[@]}"; do
+            echo "Anonymously downloading $f from $base_url/$f ..."
+            curl -fsSL -o "$f" "$base_url/$f"
+          done
+          
+          echo "Verifying SHA256SUMS digests..."
+          sha256sum -c SHA256SUMS
+          echo "All 5 archives match official SHA256SUMS!"
+
+      - name: Run consumer smoke test on linux-x64
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || 'v0.15.0' }}"
+          cd dist
+          tar -xzf "trg-${tag}-linux-x64.tar.gz"
+          cd "trg-${tag}-linux-x64"
+          
+          echo "Checking --version..."
+          ./trg --version | grep -F "0.15.0"
+          
+          echo "Testing search..."
+          echo "hello world test token" > test.txt
+          ./trg "hello" test.txt | grep -F "hello world"
+          echo "Linux-x64 consumer smoke passed!"
+
+  anonymous-audit-macos:
+    name: Anonymous Audit & Smoke (macos-arm64 on macos-15)
+    runs-on: macos-15
+    steps:
+      - name: Download assets and run consumer smoke on macos-arm64
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || 'v0.15.0' }}"
+          base_url="https://github.com/tokalang/trg/releases/download/${tag}"
+          mkdir -p dist && cd dist
+          
+          curl -fsSL -o "SHA256SUMS" "$base_url/SHA256SUMS"
+          curl -fsSL -o "trg-${tag}-macos-arm64.tar.gz" "$base_url/trg-${tag}-macos-arm64.tar.gz"
+          
+          expected_sum=$(grep "trg-${tag}-macos-arm64.tar.gz" SHA256SUMS | awk '{print $1}')
+          actual_sum=$(shasum -a 256 "trg-${tag}-macos-arm64.tar.gz" | awk '{print $1}')
+          if [ "$expected_sum" != "$actual_sum" ]; then
+            echo "Hash mismatch for macos-arm64: expected $expected_sum, got $actual_sum"
+            exit 1
+          fi
+          echo "macos-arm64 checksum matches SHA256SUMS!"
+          
+          tar -xzf "trg-${tag}-macos-arm64.tar.gz"
+          cd "trg-${tag}-macos-arm64"
+          
+          ./trg --version | grep -F "0.15.0"
+          echo "hello macos search token" > test.txt
+          ./trg "macos" test.txt | grep -F "hello macos"
+          echo "macOS-arm64 consumer smoke passed!"
+
+  anonymous-audit-windows-x64:
+    name: Anonymous Audit & Smoke (windows-x64 on windows-2025)
+    runs-on: windows-2025
+    steps:
+      - name: Download assets and run consumer smoke on windows-x64
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = if ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.15.0" }
+          $baseUrl = "https://github.com/tokalang/trg/releases/download/$tag"
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Set-Location dist
+          
+          Invoke-WebRequest -Uri "$baseUrl/SHA256SUMS" -OutFile "SHA256SUMS"
+          Invoke-WebRequest -Uri "$baseUrl/trg-$tag-windows-x64.zip" -OutFile "trg-$tag-windows-x64.zip"
+          
+          $expectedHash = (Get-Content SHA256SUMS | Select-String "trg-$tag-windows-x64.zip").ToString().Split(" ")[0].Trim().ToUpper()
+          $actualHash = (Get-FileHash -Algorithm SHA256 "trg-$tag-windows-x64.zip").Hash.ToUpper()
+          
+          if ($expectedHash -ne $actualHash) {
+            Write-Error "Checksum mismatch! Expected: $expectedHash, Actual: $actualHash"
+            exit 1
+          }
+          Write-Host "windows-x64 checksum verified: $actualHash"
+          
+          Expand-Archive "trg-$tag-windows-x64.zip" -DestinationPath "."
+          Set-Location "trg-$tag-windows-x64"
+          
+          $ver = .\trg.exe --version
+          Write-Host "Binary version output: $ver"
+          if (-not ($ver -like "*0.15.0*")) {
+            Write-Error "Version output did not contain 0.15.0"
+            exit 1
+          }
+          
+          Set-Content -Path test.txt -Value "windows search sample string"
+          $res = .\trg.exe "windows" test.txt
+          Write-Host "Search output: $res"
+          if (-not ($res -like "*windows search*")) {
+            Write-Error "Smoke search did not match expected output"
+            exit 1
+          }
+          Write-Host "windows-x64 consumer smoke passed!"
+
+  anonymous-audit-windows-arm64:
+    name: Anonymous Audit & Smoke (windows-arm64 on windows-11-arm)
+    runs-on: windows-11-arm
+    steps:
+      - name: Download assets and run consumer smoke on windows-arm64
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = if ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.15.0" }
+          $baseUrl = "https://github.com/tokalang/trg/releases/download/$tag"
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Set-Location dist
+          
+          Invoke-WebRequest -Uri "$baseUrl/SHA256SUMS" -OutFile "SHA256SUMS"
+          Invoke-WebRequest -Uri "$baseUrl/trg-$tag-windows-arm64.zip" -OutFile "trg-$tag-windows-arm64.zip"
+          
+          $expectedHash = (Get-Content SHA256SUMS | Select-String "trg-$tag-windows-arm64.zip").ToString().Split(" ")[0].Trim().ToUpper()
+          $actualHash = (Get-FileHash -Algorithm SHA256 "trg-$tag-windows-arm64.zip").Hash.ToUpper()
+          
+          if ($expectedHash -ne $actualHash) {
+            Write-Error "Checksum mismatch! Expected: $expectedHash, Actual: $actualHash"
+            exit 1
+          }
+          Write-Host "windows-arm64 checksum verified: $actualHash"
+          
+          Expand-Archive "trg-$tag-windows-arm64.zip" -DestinationPath "."
+          Set-Location "trg-$tag-windows-arm64"
+          
+          $ver = .\trg.exe --version
+          Write-Host "Binary version output: $ver"
+          if (-not ($ver -like "*0.15.0*")) {
+            Write-Error "Version output did not contain 0.15.0"
+            exit 1
+          }
+          
+          Set-Content -Path test.txt -Value "arm64 search sample string"
+          $res = .\trg.exe "arm64" test.txt
+          Write-Host "Search output: $res"
+          if (-not ($res -like "*arm64 search*")) {
+            Write-Error "Smoke search did not match expected output"
+            exit 1
+          }
+          Write-Host "windows-arm64 consumer smoke passed!"
+
+  post-publish-gate:
+    name: Post-Publish Verification Gate
+    if: always()
+    needs:
+      - anonymous-audit-linux
+      - anonymous-audit-macos
+      - anonymous-audit-windows-x64
+      - anonymous-audit-windows-arm64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Confirm all consumer audits succeeded
+        run: |
+          echo "anonymous-audit-linux:         ${{ needs.anonymous-audit-linux.result }}"
+          echo "anonymous-audit-macos:         ${{ needs.anonymous-audit-macos.result }}"
+          echo "anonymous-audit-windows-x64:   ${{ needs.anonymous-audit-windows-x64.result }}"
+          echo "anonymous-audit-windows-arm64: ${{ needs.anonymous-audit-windows-arm64.result }}"
+
+          test "${{ needs.anonymous-audit-linux.result }}" = "success"
+          test "${{ needs.anonymous-audit-macos.result }}" = "success"
+          test "${{ needs.anonymous-audit-windows-x64.result }}" = "success"
+          test "${{ needs.anonymous-audit-windows-arm64.result }}" = "success"
+
+          echo "All four platforms passed anonymous download, hash validation, and consumer smoke tests!"
