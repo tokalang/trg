@@ -17,6 +17,7 @@ import os
 import pathlib
 import platform
 import resource
+import signal
 import subprocess
 import sys
 import tempfile
@@ -53,14 +54,15 @@ def run_trg_cmd(trg_bin: str, args: list, cwd: str = None, input_data: str = Non
     )
 
 
-def measure_isolated_rss_mib(trg_bin: str, args: list, cwd: str = None) -> float:
-    """Measures peak RSS in MiB of a single isolated child process using os.fork + os.wait4."""
+def measure_isolated_rss_mib(trg_bin: str, args: list, cwd: str = None, timeout: float = 15.0) -> float:
+    """Measures peak RSS in MiB of a single isolated child process using os.fork + os.wait4.
+    Includes process timeout and SIGKILL + waitpid cleanup to prevent hangs.
+    """
     pipe_r, pipe_w = os.pipe()
     pid = os.fork()
     if pid == 0:
         # Child process
         os.close(pipe_r)
-        # Discard child stdout/stderr so buffer allocation does not contaminate process memory
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 1)
         os.dup2(devnull, 2)
@@ -73,8 +75,32 @@ def measure_isolated_rss_mib(trg_bin: str, args: list, cwd: str = None) -> float
     else:
         # Parent process
         os.close(pipe_w)
-        _, status, ru = os.wait4(pid, 0)
+        start_time = time.time()
+        exited = False
+        status = 0
+        ru = None
+        while time.time() - start_time < timeout:
+            wpid, wstatus, wru = os.wait4(pid, os.WNOHANG)
+            if wpid == pid:
+                exited = True
+                status = wstatus
+                ru = wru
+                break
+            time.sleep(0.01)
+
         os.close(pipe_r)
+
+        if not exited:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+            raise TimeoutError(f"Child process {pid} timed out after {timeout}s while measuring RSS")
+
         if os.WIFEXITED(status) and os.WEXITSTATUS(status) in (0, 1):
             raw_rss = ru.ru_maxrss
             # macOS: bytes; Linux: KiB
@@ -83,7 +109,7 @@ def measure_isolated_rss_mib(trg_bin: str, args: list, cwd: str = None) -> float
             else:
                 return raw_rss / 1024.0
         else:
-            raise RuntimeError(f"Child process failed with exit code: {status}")
+            raise RuntimeError(f"Child process failed with status: {status}")
 
 
 # ---------------------------------------------------------------------------
@@ -106,53 +132,76 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
             log_gate(name, "FAIL", detail)
             raise AssertionError(f"Test failed: {name} - {detail}")
 
-    # 1.1 Literal with regex metacharacters in JSON, C++, Rust, plain
+    # 1.1 Literal with regex metacharacters in JSON, C++, Rust, plain, TSX
     r = run_trg_cmd(trg, ["-F", "literal_meta_test.*+?", str(fixtures_dir / "data.json")])
-    assert_test(r.returncode == 0 and "5:    \"literal_meta_test.*+?\"" in r.stdout,
-                "Literal -F: Regex metacharacters in JSON", "found on line 5 without regex compile error")
+    lines_json = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    assert_test(r.returncode == 0 and len(lines_json) == 1 and lines_json[0] == '5:    "literal_meta_test.*+?",',
+                "Literal -F: Regex metacharacters in JSON", "exact line 5 match and count 1")
 
     r = run_trg_cmd(trg, ["-F", "^[a-z]+$", str(fixtures_dir / "rust_sample.rs")])
-    assert_test(r.returncode == 0 and "16:        /* Block comment with regex metacharacters: ^[a-z]+$ */" in r.stdout,
-                "Literal -F: Anchored metacharacters in Rust comment", "line 16 matched exactly")
+    lines_rs = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    assert_test(r.returncode == 0 and len(lines_rs) == 1 and lines_rs[0] == "16:        /* Block comment with regex metacharacters: ^[a-z]+$ */",
+                "Literal -F: Anchored metacharacters in Rust comment", "exact line 16 match and count 1")
 
     r = run_trg_cmd(trg, ["-F", "[brackets], {braces}, (parens), $dollar, *star.", str(fixtures_dir / "no_ext_plain")])
-    assert_test(r.returncode == 0 and "3:Special characters: [brackets], {braces}, (parens), $dollar, *star." in r.stdout,
-                "Literal -F: Comprehensive delimiters and symbols in plain text", "line 3 matched exactly")
+    lines_plain = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    assert_test(r.returncode == 0 and len(lines_plain) == 1 and lines_plain[0] == "3:Special characters: [brackets], {braces}, (parens), $dollar, *star.",
+                "Literal -F: Comprehensive delimiters and symbols in plain text", "exact line 3 match and count 1")
+
+    r = run_trg_cmd(trg, ["-F", "MatrixProps", str(fixtures_dir / "typescript_sample.tsx")])
+    lines_tsx = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    assert_test(r.returncode == 0 and len(lines_tsx) == 2 and lines_tsx[0] == "3:interface MatrixProps {" and lines_tsx[1] == "8:export const MatrixView: React.FC<MatrixProps> = ({ title, count = 0 }) => {",
+                "Literal -F: TypeScript / TSX interface matching", "exact lines 3 and 8, count 2")
 
     # 1.2 Boundary rules (-w, -x)
     r = run_trg_cmd(trg, ["-w", "Run", str(fixtures_dir / "go_sample.go")])
-    assert_test(r.returncode == 0 and "18:func (p *WorkerPool) Run() {" in r.stdout,
-                "Boundary -w: Word boundary matching", "matched Run() declaration on line 18")
+    lines_go = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    assert_test(r.returncode == 0 and len(lines_go) == 1 and lines_go[0] == "18:func (p *WorkerPool) Run() {",
+                "Boundary -w: Word boundary matching in Go", "exact line 18 match and count 1")
 
     r_noword = run_trg_cmd(trg, ["-w", "Work", str(fixtures_dir / "go_sample.go")])
     assert_test(r_noword.returncode == 1 and r_noword.stdout.strip() == "",
                 "Boundary -w: Substring boundary rejection", "Work does not match WorkerPool")
 
+    r = run_trg_cmd(trg, ["-w", "memoize", str(fixtures_dir / "python_sample.py")])
+    lines_py = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    assert_test(r.returncode == 0 and len(lines_py) == 2 and lines_py[0] == "4:def memoize(func):" and lines_py[1] == "13:@memoize",
+                "Boundary -w: Python function and decorator word boundary", "exact lines 4 and 13, count 2")
+
     r = run_trg_cmd(trg, ["-x", "  port: 8080", str(fixtures_dir / "config.yaml")])
-    assert_test(r.returncode == 0 and "3:  port: 8080" in r.stdout,
-                "Boundary -x: Full line matching with indentation", "line 3 exact full line")
+    lines_yaml = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    assert_test(r.returncode == 0 and len(lines_yaml) == 1 and lines_yaml[0] == "3:  port: 8080",
+                "Boundary -x: Full line matching with indentation", "exact line 3 match and count 1")
 
     # 1.3 Case modes (-s, -i, -S)
     r_s = run_trg_cmd(trg, ["-s", "-F", "core features", str(fixtures_dir / "markdown_doc.md")])
     assert_test(r_s.returncode == 1, "Case -s: Sensitive mode rejects case mismatch", "lowercase does not match Core Features")
 
     r_i = run_trg_cmd(trg, ["-i", "-F", "core features", str(fixtures_dir / "markdown_doc.md")])
-    assert_test(r_i.returncode == 0 and "5:## Core Features" in r_i.stdout,
-                "Case -i: Insensitive mode accepts case mismatch", "line 5 matched")
+    lines_i = [l for l in r_i.stdout.strip().split("\n") if l.strip()]
+    assert_test(r_i.returncode == 0 and len(lines_i) == 1 and lines_i[0] == "5:## Core Features",
+                "Case -i: Insensitive mode accepts case mismatch", "exact line 5 match and count 1")
 
     r_smart_lower = run_trg_cmd(trg, ["-S", "-F", "core features", str(fixtures_dir / "markdown_doc.md")])
-    assert_test(r_smart_lower.returncode == 0 and "5:## Core Features" in r_smart_lower.stdout,
-                "Case -S: Smart case on all-lowercase input acts insensitive", "line 5 matched")
+    lines_sl = [l for l in r_smart_lower.stdout.strip().split("\n") if l.strip()]
+    assert_test(r_smart_lower.returncode == 0 and len(lines_sl) == 1 and lines_sl[0] == "5:## Core Features",
+                "Case -S: Smart case on all-lowercase input acts insensitive", "exact line 5 match and count 1")
 
     r_smart_upper = run_trg_cmd(trg, ["-S", "-F", "Core features", str(fixtures_dir / "markdown_doc.md")])
     assert_test(r_smart_upper.returncode == 1,
                 "Case -S: Smart case with uppercase present acts sensitive", "case mismatch rejected")
 
-    # 1.4 Multi-pattern precedence and line deduplication (-e)
+    # 1.4 Multi-pattern precedence (-e) and Regex alternation (-E, cite Test 40)
     r = run_trg_cmd(trg, ["-e", "[INFO]", "-e", "8080", str(fixtures_dir / "service.log")])
     lines = [l for l in r.stdout.strip().split("\n") if l.strip()]
     assert_test(r.returncode == 0 and len(lines) == 4 and "1:2026-09-07T08:00:01.123Z [INFO] Service started on port 8080" in lines[0],
                 "Multi-pattern -e: Multiple matches on same line emitted once", "line 1 deduplicated cleanly")
+
+    # Citation: Qualify Suite Test 40 (Regex search -E)
+    r_alt = run_trg_cmd(trg, ["-E", "memoize|compute_factor", str(fixtures_dir / "python_sample.py")])
+    lines_alt = [l for l in r_alt.stdout.strip().split("\n") if l.strip()]
+    assert_test(r_alt.returncode == 0 and len(lines_alt) == 4 and lines_alt[0] == "4:def memoize(func):" and lines_alt[1] == "13:@memoize" and lines_alt[2] == "14:def compute_factor(base: int, exp: int) -> int:" and lines_alt[3] == "20:    result = compute_factor(2, 10)",
+                "Regex -E: Thompson NFA alternation (cite Test 40)", "exact 4 lines matched across alternation")
 
     # 1.5 UTF-8 multibyte offset truthfulness (CJK, Emoji, Math symbols)
     r = run_trg_cmd(trg, ["--json", "-F", "检索内核", str(fixtures_dir / "multi_byte_utf8.txt")])
@@ -171,7 +220,7 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     assert_test(len(subm_emoji) == 1 and subm_emoji[0]["start"] == 20 and subm_emoji[0]["end"] == 24,
                 "UTF-8: Byte offset accuracy for 4-byte UTF-8 Emoji (🚀)", f"start=20, end=24 (actual: {subm_emoji})")
 
-    # 1.6 File format variants: CRLF, LF, no-EOL, empty file
+    # 1.6 File format variants: CRLF, LF, no-EOL, empty file, glob boundary (cite Test 151)
     r_crlf = run_trg_cmd(trg, ["-F", "bravo", str(repo_root / "tests" / "fixtures" / "crlf.txt")])
     assert_test(r_crlf.returncode == 0 and "2:bravo" in r_crlf.stdout,
                 "Data Shape: CRLF line termination handling", "line 2 matched cleanly")
@@ -184,6 +233,12 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     assert_test(r_empty.returncode == 1 and r_empty.stdout.strip() == "",
                 "Data Shape: 0-byte empty file handling", "returns exit code 1 without error")
 
+    # Citation: Qualify Suite Test 151 (Segment-based glob engine & multi-star parity)
+    r_glob = run_trg_cmd(trg, ["-H", "-g", "*.tsx", "-F", "MatrixView", str(fixtures_dir)])
+    lines_glob = [l for l in r_glob.stdout.strip().split("\n") if l.strip()]
+    assert_test(r_glob.returncode == 0 and len(lines_glob) == 1 and lines_glob[0].endswith("typescript_sample.tsx:8:export const MatrixView: React.FC<MatrixProps> = ({ title, count = 0 }) => {"),
+                "Glob Filtering: -g *.tsx segment boundary (cite Test 151)", "matches tsx only and ignores other files")
+
     # 1.7 Path Handling & Layered Duplicate Contract (CLI vs MCP)
     p_plain = str(fixtures_dir / "no_ext_plain")
     r_cli_dup = run_trg_cmd(trg, ["-F", "plain_marker_token", p_plain, p_plain])
@@ -191,7 +246,7 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     assert_test(len(matches_cli) == 2,
                 "Path Contract CLI: Retains explicit duplicate file paths", f"emitted {len(matches_cli)} matches")
 
-    # MCP Search: Deduplicates input paths in interned files table
+    # MCP Search: Deduplicates input paths in interned files table and across all segments
     init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
     notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
     search_req = json.dumps({
@@ -204,12 +259,24 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     assert_test(len(files_table) == 1,
                 "Path Contract MCP: Deduplicates paths in canonical files table", f"interned {len(files_table)} unique file")
 
-    # 1.8 Interface-Specific Budgets (CLI vs MCP Search vs MCP View JSON)
+    all_segments = resps[1]["result"]["structuredContent"].get("segments", [])
+    all_records = []
+    for seg in all_segments:
+        all_records.extend(seg.get("records", []))
+    assert_test(len(all_segments) == 1 and len(all_records) == 1 and all_records[0]["line_number"] == 4,
+                "Path Contract MCP: All-segments record deduplication check", f"found {len(all_segments)} segment, {len(all_records)} record")
+
+    # 1.8 Interface-Specific Budgets (CLI vs MCP Search vs MCP View JSON, cite Test 107)
     # CLI budget: limits total record payload emitted
     r_cli_bud = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-total-matches", "2"])
     cli_lines = [l for l in r_cli_bud.stdout.strip().split("\n") if "[INFO]" in l]
     assert_test(r_cli_bud.returncode == 0 and len(cli_lines) == 2,
                 "Budget CLI: --max-total-matches limits printed matches exactly", "2 lines emitted")
+
+    # CLI budget: --max-result-bytes (cite Test 107)
+    r_cli_bytes = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-result-bytes", "100"])
+    assert_test(r_cli_bytes.returncode == 0 and "max_result_bytes limit reached" in r_cli_bytes.stderr and "1:2026-09-07" in r_cli_bytes.stdout,
+                "Budget CLI: --max-result-bytes reports early termination (cite Test 107)", "early termination emitted to stderr")
 
     # MCP Search: limits canonical records in structuredContent
     mcp_bud_req = json.dumps({
@@ -220,11 +287,22 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     bud_resp = json.loads(r_mcp_bud.stdout.strip().split("\n")[1])
     sc = bud_resp["result"]["structuredContent"]
     assert_test(sc["complete"] is False and sc["truncated"] is True and sc["termination_reason"] == "max_total_matches",
-                "Budget MCP Search: Truthful truncation metadata in structuredContent", "truncated=true, reason=max_total_matches")
+                "Budget MCP Search: Truthful truncation metadata on max_total_matches", "truncated=true, reason=max_total_matches")
+
+    # MCP Search: max_result_bytes (cite Test 107)
+    mcp_bytes_req = json.dumps({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "trg_search", "arguments": {"paths": [str(fixtures_dir / "service.log")], "pattern": "INFO", "max_result_bytes": 200}}
+    }) + "\n"
+    r_mcp_bytes = run_trg_cmd(trg, ["--mcp"], input_data=init_req + notif + mcp_bytes_req)
+    resps_bytes = [json.loads(l) for l in r_mcp_bytes.stdout.strip().split("\n") if l.strip()]
+    sc_bytes = resps_bytes[1]["result"]["structuredContent"]
+    assert_test(sc_bytes["complete"] is False and sc_bytes["truncated"] is True and sc_bytes["termination_reason"] == "max_result_bytes",
+                "Budget MCP Search: max_result_bytes enforces truncation metadata (cite Test 107)", "complete=false, truncated=true, reason=max_result_bytes")
 
     # MCP View JSON: bounds content[0].text UTF-8 serialized length with truthful truncation
     view_bud_req = json.dumps({
-        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
         "params": {"name": "trg_view", "arguments": {
             "path": str(fixtures_dir / "service.log"), "line": 3, "context": 5, "format": "json", "max_result_bytes": 800
         }}
@@ -240,7 +318,7 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
 
     # MCP View JSON: hard rejection when target record itself cannot fit in budget
     view_reject_req = json.dumps({
-        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "jsonrpc": "2.0", "id": 6, "method": "tools/call",
         "params": {"name": "trg_view", "arguments": {
             "path": str(fixtures_dir / "service.log"), "line": 3, "context": 5, "format": "json", "max_result_bytes": 350
         }}
@@ -265,7 +343,11 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
     assert_test(r_view_noext.returncode == 0 and "4:Target keyword: plain_marker_token" in r_view_noext.stdout,
                 "Hydration: trg view on file without extension", "hydrates non-code plain text safely")
 
-    # 1.10 Exit code contracts (0=match, 1=no-match, 2=syntax/argument error)
+    # 1.10 Combination Matrix & Parity (cite Test 71) and Exit Code contracts
+    r_combo = run_trg_cmd(trg, ["-i", "-w", "-C", "1", "-F", "host", str(fixtures_dir / "config.yaml")])
+    assert_test(r_combo.returncode == 0 and "2:  host: \"0.0.0.0\"" in r_combo.stdout and "1-server:" in r_combo.stdout and "3-  port: 8080" in r_combo.stdout,
+                "Combination Matrix: -i -w -C (cite Test 71)", "case-insensitive word boundary with context window")
+
     r_exit0 = run_trg_cmd(trg, ["-F", "MatrixBuffer", str(fixtures_dir / "cpp_sample.cpp")])
     assert_test(r_exit0.returncode == 0, "Exit Code: 0 on match found", "exit code 0")
 
@@ -383,6 +465,123 @@ def run_memory_scaling_benchmarks(trg: str) -> dict:
 # ---------------------------------------------------------------------------
 # Section 3: Known Contract Gaps Reporter (Strictly Categorized)
 # ---------------------------------------------------------------------------
+def classify_gap1_result(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    timed_out: bool = False,
+    exception_msg: str = None
+) -> tuple[str, str]:
+    """Classifies execution result for GAP-001 (--code-only on non-code file).
+    Returns (status, actual_behavior).
+    status must strictly be one of: 'reproduced', 'resolved', 'unexpected_failure'.
+    Checks crashes/signals/errors first before classifying gap features.
+    Verifies full target line integrity on 'resolved'.
+    """
+    if timed_out or exception_msg is not None:
+        return "unexpected_failure", f"Process execution failed: {exception_msg or 'timeout'}"
+    if returncode < 0:
+        return "unexpected_failure", f"Process crashed with signal {-returncode}"
+    if returncode not in (0, 1):
+        return "unexpected_failure", f"Unexpected exit code {returncode}, stderr: {stderr.strip()}"
+
+    if returncode == 1 and stdout.strip() == "":
+        return "reproduced", "Matches silently filtered out because detect_lexical_dialect fell back to Generic (treating '//' as comment)"
+    elif returncode == 0:
+        expected_line = "2:2026-09-07T08:00:02.456Z [INFO] Incoming request: GET http://api.domain.internal/v1/health//check#status"
+        if expected_line in stdout:
+            return "resolved", "Matches retained on non-code file under --code-only with intact line contents"
+        else:
+            return "unexpected_failure", f"Exit 0 but target line missing or corrupted in stdout: {stdout!r}"
+    else:
+        return "unexpected_failure", f"Unexpected state: returncode={returncode}, stdout={stdout!r}"
+
+
+def classify_gap2_result(
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    timed_out: bool = False,
+    exception_msg: str = None
+) -> tuple[str, str]:
+    """Classifies execution result for GAP-002 (--block on non-code text containing '{').
+    Returns (status, actual_behavior).
+    status must strictly be one of: 'reproduced', 'resolved', 'unexpected_failure'.
+    Checks crashes/signals/errors first before classifying gap features.
+    Verifies full target line integrity on 'resolved'.
+    """
+    if timed_out or exception_msg is not None:
+        return "unexpected_failure", f"Process execution failed: {exception_msg or 'timeout'}"
+    if returncode < 0:
+        return "unexpected_failure", f"Process crashed with signal {-returncode}"
+    if returncode != 0:
+        return "unexpected_failure", f"Unexpected exit code {returncode} (expected 0 on match), stderr: {stderr.strip()}"
+
+    expected_line = "3:Special characters: [brackets], {braces}, (parens), $dollar, *star."
+    if "[block:" in stdout:
+        return "reproduced", "Synthesized [block: ...] on non-code plain text because detect_syntax_family fell back to Brace"
+    else:
+        if expected_line in stdout:
+            return "resolved", "Safely fell back to plain lines without block synthesis and preserved target line"
+        else:
+            return "unexpected_failure", f"Exit 0 without block synthesis, but target line missing or corrupted: {stdout!r}"
+
+
+def run_gap_reporter_self_tests():
+    log("Running 12 anomaly self-tests on gap classifiers...")
+    # Gap 1 tests:
+    # 1. Normal reproduced
+    st1, _ = classify_gap1_result(1, "", "")
+    assert st1 == "reproduced", f"Self-test 1 failed: {st1}"
+
+    # 2. Normal resolved with full intact target line
+    st2, _ = classify_gap1_result(0, "2:2026-09-07T08:00:02.456Z [INFO] Incoming request: GET http://api.domain.internal/v1/health//check#status\n", "")
+    assert st2 == "resolved", f"Self-test 2 failed: {st2}"
+
+    # 3. Anomaly: exit code 2 (syntax/argument error)
+    st3, _ = classify_gap1_result(2, "", "invalid option")
+    assert st3 == "unexpected_failure", f"Self-test 3 failed: {st3}"
+
+    # 4. Anomaly: crash by signal (e.g. SIGSEGV, rc = -11)
+    st4, _ = classify_gap1_result(-11, "", "")
+    assert st4 == "unexpected_failure", f"Self-test 4 failed: {st4}"
+
+    # 5. Anomaly: exit 0 but empty stdout
+    st5, _ = classify_gap1_result(0, "", "")
+    assert st5 == "unexpected_failure", f"Self-test 5 failed: {st5}"
+
+    # 6. Anomaly: exit 0 but truncated/corrupted stdout
+    st6, _ = classify_gap1_result(0, "2:2026-09-07 [INFO]\n", "")
+    assert st6 == "unexpected_failure", f"Self-test 6 failed: {st6}"
+
+    # 7. Anomaly: timeout
+    st7, _ = classify_gap1_result(0, "", "", timed_out=True)
+    assert st7 == "unexpected_failure", f"Self-test 7 failed: {st7}"
+
+    # Gap 2 tests:
+    # 8. Normal reproduced (synthesized block)
+    st8, _ = classify_gap2_result(0, "[block: L1-L5]\n3:Special characters: [brackets], {braces}, (parens), $dollar, *star.\n", "")
+    assert st8 == "reproduced", f"Self-test 8 failed: {st8}"
+
+    # 9. Normal resolved (plain line without block header)
+    st9, _ = classify_gap2_result(0, "3:Special characters: [brackets], {braces}, (parens), $dollar, *star.\n", "")
+    assert st9 == "resolved", f"Self-test 9 failed: {st9}"
+
+    # 10. Anomaly: exit code 1 (search missed)
+    st10, _ = classify_gap2_result(1, "", "")
+    assert st10 == "unexpected_failure", f"Self-test 10 failed: {st10}"
+
+    # 11. Anomaly: crash by signal (e.g. SIGABRT, rc = -6)
+    st11, _ = classify_gap2_result(-6, "", "")
+    assert st11 == "unexpected_failure", f"Self-test 11 failed: {st11}"
+
+    # 12. Anomaly: exit 0 without [block: but truncated/corrupted stdout
+    st12, _ = classify_gap2_result(0, "3:Special characters truncated", "")
+    assert st12 == "unexpected_failure", f"Self-test 12 failed: {st12}"
+
+    log("  [PASS] Gap classifier anomaly self-tests passed (12/12 scenarios verified).")
+
+
 def run_known_gaps_reporter(trg: str, fixtures_dir: pathlib.Path) -> dict:
     log("=" * 60)
     log("SECTION 3: Known Contract Gaps Reporter (Status Quo Gap Analysis)")
@@ -391,25 +590,15 @@ def run_known_gaps_reporter(trg: str, fixtures_dir: pathlib.Path) -> dict:
     gaps = []
 
     # Gap 1: --code-only on unknown / non-code file (e.g. service.log with URL)
-    # Target Contract: Unknown / non-code files should NOT apply heuristic C comment/string rules;
-    #                  they should retain matches and report filtering unapplied.
-    # Current Behavior: detect_lexical_dialect falls back to Generic, treating '//' in URLs as comments.
     gap1_target = "Retention of lines with URLs containing '//' when searching non-code log files with --code-only"
     gap1_cmd = [trg, "--code-only", "-F", "check", str(fixtures_dir / "service.log")]
     try:
         r1 = run_trg_cmd(trg, ["--code-only", "-F", "check", str(fixtures_dir / "service.log")])
-        if r1.returncode == 1 and r1.stdout.strip() == "":
-            gap1_status = "reproduced"
-            gap1_actual = "Matches silently filtered out because detect_lexical_dialect fell back to Generic (treating '//' as comment)"
-        elif r1.returncode == 0 and "check" in r1.stdout:
-            gap1_status = "resolved"
-            gap1_actual = "Matches retained on non-code file under --code-only"
-        else:
-            gap1_status = "unexpected_failure"
-            gap1_actual = f"Unexpected exit code {r1.returncode}, stderr: {r1.stderr}"
+        gap1_status, gap1_actual = classify_gap1_result(r1.returncode, r1.stdout, r1.stderr)
+    except subprocess.TimeoutExpired:
+        gap1_status, gap1_actual = classify_gap1_result(0, "", "", timed_out=True)
     except Exception as e:
-        gap1_status = "unexpected_failure"
-        gap1_actual = f"Execution exception: {e}"
+        gap1_status, gap1_actual = classify_gap1_result(0, "", "", exception_msg=str(e))
 
     gaps.append({
         "gap_id": "GAP-001",
@@ -424,24 +613,15 @@ def run_known_gaps_reporter(trg: str, fixtures_dir: pathlib.Path) -> dict:
         raise RuntimeError(f"GAP-001 resulted in unexpected failure: {gap1_actual}")
 
     # Gap 2: --block on unknown / non-code file
-    # Target Contract: Unknown / non-code files should NOT synthesize code blocks around random '{' / '}'.
-    # Current Behavior: detect_syntax_family falls back to Brace, creating blocks on any line with '{'.
     gap2_target = "Safe fallback to non-block / plain lines on non-code text containing '{' without synthesizing brace scopes"
     gap2_cmd = [trg, "--block", "-F", "Special characters", str(fixtures_dir / "no_ext_plain")]
     try:
         r2 = run_trg_cmd(trg, ["--block", "-F", "Special characters", str(fixtures_dir / "no_ext_plain")])
-        if "[block: L" in r2.stdout or "[block: L1-L" in r2.stdout:
-            gap2_status = "reproduced"
-            gap2_actual = "Synthesized [block: ...] on non-code plain text because detect_syntax_family fell back to Brace"
-        elif r2.returncode == 0 and "[block:" not in r2.stdout:
-            gap2_status = "resolved"
-            gap2_actual = "Safely fell back to plain lines without block synthesis"
-        else:
-            gap2_status = "unexpected_failure"
-            gap2_actual = f"Unexpected exit code {r2.returncode}, stderr: {r2.stderr}"
+        gap2_status, gap2_actual = classify_gap2_result(r2.returncode, r2.stdout, r2.stderr)
+    except subprocess.TimeoutExpired:
+        gap2_status, gap2_actual = classify_gap2_result(0, "", "", timed_out=True)
     except Exception as e:
-        gap2_status = "unexpected_failure"
-        gap2_actual = f"Execution exception: {e}"
+        gap2_status, gap2_actual = classify_gap2_result(0, "", "", exception_msg=str(e))
 
     gaps.append({
         "gap_id": "GAP-002",
@@ -491,6 +671,9 @@ def main():
     log(f"  Version:           {binary_version}")
     log(f"  Binary SHA-256:    {binary_sha256}")
     log(f"  Platform:          {platform.system()} {platform.machine()}")
+
+    # Run self-tests for gap classifier integrity
+    run_gap_reporter_self_tests()
 
     # Run Section 1: Core Regression Gate
     s1 = run_core_regression_gate(str(trg_path), fixtures_dir, repo_root)

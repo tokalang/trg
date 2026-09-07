@@ -6478,13 +6478,13 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     ], capture_output=True, text=True)
     assert r_matrix.returncode == 0, f"Universal matrix suite failed (exit {r_matrix.returncode}):\n{r_matrix.stderr}\n{r_matrix.stdout}"
     matrix_res = json.loads(r_matrix.stdout)
-    assert matrix_res["core_gate"]["passed"] == matrix_res["core_gate"]["total"] == 30, f"Core gate failed: {matrix_res['core_gate']}"
+    assert matrix_res["core_gate"]["passed"] == matrix_res["core_gate"]["total"] == 38, f"Core gate failed: {matrix_res['core_gate']}"
     assert matrix_res["memory_benchmark"]["status"] == "PASS", f"Memory scaling benchmark failed: {matrix_res['memory_benchmark']}"
     assert matrix_res["overall_status"] == "CORE_PASS_WITH_DOCUMENTED_GAPS", f"Unexpected overall status: {matrix_res['overall_status']}"
     assert len(matrix_res["known_gaps"]) == 2
     for gap in matrix_res["known_gaps"]:
         assert gap["status"] in ("reproduced", "resolved"), f"Gap {gap['gap_id']} unexpected status: {gap['status']}"
-    log("Test 173 passed: 30/30 core tests passed, memory scaling verified, 2 known gaps confirmed reproduced.")
+    log("Test 173 passed: 38/38 core tests passed, memory scaling verified, 2 known gaps confirmed reproduced.")
 
     log("=" * 60)
     log("ALL 173 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.14.0)!")

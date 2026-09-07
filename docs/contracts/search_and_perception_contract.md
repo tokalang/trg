@@ -42,8 +42,8 @@ To maintain universal applicability across arbitrary repositories while deliveri
 ### Tier 1: Universal Search Kernel (Foundation)
 - **Role**: Pure, language-agnostic text search engine. Operates identically on source code, structured JSON/YAML, raw system logs, and raw binary/text files.
 - **Guarantees**:
-  - **Literal Search (`-F`)**: Exact byte-for-byte substring matching. Special characters (`[`, `]`, `{`, `}`, `(`, `)`, `$`, `*`, `+`, `?`, `\`, `^`) are treated as literal bytes, never interpreted as regular expressions.
-  - **Regular Expression Search (`-E` / default)**: PCRE2/POSIX-compatible regular expressions with linear-scan match evaluation.
+  - **Default Mode & Literal Search (`-F`)**: Default pattern invocation executes literal substring matching. `-F` provides explicit literal mode. Special characters (`[`, `]`, `{`, `}`, `(`, `)`, `$`, `*`, `+`, `?`, `\`, `^`) are treated as literal bytes, never interpreted as regular expressions unless `-E` is passed.
+  - **Regular Expression Search (`-E`)**: Uses Toka's `official/regex` Thompson NFA engine, supporting a well-defined regular expression syntax subset (capturing/non-capturing groups, alternation `|`, character classes `[...]`, and quantifiers `*`, `+`, `?`, `{m,n}`). It does not claim full PCRE2/POSIX compliance.
   - **Boundary Controls (`-w`, `-x`)**: Word boundaries (`-w`) enforce ASCII alphanumeric/underscore delimiters; full-line boundaries (`-x`) enforce complete newline-delimited matches.
   - **Case Modes (`-s`, `-i`, `-S`)**: Explicit sensitive (`-s`), explicit insensitive (`-i`), and smart-case (`-S`, insensitive if lowercase-only, sensitive if uppercase present).
   - **Multi-Pattern Deduplication (`-e`)**: Overlapping or multiple pattern matches on the same logical line produce deduplicated single-line emissions in CLI and grouped submatches in structured outputs.
@@ -80,7 +80,7 @@ To maintain universal applicability across arbitrary repositories while deliveri
 | **Path Handling** | Preserves duplicate arguments in order | Deduplicates into canonical `files` table | Resolves single target file path |
 | **Total Match Budget** | `--max-total-matches <N>` | `max_total_matches: <N>` | N/A |
 | **Per-File Match Budget** | `--max-count <N>` | `max_per_file: <N>` | N/A |
-| **Byte Budget** | N/A (unbuffered stream) | `max_result_bytes: <N>` (records payload) | `max_result_bytes: <N>` (exact UTF-8 content) |
+| **Byte Budget** | `--max-result-bytes <N>` (rendered stream) | `max_result_bytes: <N>` (records payload) | `max_result_bytes: <N>` (exact UTF-8 content) |
 | **Budget Exceeded Behavior** | Stops scan, emits summary footer | Sets `truncated: true, reason: max_total_matches` | Prunes context lines; fails with `isError: true` if target exceeds budget |
 | **Error Handling** | Exit code 2, error message to `stderr` | JSON-RPC tool error (`isError: true`) | JSON-RPC tool error (`isError: true`, no invalid structuredContent) |
 
@@ -95,9 +95,10 @@ When `max_result_bytes` is specified on `trg_view`:
 ## 4. Integrity, Truthfulness & Zero-Match Semantics
 
 1. **Truthful Termination Metadata**:
-   - `complete`: `true` if and only if the full target search space was exhausted without hitting match, line, or byte limits.
+   - `complete`: `true` if and only if the evaluated search scope under the specified query, paths, and filters was fully scanned with zero truncation across match, line, or byte budgets, **AND** zero captured/reported scan errors. Any captured and reported search error (e.g. read error, permission denied) prevents `complete` from being `true`.
    - `truncated`: `true` if emission was terminated due to any budget constraint.
    - `termination_reason`: Exact reason identifier (`completed`, `max_total_matches`, `max_result_bytes`, `max_files_with_matches`, `interrupted`).
+   - **Scope Boundaries**: Files excluded by `.gitignore`, binary auto-detection heuristics, or explicit user globs are explicitly unvisited. An agent must not make negative assertions regarding the entire codebase based on a search that excluded paths.
 2. **Zero-Match Results**:
    - In CLI: Emits 0 lines to stdout, exits with code `1`.
    - In MCP `trg_search`: Emits valid structured payload with `matches_emitted: 0`, `complete: true`, `truncated: false`, `records: []`, and returns JSON-RPC success (`isError: false`).
@@ -109,13 +110,15 @@ When `max_result_bytes` is specified on `trg_view`:
 
 ### 5.1 File Size Scaling (Streaming Chunk Buffer)
 - The search scanner operates over a fixed 64KiB chunk buffer (`libc_fread`).
-- For non-matching lines when context collection (`before_context`, `context_block`, `after_context`) is inactive, memory allocation is bypassed.
-- **Contract**: Peak RSS must remain bounded by a constant plus baseline runtime overhead ($< 15\text{ MiB}$ across any file size when max line length is fixed at $\le 1000$ characters). Memory growth ratio across a 9x file size expansion (e.g. 2MiB to 18MiB) must not scale linearly with file size (slope $\ll 1.0$, observed ratio $\approx 1.1\text{x}$).
+- **Observed Behavior by Version**:
+  - **Baseline Public Release (v0.14.0)**: In 3-scale benchmarks (2 MiB, 6 MiB, 18 MiB with 100-char lines and 1/1000 match density), measured isolated peak RSS increases from ~5.02 MiB to ~22.48 MiB across a 16 MiB file size expansion ($\Delta\text{RSS}/\Delta\text{Size} \approx 1.09 \text{ MiB/MiB}$, representing an overall ~4.48x RSS increase).
+  - **Patch Candidate (v0.14.1-rc)**: By bypassing `LogicalLine` object construction when context collection (`before_context`, `context_block`, `after_context`) is inactive, measured peak RSS is observed at ~2.89–2.98 MiB across the tested 2–18 MiB scales under the same benchmark environment.
+- **Contract Principle**: File size scaling must be evaluated via measured growth trends in explicit, isolated benchmark environments without unsubstantiated claims of universal constant bounds.
 
 ### 5.2 Single Long-Line Scaling
 - Long lines are read incrementally into an expandable logical line buffer.
 - Memory scales linearly with the length of the longest line $L$.
-- **Contract**: Time and memory must scale with $O(L)$, never $O(L^2)$. Processing a 16MiB line compared to a 4MiB line must exhibit an execution ratio $T_{16} / T_4 \le 6.0\text{x}$ (theoretical linear $\approx 4.0\text{x}$), far below the quadratic degradation threshold ($\ge 16.0\text{x}$).
+- **Measured Trend**: Processing a 16MiB line compared to a 4MiB line exhibits an execution ratio $T_{16} / T_4 \approx 3.2\text{x}$–$3.4\text{x}$ (theoretical linear $\approx 4.0\text{x}$), demonstrating linear time growth without quadratic degradation.
 
 ---
 
