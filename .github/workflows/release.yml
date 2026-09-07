@@ -588,7 +588,7 @@ jobs:
           if [ ! -f "$notes_file" ]; then
             notes_file="docs/release_notes/v0.14.1.md"
           fi
-          python3 tests/safe_release_upload.py --tag "$tag_name" --dist-dir dist --notes-file "$notes_file"
+          python3 tests/safe_release_upload.py --tag "$tag_name" --dist-dir dist --notes-file "$notes_file" --target "${{ github.sha }}"
 
   post-publish-verify:
     name: Verify Published Draft Release (Post-upload check)

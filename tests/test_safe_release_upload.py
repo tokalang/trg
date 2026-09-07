@@ -213,10 +213,9 @@ sys.exit(1)
             "--notes-file", str(self.notes_file),
             "--gh-cmd", f"{sys.executable} {self.mock_gh_script} {self.mock_state_file}"
         ]
-        if extra_args:
-            cmd.extend(extra_args)
-        # Use shell execution since gh-cmd contains arguments
         cmd_str = f'{sys.executable} {self.uploader_script} --tag {self.tag} --dist-dir {self.dist_dir} --notes-file {self.notes_file} --gh-cmd "{sys.executable} {self.mock_gh_script} {self.mock_state_file}"'
+        if extra_args:
+            cmd_str += " " + " ".join(extra_args)
         return subprocess.run(cmd_str, shell=True, capture_output=True, text=True)
 
     def test_missing_mandatory_deliverable_aborts(self):
@@ -340,6 +339,14 @@ sys.exit(1)
             self.src_tarball.name,
             self.sums_file.name
         })
+
+    def test_clean_draft_creation_with_target(self):
+        self.mock_state_file.write_text(json.dumps({
+            "release_exists": False
+        }))
+        r = self.run_uploader(extra_args=["--target", "abc12345"])
+        self.assertEqual(r.returncode, 0, f"Expected success but got: {r.stderr}\n{r.stdout}")
+        self.assertIn("All 6 mandatory deliverables safely verified", r.stdout)
 
 
 if __name__ == "__main__":

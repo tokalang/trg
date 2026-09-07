@@ -117,7 +117,8 @@ def execute_safe_upload(
     tag: str,
     dist_dir: pathlib.Path,
     notes_file: pathlib.Path | None = None,
-    gh_cmd: str = "gh"
+    gh_cmd: str = "gh",
+    target: str | None = None
 ):
     log(f"Initiating safe release upload sequence for tag: {tag}")
     files = verify_local_four_piece_set(dist_dir, tag)
@@ -140,7 +141,9 @@ def execute_safe_upload(
             sys.exit(1)
 
         log(f"Release {tag} does not exist. Creating draft release...")
-        create_cmd = gh_base + ["release", "create", tag, "--draft", "--verify-tag", "--title", tag]
+        create_cmd = gh_base + ["release", "create", tag, "--draft", "--title", tag]
+        if target:
+            create_cmd.extend(["--target", target])
         if notes_file and notes_file.exists():
             create_cmd.extend(["--notes-file", str(notes_file)])
         else:
@@ -237,6 +240,7 @@ def main():
     parser.add_argument("--dist-dir", default="dist", help="Directory containing assets to upload")
     parser.add_argument("--notes-file", help="Path to release notes markdown file")
     parser.add_argument("--gh-cmd", default="gh", help="Path to gh executable")
+    parser.add_argument("--target", help="Target commit SHA or branch if release tag does not exist")
     args = parser.parse_args()
 
     dist_dir = pathlib.Path(args.dist_dir).resolve()
@@ -245,7 +249,7 @@ def main():
         sys.exit(1)
 
     notes_file = pathlib.Path(args.notes_file).resolve() if args.notes_file else None
-    execute_safe_upload(args.tag, dist_dir, notes_file, args.gh_cmd)
+    execute_safe_upload(args.tag, dist_dir, notes_file, args.gh_cmd, target=args.target)
 
 
 if __name__ == "__main__":
