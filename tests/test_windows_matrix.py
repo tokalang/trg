@@ -28,6 +28,32 @@ def win_path(p):
 
 CLEAN_DATA = win_path(os.path.join(SANDBOX, "clean_test_data"))
 
+def ensure_fixtures():
+    os.makedirs(os.path.join(SANDBOX, "clean_test_data", "dir1"), exist_ok=True)
+    os.makedirs(os.path.join(SANDBOX, "clean_test_data", "中文目录"), exist_ok=True)
+    os.makedirs(os.path.join(SANDBOX, "clean_test_data", "path with spaces"), exist_ok=True)
+
+    hello_path = os.path.join(SANDBOX, "clean_test_data", "dir1", "hello.txt")
+    if not os.path.exists(hello_path):
+        with open(hello_path, "w", encoding="utf-8") as f:
+            f.write("Line 1: Alpha header\nLine 2: Target keyword alpha\nLine 3: Beta footer\n")
+
+    zh_path = os.path.join(SANDBOX, "clean_test_data", "中文目录", "测试.txt")
+    if not os.path.exists(zh_path):
+        with open(zh_path, "w", encoding="utf-8") as f:
+            f.write("第一行：测试标题\n第二行：关键字 目标\n第三行：结束\n")
+
+    space_path = os.path.join(SANDBOX, "clean_test_data", "path with spaces", "sample.txt")
+    if not os.path.exists(space_path):
+        with open(space_path, "w", encoding="utf-8") as f:
+            f.write("Hello world from space path\n")
+
+    pipe_path = os.path.join(SANDBOX, "pipe_data.txt")
+    if not os.path.exists(pipe_path):
+        with open(pipe_path, "w", encoding="utf-8") as f:
+            for i in range(10000):
+                f.write(f"Line {i}: test payload stream {i}\n")
+
 def msys_adapt(p):
     if os.name == "posix" and len(p) >= 2 and p[1] == ":":
         drive = p[0].lower()
@@ -37,7 +63,9 @@ def msys_adapt(p):
         return f"/{drive}{rest}"
     return p
 
-def run_cmd(cmd, cwd=SANDBOX, timeout=15):
+def run_cmd(cmd, cwd=None, timeout=15):
+    if cwd is None:
+        cwd = SANDBOX
     adapted_cmd = [msys_adapt(cmd[0])] + cmd[1:]
     adapted_cwd = msys_adapt(cwd)
     p = subprocess.run(
@@ -53,7 +81,11 @@ def run_cmd(cmd, cwd=SANDBOX, timeout=15):
 
 def test_root_relative_and_hydration(trg_bin):
     print(f"[{trg_bin}] Test 1: Root-relative path and view hydration round-trip...")
-    target_file = r"\Users\zhyi\trg_windows_probe\clean_test_data\dir1\hello.txt"
+    sandbox_abs = os.path.abspath(SANDBOX)
+    drive, path_no_drive = os.path.splitdrive(sandbox_abs)
+    target_file = win_path(os.path.join(path_no_drive, "clean_test_data", "dir1", "hello.txt"))
+    if not target_file.startswith("\\"):
+        target_file = "\\" + target_file
     p = run_cmd([trg_bin, "-H", "Target keyword", target_file])
     assert p.returncode == 0, f"Expected 0, got {p.returncode}: {p.stderr}"
     assert "Line 2: Target keyword alpha" in p.stdout, f"Missing match in: {p.stdout}"
@@ -331,6 +363,12 @@ def test_broken_pipe_counter_examples(trg_bin):
     is_arm64 = "arm64" in trg_bin.lower()
     c_test_bin = os.path.join(SANDBOX, "test_c_write_arm64.exe" if is_arm64 else "test_c_write_x64.exe")
     adapted_c_test = msys_adapt(c_test_bin)
+    if not os.path.exists(adapted_c_test):
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        c_src = os.path.join(repo_root, "tests", "test_c_bridge_write.c")
+        compat_src = os.path.join(repo_root, "src", "c", "trg_win_compat.c")
+        compile_cmd = ["clang", msys_adapt(compat_src), msys_adapt(c_src), "-o", adapted_c_test, "-lkernel32", "-lmsvcrt", "-O2"]
+        subprocess.run(compile_cmd, check=True)
     
     p_c = subprocess.run([adapted_c_test], capture_output=True, text=True, timeout=10)
     assert p_c.returncode == 0, f"C bridge write fault injection failed with code {p_c.returncode}: {p_c.stdout} {p_c.stderr}"
@@ -449,10 +487,29 @@ def test_path_resolution_failure_injection(trg_bin):
     print("  [PASS] Path resolution failure strictly verified: resolution branch reached, dual MCP protocol verified, 0 fake locations emitted.")
 
 def main():
-    binaries = [
-        (r"C:\Users\zhyi\trg_windows_probe\trg_arm64.exe", "Native Windows ARM64 (AArch64)"),
-        (r"C:\Users\zhyi\trg_windows_probe\trg.exe", "Windows x64 (Prism Emulation)")
-    ]
+    import argparse
+    parser = argparse.ArgumentParser(description="Windows Matrix Verification for trg")
+    parser.add_argument("--trg", help="Path to trg binary under test")
+    parser.add_argument("--sandbox", help="Working sandbox directory")
+    args = parser.parse_args()
+
+    global SANDBOX, CLEAN_DATA
+    if args.sandbox:
+        SANDBOX = os.path.abspath(args.sandbox)
+        CLEAN_DATA = win_path(os.path.join(SANDBOX, "clean_test_data"))
+    elif not os.path.exists(msys_adapt(SANDBOX)):
+        SANDBOX = os.path.abspath("_win_matrix_sandbox")
+        CLEAN_DATA = win_path(os.path.join(SANDBOX, "clean_test_data"))
+
+    ensure_fixtures()
+
+    if args.trg:
+        binaries = [(args.trg, f"Target Binary ({args.trg})")]
+    else:
+        binaries = [
+            (r"C:\Users\zhyi\trg_windows_probe\trg_arm64.exe", "Native Windows ARM64 (AArch64)"),
+            (r"C:\Users\zhyi\trg_windows_probe\trg.exe", "Windows x64 (Prism Emulation)")
+        ]
 
     for bin_path, desc in binaries:
         print("=" * 70)

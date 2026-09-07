@@ -276,6 +276,42 @@ sys.exit(2)
             self.sums_file.name
         })
 
+    def test_six_deliverables_windows_support(self):
+        # Add Windows x64 and ARM64 zip archives
+        win_x64 = self.dist_dir / f"trg-{self.tag}-windows-x64.zip"
+        win_arm64 = self.dist_dir / f"trg-{self.tag}-windows-arm64.zip"
+        x64_bytes = b"fake-win-x64-zip-content"
+        arm64_bytes = b"fake-win-arm64-zip-content"
+        win_x64.write_bytes(x64_bytes)
+        win_arm64.write_bytes(arm64_bytes)
+
+        # Update SHA256SUMS to cover all 5 archives
+        sums_text = (
+            f"{self.linux_sha}  {self.bin_linux.name}\n"
+            f"{self.macos_sha}  {self.bin_macos.name}\n"
+            f"{sha256_bytes(x64_bytes)}  {win_x64.name}\n"
+            f"{sha256_bytes(arm64_bytes)}  {win_arm64.name}\n"
+            f"{self.src_sha}  {self.src_tarball.name}\n"
+        )
+        self.sums_file.write_text(sums_text)
+
+        self.mock_state_file.write_text(json.dumps({
+            "release_exists": False
+        }))
+        r = self.run_uploader()
+        self.assertEqual(r.returncode, 0, f"Expected success but got: {r.stderr}\n{r.stdout}")
+        self.assertIn("All 6 mandatory deliverables safely verified", r.stdout)
+
+        state = json.loads(self.mock_state_file.read_text())
+        self.assertEqual(set(state.get("uploaded_files", [])), {
+            self.bin_linux.name,
+            self.bin_macos.name,
+            win_x64.name,
+            win_arm64.name,
+            self.src_tarball.name,
+            self.sums_file.name
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -54,14 +54,30 @@ def parse_sha256sums(sums_path: pathlib.Path) -> dict[str, str]:
     return mapping
 
 
-def verify_local_four_piece_set(dist_dir: pathlib.Path, tag: str) -> dict[str, pathlib.Path]:
+def verify_local_deliverables_set(dist_dir: pathlib.Path, tag: str) -> dict[str, pathlib.Path]:
     ver = tag.lstrip("v")
+    windows_archives = [
+        f"trg-{tag}-windows-x64.zip",
+        f"trg-{tag}-windows-arm64.zip",
+    ]
+    # Check if Windows packages are present or expected for v0.15.0+
+    has_windows = any((dist_dir / w).is_file() for w in windows_archives) or (ver >= "0.15.0" and any((dist_dir / w).exists() for w in windows_archives))
+
     expected_names = [
         f"trg-{tag}-linux-x64.tar.gz",
         f"trg-{tag}-macos-arm64.tar.gz",
         f"trg-{ver}.tar.gz",
         "SHA256SUMS"
     ]
+    if has_windows:
+        expected_names = [
+            f"trg-{tag}-linux-x64.tar.gz",
+            f"trg-{tag}-macos-arm64.tar.gz",
+            f"trg-{tag}-windows-x64.zip",
+            f"trg-{tag}-windows-arm64.zip",
+            f"trg-{ver}.tar.gz",
+            "SHA256SUMS"
+        ]
 
     files_by_name = {}
     missing = []
@@ -75,9 +91,9 @@ def verify_local_four_piece_set(dist_dir: pathlib.Path, tag: str) -> dict[str, p
     if missing:
         raise ValueError(f"Missing mandatory deliverable(s) in {dist_dir}: {', '.join(missing)}")
 
-    # Verify SHA256SUMS covers all 3 archives and matches on-disk digests
+    # Verify SHA256SUMS covers all archives and matches on-disk digests
     sums_map = parse_sha256sums(files_by_name["SHA256SUMS"])
-    archives = [f"trg-{tag}-linux-x64.tar.gz", f"trg-{tag}-macos-arm64.tar.gz", f"trg-{ver}.tar.gz"]
+    archives = [n for n in expected_names if n != "SHA256SUMS"]
 
     for arch_name in archives:
         if arch_name not in sums_map:
@@ -90,8 +106,12 @@ def verify_local_four_piece_set(dist_dir: pathlib.Path, tag: str) -> dict[str, p
                 f"disk={actual_digest}, listed={listed_digest}"
             )
 
-    log(f"Verified four-piece deliverable set and SHA256SUMS in {dist_dir}")
+    log(f"Verified {len(archives)} archives and SHA256SUMS in {dist_dir}")
     return files_by_name
+
+
+def verify_local_four_piece_set(dist_dir: pathlib.Path, tag: str) -> dict[str, pathlib.Path]:
+    return verify_local_deliverables_set(dist_dir, tag)
 
 
 def run_cmd(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -212,12 +232,12 @@ def execute_safe_upload(
             log(f"CRITICAL ERROR: Deliverable '{fname}' not found in final release assets!")
             sys.exit(1)
 
-    log(f"All 4 mandatory deliverables safely verified and staged on draft release {tag}!")
+    log(f"All {len(files)} mandatory deliverables safely verified and staged on draft release {tag}!")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Fail-Safe GitHub Release Asset Upload")
-    parser.add_argument("--tag", required=True, help="Tag name (e.g. v0.14.1)")
+    parser.add_argument("--tag", required=True, help="Tag name (e.g. v0.15.0)")
     parser.add_argument("--dist-dir", default="dist", help="Directory containing assets to upload")
     parser.add_argument("--notes-file", help="Path to release notes markdown file")
     parser.add_argument("--gh-cmd", default="gh", help="Path to gh executable")

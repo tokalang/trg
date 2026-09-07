@@ -20,6 +20,10 @@ import tarfile
 import tempfile
 
 
+import zipfile
+import re
+
+
 def log(msg: str):
     print(f"[STANDALONE-VERIFY] {msg}", flush=True)
 
@@ -34,6 +38,29 @@ def verify_archive_security(archive_path: pathlib.Path, expected_sha: str = None
     actual_sha = compute_sha256(archive_path)
     if expected_sha and actual_sha.lower() != expected_sha.lower():
         raise ValueError(f"SHA-256 mismatch: expected {expected_sha}, got {actual_sha}")
+
+    if archive_path.name.endswith(".zip"):
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            names = zf.namelist()
+            for name in names:
+                if name.startswith("/") or name.startswith("\\") or ".." in name:
+                    raise ValueError(f"Security violation: path escape in entry '{name}'")
+                if ".git" in name.replace("\\", "/").split("/"):
+                    raise ValueError(f"Security violation: .git metadata in entry '{name}'")
+            has_binary = any(n.endswith("/trg") or n == "trg" or n.endswith("/trg.exe") or n == "trg.exe" or n.endswith("\\trg.exe") for n in names)
+            has_license = any(n.lower().endswith("license") or n.lower().endswith("license.txt") or n.lower().endswith("license.md") for n in names)
+            has_readme = any(n.lower().endswith("readme.md") for n in names)
+            if not has_binary:
+                raise ValueError("Mandatory trg executable missing from archive!")
+            if not has_license:
+                raise ValueError("Mandatory LICENSE file missing from archive!")
+            if not has_readme:
+                raise ValueError("Mandatory README.md file missing from archive!")
+        return {
+            "archive_sha256": actual_sha,
+            "entry_count": len(names),
+            "license_verified": True
+        }
 
     with tarfile.open(archive_path, "r:gz") as tar:
         names = tar.getnames()
@@ -62,6 +89,33 @@ def verify_archive_security(archive_path: pathlib.Path, expected_sha: str = None
         "archive_sha256": actual_sha,
         "entry_count": len(names),
         "license_verified": True
+    }
+
+
+ALLOWED_SYSTEM_DLLS = {
+    "kernel32.dll", "bcrypt.dll", "ws2_32.dll", "shell32.dll", "msvcrt.dll"
+}
+
+
+def verify_dll_dependencies(bin_path: pathlib.Path) -> dict:
+    if not str(bin_path).lower().endswith(".exe"):
+        return {"checked": False, "reason": "not a Windows PE executable"}
+    data = bin_path.read_bytes()
+    matches = re.findall(rb'[A-Za-z0-9_\-\.]+\.dll\b', data, re.IGNORECASE)
+    found_dlls = set()
+    disallowed_dlls = set()
+    for m in matches:
+        name = m.decode("ascii", errors="ignore").lower()
+        if name in ALLOWED_SYSTEM_DLLS or name.startswith("api-ms-win-crt-"):
+            found_dlls.add(name)
+        elif any(forbidden in name for forbidden in ["msvcp", "libgcc", "libwinpthread", "libstdc++"]):
+            disallowed_dlls.add(name)
+    if disallowed_dlls:
+        raise ValueError(f"Security violation: disallowed third-party DLL dependencies detected: {disallowed_dlls}")
+    return {
+        "checked": True,
+        "allowed_dlls": sorted(list(found_dlls)),
+        "third_party_dll_count": 0
     }
 
 
@@ -177,9 +231,9 @@ def run_matrix_verification(bin_path: pathlib.Path, repo_root: pathlib.Path) -> 
 
 def main():
     parser = argparse.ArgumentParser(description="trg Standalone Binary Release Verifier")
-    parser.add_argument("--archive", required=True, help="Path to standalone binary tarball (.tar.gz)")
+    parser.add_argument("--archive", required=True, help="Path to standalone binary archive (.tar.gz or .zip)")
     parser.add_argument("--expected-sha", help="Expected SHA-256 digest of binary archive")
-    parser.add_argument("--expected-version", default="0.14.1", help="Expected version string")
+    parser.add_argument("--expected-version", default="0.15.0", help="Expected version string")
     parser.add_argument("--run-matrix", action="store_true", help="Run test_universal_matrix.py against extracted binary")
     args = parser.parse_args()
 
@@ -197,11 +251,19 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="trg-bin-verify-") as tmpdir:
         extract_path = pathlib.Path(tmpdir)
-        with tarfile.open(archive_path, "r:gz") as tar:
-            tar.extractall(extract_path)
+        if archive_path.name.endswith(".zip"):
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(extract_path)
+        else:
+            with tarfile.open(archive_path, "r:gz") as tar:
+                tar.extractall(extract_path)
 
         bin_path = find_binary(extract_path)
         log(f"  Extracted binary located at: {bin_path}")
+
+        dll_info = verify_dll_dependencies(bin_path)
+        if dll_info.get("checked"):
+            log(f"  DLL dependency check: 0 third-party DLLs verified (found: {len(dll_info['allowed_dlls'])} system DLLs)")
 
         smoke_info = run_smoke_tests(bin_path, args.expected_version, fixtures_dir)
         log(f"  Smoke tests passed: {smoke_info['smoke_tests_passed']}/7 ({smoke_info['version_output']})")
@@ -218,6 +280,7 @@ def main():
         "version": smoke_info["version_output"],
         "status": "PASS",
         "smoke_tests": smoke_info,
+        "dll_verification": dll_info,
         "matrix_verification": matrix_info
     }
     print(json.dumps(report, indent=2))

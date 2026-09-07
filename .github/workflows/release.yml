@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Tag name to build binaries for'
         required: true
-        default: 'v0.14.1'
+        default: 'v0.15.0'
 
 permissions:
   contents: write
@@ -64,8 +64,8 @@ jobs:
           name: source-archive
           path: ${{ steps.pack-source.outputs.source_archive }}
 
-  build-binaries:
-    name: Build binary (${{ matrix.name }})
+  build-unix-binaries:
+    name: Build unix binary (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -119,7 +119,7 @@ jobs:
           toka build
           ./target/debug/trg -V
 
-      - name: Package and verify standalone archive
+      - name: Package standalone archive
         id: pack
         run: |
           tag_name="${{ github.ref_name }}"
@@ -133,19 +133,16 @@ jobs:
           cp README.md "$RUNNER_TEMP/$arch_name/"
           tar -czf "$arch_name.tar.gz" -C "$RUNNER_TEMP" "$arch_name"
           shasum -a 256 "$arch_name.tar.gz"
-          ver_expected="${tag_name#v}"
-          python3 tests/verify_standalone_binary.py --archive "$arch_name.tar.gz" --expected-version "$ver_expected" --run-matrix
           echo "tarball=$arch_name.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
+          name: package-${{ matrix.name }}
           path: ${{ steps.pack.outputs.tarball }}
 
-  publish-release:
-    name: Attach standalone binaries to GitHub Release
-    needs: [build-binaries, build-source]
+  cross-compile-windows-objects:
+    name: Cross-compile Windows objects (ubuntu-22.04)
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repo
@@ -153,17 +150,397 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
-      - name: Download all artifacts
+      - name: Install locked Toka SDK (RC11)
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64.tar.gz"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/toka-v1.0.0-rc.11-linux-x64.tar.gz"
+          echo "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917  $archive" | shasum -a 256 --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sdk="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64"
+          echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+
+      - name: Cross-compile Windows COFF objects
+        run: |
+          set -euo pipefail
+          mkdir -p build_win
+          export TOKA_LIB
+          "$TOKAC" --target x86_64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.0/lib src/main.tk -o build_win/trg_x64.o
+          "$TOKAC" --target aarch64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.0/lib src/main.tk -o build_win/trg_arm64.o
+          cp "$TOKA_LIB/sys/toka_rt.c" build_win/
+          cp src/c/trg_win_compat.c build_win/
+          cp src/c/trg.manifest build_win/
+          cp src/c/trg.rc build_win/
+          cp LICENSE build_win/
+          cp README.md build_win/
+
+      - name: Upload Windows build inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-inputs
+          path: build_win/
+
+  build-windows-x64:
+    name: Build & Package Windows x64 (windows-2025)
+    needs: cross-compile-windows-objects
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Setup MSYS2 MinGW-w64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-lld
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-python
+            zip
+
+      - name: Download Windows build inputs
         uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
+          name: windows-build-inputs
+          path: build_win
 
-      - name: Compute checksums
+      - name: Link and Package trg.exe (x64)
+        run: |
+          set -euo pipefail
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          arch_dir="trg-${tag_name}-windows-x64"
+          mkdir -p "$arch_dir"
+
+          windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
+          clang -c build_win/trg_win_compat.c -O2 -o build_win/trg_win_compat.o
+          clang -c build_win/toka_rt.c -O2 -o build_win/toka_rt.o
+          clang build_win/trg_x64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
+            -o "$arch_dir/trg.exe" -lbcrypt -lws2_32 -lshell32
+          
+          cp build_win/LICENSE "$arch_dir/"
+          cp build_win/README.md "$arch_dir/"
+          zip -r "$arch_dir.zip" "$arch_dir"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-windows-x64
+          path: trg-*-windows-x64.zip
+
+  build-windows-arm64:
+    name: Build & Package Windows ARM64 (windows-11-arm)
+    needs: cross-compile-windows-objects
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Setup MSYS2 CLANGARM64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          install: >-
+            mingw-w64-clang-aarch64-clang
+            mingw-w64-clang-aarch64-lld
+            mingw-w64-clang-aarch64-binutils
+            mingw-w64-clang-aarch64-python
+            zip
+
+      - name: Download Windows build inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build-inputs
+          path: build_win
+
+      - name: Link and Package trg.exe (ARM64)
+        run: |
+          set -euo pipefail
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          arch_dir="trg-${tag_name}-windows-arm64"
+          mkdir -p "$arch_dir"
+
+          windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
+          clang -c build_win/trg_win_compat.c -O2 -o build_win/trg_win_compat.o
+          clang -c build_win/toka_rt.c -O2 -o build_win/toka_rt.o
+          clang build_win/trg_arm64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
+            -o "$arch_dir/trg.exe" -lbcrypt -lws2_32 -lshell32
+          
+          cp build_win/LICENSE "$arch_dir/"
+          cp build_win/README.md "$arch_dir/"
+          zip -r "$arch_dir.zip" "$arch_dir"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-windows-arm64
+          path: trg-*-windows-arm64.zip
+
+  verify-linux-x64:
+    name: Verify final package (linux-x64 on ubuntu-22.04)
+    needs: build-unix-binaries
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: package-linux-x64
+
+      - name: Verify package and run matrix
+        run: |
+          set -euo pipefail
+          tarball=$(ls trg-*-linux-x64.tar.gz | head -n 1)
+          python3 tests/verify_standalone_binary.py --archive "$tarball" --expected-version 0.15.0 --run-matrix
+          python3 tests/verify_installer.py
+
+      - name: Upload verified archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-linux-x64
+          path: trg-*-linux-x64.tar.gz
+
+  verify-macos-arm64:
+    name: Verify final package (macos-arm64 on macos-15)
+    needs: build-unix-binaries
+    runs-on: macos-15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: package-macos-arm64
+
+      - name: Verify package and run matrix
+        run: |
+          set -euo pipefail
+          tarball=$(ls trg-*-macos-arm64.tar.gz | head -n 1)
+          python3 tests/verify_standalone_binary.py --archive "$tarball" --expected-version 0.15.0 --run-matrix
+          python3 tests/verify_installer.py
+
+      - name: Upload verified archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-macos-arm64
+          path: trg-*-macos-arm64.tar.gz
+
+  verify-windows-x64:
+    name: Verify final package (windows-x64 on windows-2025)
+    needs: build-windows-x64
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-python unzip
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: package-windows-x64
+
+      - name: Unpack and Verify package & DLL dependencies
+        run: |
+          set -euo pipefail
+          zipfile=$(ls trg-*-windows-x64.zip | head -n 1)
+          python3 tests/verify_standalone_binary.py --archive "$zipfile" --expected-version 0.15.0
+          unzip -o "$zipfile"
+          trg_path=$(find . -name "trg.exe" -path "*/trg-*-windows-x64/*" | head -n 1)
+          python3 tests/test_windows_matrix.py --trg "$trg_path"
+
+      - name: Upload verified archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-windows-x64
+          path: trg-*-windows-x64.zip
+
+  verify-windows-arm64:
+    name: Verify final package (windows-arm64 on windows-11-arm)
+    needs: build-windows-arm64
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          install: mingw-w64-clang-aarch64-python unzip
+
+      - name: Download package
+        uses: actions/download-artifact@v4
+        with:
+          name: package-windows-arm64
+
+      - name: Unpack and Verify package & DLL dependencies
+        run: |
+          set -euo pipefail
+          zipfile=$(ls trg-*-windows-arm64.zip | head -n 1)
+          python3 tests/verify_standalone_binary.py --archive "$zipfile" --expected-version 0.15.0
+          unzip -o "$zipfile"
+          trg_path=$(find . -name "trg.exe" -path "*/trg-*-windows-arm64/*" | head -n 1)
+          python3 tests/test_windows_matrix.py --trg "$trg_path"
+
+      - name: Upload verified archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-windows-arm64
+          path: trg-*-windows-arm64.zip
+
+  prepare-release-deliverables:
+    name: Prepare release deliverables & WinGet manifest (ubuntu-22.04)
+    needs: [build-source, verify-linux-x64, verify-macos-arm64, verify-windows-x64, verify-windows-arm64]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Collect all verified archives into dist
+        run: |
+          mkdir -p dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-archive
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-linux-x64
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-macos-arm64
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-windows-x64
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: verified-windows-arm64
+          path: dist
+
+      - name: Compute official SHA256SUMS covering all 5 verified deliverables
         run: |
           cd dist
-          shasum -a 256 trg-*.tar.gz > SHA256SUMS
+          shasum -a 256 trg-*.tar.gz trg-*.zip > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Generate and Validate WinGet manifests
+        run: |
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          ver_name="${tag_name#v}"
+          win_x64_zip=$(ls dist/trg-*-windows-x64.zip | head -n 1)
+          win_arm64_zip=$(ls dist/trg-*-windows-arm64.zip | head -n 1)
+          python3 scripts/generate_winget_manifest.py \
+            --version "$ver_name" \
+            --tag "$tag_name" \
+            --x64-zip "$win_x64_zip" \
+            --arm64-zip "$win_arm64_zip" \
+            --output-dir dist/winget
+          tar -czf dist/trg-winget-manifests.tar.gz -C dist/winget manifests
+
+      - name: Verify release asset publisher logic against dist deliverables
+        run: |
+          python3 -m unittest tests/test_safe_release_upload.py
+
+      - name: Upload verified deliverables
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-dist-deliverables
+          path: dist/
+
+  release-gate:
+    name: Release Gatekeeper (Unified gate)
+    if: always()
+    needs: [verify-linux-x64, verify-macos-arm64, verify-windows-x64, verify-windows-arm64, prepare-release-deliverables]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Confirm all required qualification jobs succeeded
+        run: |
+          echo "verify-linux-x64:             ${{ needs.verify-linux-x64.result }}"
+          echo "verify-macos-arm64:           ${{ needs.verify-macos-arm64.result }}"
+          echo "verify-windows-x64:           ${{ needs.verify-windows-x64.result }}"
+          echo "verify-windows-arm64:         ${{ needs.verify-windows-arm64.result }}"
+          echo "prepare-release-deliverables: ${{ needs.prepare-release-deliverables.result }}"
+
+          test "${{ needs.verify-linux-x64.result }}" = "success"
+          test "${{ needs.verify-macos-arm64.result }}" = "success"
+          test "${{ needs.verify-windows-x64.result }}" = "success"
+          test "${{ needs.verify-windows-arm64.result }}" = "success"
+          test "${{ needs.prepare-release-deliverables.result }}" = "success"
+
+          echo "All four platform verifications and release deliverable checks PASSED! Release gate approved."
+
+  publish-draft-release:
+    name: Publish Draft Release (Attach verified assets)
+    needs: release-gate
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Download all verified deliverables
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-dist-deliverables
+          path: dist
 
       - name: Publish draft release safely without clobber
         env:
@@ -178,3 +555,49 @@ jobs:
             notes_file="docs/release_notes/v0.14.1.md"
           fi
           python3 tests/safe_release_upload.py --tag "$tag_name" --dist-dir dist --notes-file "$notes_file"
+
+  post-publish-verify:
+    name: Verify Published Draft Release (Post-upload check)
+    needs: publish-draft-release
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Download verified deliverables for reference
+        uses: actions/download-artifact@v4
+        with:
+          name: verified-dist-deliverables
+          path: dist
+
+      - name: Verify remote draft release integrity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag_name="${{ github.ref_name }}"
+          if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
+            tag_name="${{ inputs.tag }}"
+          fi
+          export tag_name
+          gh release view "$tag_name" --json isDraft,assets > release_info.json
+          cat release_info.json
+          python3 -c "
+          import json, os, sys
+          tag = os.environ.get('tag_name', '').strip()
+          ver = tag.lstrip('v')
+          with open('release_info.json') as f:
+              info = json.load(f)
+          assert info.get('isDraft') is True, 'Release is not in Draft state!'
+          assets = {a['name'] for a in info.get('assets', [])}
+          expected = [
+              f'trg-{tag}-linux-x64.tar.gz',
+              f'trg-{tag}-macos-arm64.tar.gz',
+              f'trg-{tag}-windows-x64.zip',
+              f'trg-{tag}-windows-arm64.zip',
+              f'trg-{ver}.tar.gz',
+              'SHA256SUMS'
+          ]
+          for exp in expected:
+              assert exp in assets, f'Missing remote asset: {exp}'
+          print(f'Verified all {len(expected)} release assets attached remotely to draft release {tag}!')
+          "

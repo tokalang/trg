@@ -13,7 +13,7 @@ env:
   TOKA_VERSION: v1.0.0-rc.11
 
 jobs:
-  qualify:
+  qualify-unix:
     name: trg qualification (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -81,3 +81,158 @@ jobs:
 
       - name: Verify release asset publisher logic
         run: python3 -m unittest tests/test_safe_release_upload.py
+
+  build-cross-windows-objects:
+    name: Cross-compile Windows objects (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out package
+        uses: actions/checkout@v4
+
+      - name: Install locked Toka SDK (RC11)
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64.tar.gz"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/toka-v1.0.0-rc.11-linux-x64.tar.gz"
+          echo "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917  $archive" | shasum -a 256 --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sdk="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64"
+          echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+
+      - name: Cross-compile Windows COFF objects
+        run: |
+          set -euo pipefail
+          mkdir -p build_win
+          export TOKA_LIB
+          "$TOKAC" --target x86_64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.0/lib src/main.tk -o build_win/trg_x64.o
+          "$TOKAC" --target aarch64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.0/lib src/main.tk -o build_win/trg_arm64.o
+          cp "$TOKA_LIB/sys/toka_rt.c" build_win/
+          cp src/c/trg_win_compat.c build_win/
+          cp src/c/trg.manifest build_win/
+          cp src/c/trg.rc build_win/
+
+      - name: Upload Windows build inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build-inputs
+          path: build_win/
+
+  qualify-windows-x64:
+    name: trg qualification (windows-x64 on windows-2025)
+    needs: build-cross-windows-objects
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 MinGW-w64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-clang
+            mingw-w64-x86_64-lld
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-python
+
+      - name: Download Windows build inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build-inputs
+          path: build_win
+
+      - name: Link trg.exe (x64)
+        run: |
+          set -euo pipefail
+          windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
+          clang -c build_win/trg_win_compat.c -O2 -o build_win/trg_win_compat.o
+          clang -c build_win/toka_rt.c -O2 -o build_win/toka_rt.o
+          clang build_win/trg_x64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
+            -o trg.exe -lbcrypt -lws2_32 -lshell32
+          ./trg.exe -V | grep -F "0.15.0"
+
+      - name: Verify 0 third-party DLL dependencies
+        run: |
+          python3 -c "
+          from tests.verify_standalone_binary import verify_dll_dependencies
+          import pathlib
+          res = verify_dll_dependencies(pathlib.Path('trg.exe'))
+          assert res['checked'] and res['third_party_dll_count'] == 0, f'Disallowed DLLs: {res}'
+          print('DLL Check: 0 third-party DLLs detected.', res)
+          "
+
+      - name: Run Windows qualification matrix (native x64)
+        run: python3 tests/test_windows_matrix.py --trg trg.exe
+
+  qualify-windows-arm64:
+    name: trg qualification (windows-arm64 on windows-11-arm)
+    needs: build-cross-windows-objects
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 CLANGARM64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          update: true
+          install: >-
+            mingw-w64-clang-aarch64-clang
+            mingw-w64-clang-aarch64-lld
+            mingw-w64-clang-aarch64-binutils
+            mingw-w64-clang-aarch64-python
+
+      - name: Download Windows build inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build-inputs
+          path: build_win
+
+      - name: Link trg.exe (ARM64)
+        run: |
+          set -euo pipefail
+          windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
+          clang -c build_win/trg_win_compat.c -O2 -o build_win/trg_win_compat.o
+          clang -c build_win/toka_rt.c -O2 -o build_win/toka_rt.o
+          clang build_win/trg_arm64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
+            -o trg.exe -lbcrypt -lws2_32 -lshell32
+          ./trg.exe -V | grep -F "0.15.0"
+
+      - name: Verify 0 third-party DLL dependencies
+        run: |
+          python3 -c "
+          from tests.verify_standalone_binary import verify_dll_dependencies
+          import pathlib
+          res = verify_dll_dependencies(pathlib.Path('trg.exe'))
+          assert res['checked'] and res['third_party_dll_count'] == 0, f'Disallowed DLLs: {res}'
+          print('DLL Check: 0 third-party DLLs detected.', res)
+          "
+
+      - name: Run Windows qualification matrix (native ARM64)
+        run: python3 tests/test_windows_matrix.py --trg trg.exe
+
+  qualification-gate:
+    name: Four-platform qualification gate
+    if: always()
+    needs: [qualify-unix, qualify-windows-x64, qualify-windows-arm64]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Enforce all platform gates
+        run: |
+          echo "qualify-unix:          ${{ needs.qualify-unix.result }}"
+          echo "qualify-windows-x64:   ${{ needs.qualify-windows-x64.result }}"
+          echo "qualify-windows-arm64: ${{ needs.qualify-windows-arm64.result }}"
+          test "${{ needs.qualify-unix.result }}" = "success"
+          test "${{ needs.qualify-windows-x64.result }}" = "success"
+          test "${{ needs.qualify-windows-arm64.result }}" = "success"
+          echo "All four platforms (Linux x64, macOS arm64, Windows x64, Windows arm64) passed qualification!"
