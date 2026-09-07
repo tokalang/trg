@@ -204,39 +204,68 @@ Run `sh install.sh --help` to see all options, including `--no-modify-path`.
 
 ### 4. Manual Precompiled Binary Download
 
-You can also download standalone archives directly from [GitHub Releases](https://github.com/tokalang/trg/releases/latest):
+You can download standalone archives directly from [GitHub Releases](https://github.com/tokalang/trg/releases/latest):
 
 - **macOS (Apple Silicon / arm64)**:
+  - Direct Download: [`trg-v0.15.0-macos-arm64.tar.gz`](https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-macos-arm64.tar.gz)
   ```bash
   curl -fLO https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-macos-arm64.tar.gz
+  tar -xzf trg-v0.15.0-macos-arm64.tar.gz
+  ./trg-v0.15.0-macos-arm64/trg --version
   ```
 
 - **Linux (x86_64)**:
+  - Direct Download: [`trg-v0.15.0-linux-x64.tar.gz`](https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-linux-x64.tar.gz)
   ```bash
   curl -fLO https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-linux-x64.tar.gz
+  tar -xzf trg-v0.15.0-linux-x64.tar.gz
+  ./trg-v0.15.0-linux-x64/trg --version
   ```
 
-- **Windows (x64 / ARM64)**:
-  - x64: `trg-v0.15.0-windows-x64.zip`
-  - ARM64: `trg-v0.15.0-windows-arm64.zip`
+- **Windows (x64)**:
+  - Direct Download: [`trg-v0.15.0-windows-x64.zip`](https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-windows-x64.zip)
+  ```powershell
+  curl.exe -fLO https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-windows-x64.zip
+  tar.exe -xf trg-v0.15.0-windows-x64.zip
+  .\trg-v0.15.0-windows-x64\trg.exe --version
+  ```
 
-Download `SHA256SUMS` from the same release and verify the archive before
-extracting it. The automated installer above performs this check by default.
+- **Windows (ARM64)**:
+  - Direct Download: [`trg-v0.15.0-windows-arm64.zip`](https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-windows-arm64.zip)
+  ```powershell
+  curl.exe -fLO https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-windows-arm64.zip
+  tar.exe -xf trg-v0.15.0-windows-arm64.zip
+  .\trg-v0.15.0-windows-arm64\trg.exe --version
+  ```
 
-### 5. Windows Installation (WinGet & Portable ZIP)
+- **Checksums**:
+  - Direct Download: [`SHA256SUMS`](https://github.com/tokalang/trg/releases/download/v0.15.0/SHA256SUMS)
 
-#### WinGet Package Manager (Windows 10 1903+ / Windows 11)
+### 5. Windows Installation
+
+#### Option A: PowerShell Quick Install (Recommended)
+
+In PowerShell, install and automatically configure User `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/tokalang/trg/main/install.ps1 | iex
+```
+
+*(Automatically detects x64/ARM64 architecture, verifies SHA-256 against `SHA256SUMS`, extracts `trg.exe` to `%LOCALAPPDATA%\Programs\trg`, and adds it to your user `PATH`).*
+
+#### Option B: WinGet Package Manager (Windows 10 1903+ / Windows 11)
 
 > [!NOTE]
-> `Tokalang.trg` manifests are generated and submitted with each release. Note that direct consumption via `winget install --id Tokalang.trg` becomes available after the upstream [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) catalog review and pull request is merged.
+> `Tokalang.trg` manifests are generated and submitted with each release. Direct consumption via `winget install --id Tokalang.trg` becomes available after the upstream [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) catalog review is complete.
 
-Once the catalog pull request is merged upstream, install or upgrade directly via:
+Install or upgrade directly via:
 ```cmd
 winget install --id Tokalang.trg -e
 ```
 
-#### Manual Extraction (x64 / ARM64)
-Download the standalone ZIP archive for your architecture (`windows-x64` or `windows-arm64`), extract `trg.exe`, and place it into any directory included in your system `PATH`.
+#### Option C: Direct Download & Portable Run
+
+Click to download [`trg-v0.15.0-windows-x64.zip`](https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-windows-x64.zip) (or [`trg-v0.15.0-windows-arm64.zip`](https://github.com/tokalang/trg/releases/download/v0.15.0/trg-v0.15.0-windows-arm64.zip)), extract `trg.exe`, and drop it into any directory included in your system `PATH`.
 
 ### 6. Build from Source (via Toka Package Manager)
 
