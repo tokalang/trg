@@ -1,6 +1,16 @@
-# trg: Agent-Friendly, Streaming Code Search in Toka
+# trg: Fast, Agent-Friendly Code Search & Context Hydration
 
-`trg` is a lightweight, agent-friendly, streaming code search tool written natively in Toka.
+`trg` is a high-performance, symlink-safe, agent-friendly code search and context hydration CLI tool with native Model Context Protocol (MCP) server support.
+
+Designed for modern AI coding agents and developers, `trg` recursively searches across any codebase (C/C++, Python, TypeScript, Rust, Go, Java, Markdown, and more) with intelligent syntactic block expansion, enclosing symbol scope breadcrumbs, and LLM-safe token budget protection.
+
+### Key Highlights
+
+- **Universal Code Search**: Recursively searches repositories in any programming language with literal fast-paths, smart case sensitivity, and non-backtracking regular expressions.
+- **Native Stdio MCP Server (`--mcp`)**: Built-in JSON-RPC 2.0 server over stdio for Claude Desktop, Cursor, Antigravity, and AI agent frameworks—zero Node.js or Python runtime required.
+- **LLM Context Protection**: Hard result payload budgets (`--max-result-bytes`, `--max-total-matches`), token-efficient compact JSON mode (`--json=compact`), and atomic context window framing prevent context runaway.
+- **Syntactic Block Hydration (`--block`, `--scope`, `--def-first`)**: Expands matches into full enclosing functions/classes and prioritizes symbol definitions over usages for instant code comprehension.
+- **Zero-Dependency Native Binary**: Ships as a single standalone executable across macOS (Apple Silicon), Linux (x86_64), and Windows (x64 / ARM64).
 
 ## Features & Guarantees
 
