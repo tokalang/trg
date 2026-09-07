@@ -149,7 +149,21 @@
 
 ## Installation
 
-### 1. User-Local Install (Recommended, No Toka SDK Required)
+### 1. Homebrew (macOS & Linux)
+
+Install the official standalone binary via Homebrew:
+
+```bash
+brew install tokalang/tap/trg
+```
+
+To update `trg` to the latest release:
+
+```bash
+brew update && brew upgrade trg
+```
+
+### 2. User-Local Install (Standalone Script)
 
 Install the standalone precompiled binary into `~/.local/bin` without `sudo`:
 
@@ -172,7 +186,7 @@ curl -fsSL https://raw.githubusercontent.com/tokalang/trg/main/install.sh \
 
 `INSTALL_DIR="$HOME/bin"` remains supported for compatibility.
 
-### 2. Explicit System-Wide Install
+### 3. Explicit System-Wide Install
 
 Administrators may opt into `/usr/local/bin` installation:
 
@@ -188,7 +202,7 @@ entire installer as root or use `curl ... | sudo sh`.
 
 Run `sh install.sh --help` to see all options, including `--no-modify-path`.
 
-### 3. Manual Precompiled Binary Download
+### 4. Manual Precompiled Binary Download
 
 You can also download standalone archives directly from [GitHub Releases](https://github.com/tokalang/trg/releases/latest):
 
@@ -209,7 +223,7 @@ You can also download standalone archives directly from [GitHub Releases](https:
 Download `SHA256SUMS` from the same release and verify the archive before
 extracting it. The automated installer above performs this check by default.
 
-### 4. Windows Installation (WinGet & Portable ZIP)
+### 5. Windows Installation (WinGet & Portable ZIP)
 
 #### WinGet Package Manager (Windows 10 1903+ / Windows 11)
 
@@ -224,7 +238,7 @@ winget install --id Tokalang.trg -e
 #### Manual Extraction (x64 / ARM64)
 Download the standalone ZIP archive for your architecture (`windows-x64` or `windows-arm64`), extract `trg.exe`, and place it into any directory included in your system `PATH`.
 
-### 5. Build from Source (via Toka Package Manager)
+### 6. Build from Source (via Toka Package Manager)
 
 ```bash
 # Fetch dependencies and build
