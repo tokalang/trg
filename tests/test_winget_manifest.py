@@ -43,7 +43,7 @@ class TestWinGetManifestGeneration(unittest.TestCase):
         pkg_dir = self.out_dir / "manifests" / "t" / "Tokalang" / "trg" / "0.15.0"
         self.assertTrue(pkg_dir.exists(), f"Package directory not created: {pkg_dir}")
 
-        ver_file = pkg_dir / "Tokalang.trg.version.yaml"
+        ver_file = pkg_dir / "Tokalang.trg.yaml"
         loc_file = pkg_dir / "Tokalang.trg.locale.en-US.yaml"
         inst_file = pkg_dir / "Tokalang.trg.installer.yaml"
 

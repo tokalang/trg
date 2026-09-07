@@ -121,16 +121,16 @@ ManifestType: installer
 ManifestVersion: 1.9.0
 """
 
-    (pkg_dir / "Tokalang.trg.version.yaml").write_text(version_yaml, encoding="utf-8")
+    (pkg_dir / "Tokalang.trg.yaml").write_text(version_yaml, encoding="utf-8")
     (pkg_dir / "Tokalang.trg.locale.en-US.yaml").write_text(locale_yaml, encoding="utf-8")
     (pkg_dir / "Tokalang.trg.installer.yaml").write_text(installer_yaml, encoding="utf-8")
 
-    (out_dir / "Tokalang.trg.version.yaml").write_text(version_yaml, encoding="utf-8")
+    (out_dir / "Tokalang.trg.yaml").write_text(version_yaml, encoding="utf-8")
     (out_dir / "Tokalang.trg.locale.en-US.yaml").write_text(locale_yaml, encoding="utf-8")
     (out_dir / "Tokalang.trg.installer.yaml").write_text(installer_yaml, encoding="utf-8")
 
     print(f"[WINGET-MANIFEST] Generated manifests for Tokalang.trg {version} in {pkg_dir}")
-    print(f"  - Tokalang.trg.version.yaml")
+    print(f"  - Tokalang.trg.yaml")
     print(f"  - Tokalang.trg.locale.en-US.yaml")
     print(f"  - Tokalang.trg.installer.yaml")
     print(f"  x64 SHA-256:   {x64_sha}")
