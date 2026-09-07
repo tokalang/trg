@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Tag name to build binaries for'
         required: true
-        default: 'v0.13.1'
+        default: 'v0.14.1'
 
 permissions:
   contents: write
@@ -18,6 +18,52 @@ env:
   TOKA_VERSION: v1.0.0-rc.11
 
 jobs:
+  build-source:
+    name: Build source archive (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install Linux dependencies
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          sudo -E apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y libssl3 zlib1g libzstd1 libstdc++6 libgcc-s1 ripgrep
+
+      - name: Install Toka SDK (RC11)
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64.tar.gz"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/toka-v1.0.0-rc.11-linux-x64.tar.gz"
+          echo "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917  $archive" | shasum -a 256 --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          sdk="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64"
+          echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
+          echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_COMPILER=$sdk/bin/tokac" >> "$GITHUB_ENV"
+          echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
+          echo "PATH=$sdk/bin:$PATH" >> "$GITHUB_ENV"
+
+      - name: Build and verify source archive
+        id: pack-source
+        run: |
+          set -euo pipefail
+          toka publish
+          archive_file=$(ls trg-*.tar.gz | head -n 1)
+          python3 tests/verify_application_release.py --archive "$archive_file"
+          echo "source_archive=$archive_file" >> "$GITHUB_OUTPUT"
+
+      - name: Upload source archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-archive
+          path: ${{ steps.pack-source.outputs.source_archive }}
+
   build-binaries:
     name: Build binary (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
@@ -45,11 +91,11 @@ jobs:
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
           sudo -E apt-get update -o Acquire::Retries=5
-          sudo apt-get install -y libssl3 zlib1g libzstd1 libstdc++6 libgcc-s1
+          sudo apt-get install -y libssl3 zlib1g libzstd1 libstdc++6 libgcc-s1 ripgrep
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
-        run: brew install lld@20 zstd openssl@3
+        run: brew install lld@20 zstd openssl@3 ripgrep
 
       - name: Install Toka SDK (RC11)
         run: |
@@ -73,7 +119,7 @@ jobs:
           toka build
           ./target/debug/trg -V
 
-      - name: Package standalone archive
+      - name: Package and verify standalone archive
         id: pack
         run: |
           tag_name="${{ github.ref_name }}"
@@ -87,6 +133,8 @@ jobs:
           cp README.md "$RUNNER_TEMP/$arch_name/"
           tar -czf "$arch_name.tar.gz" -C "$RUNNER_TEMP" "$arch_name"
           shasum -a 256 "$arch_name.tar.gz"
+          ver_expected="${tag_name#v}"
+          python3 tests/verify_standalone_binary.py --archive "$arch_name.tar.gz" --expected-version "$ver_expected" --run-matrix
           echo "tarball=$arch_name.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
@@ -97,7 +145,7 @@ jobs:
 
   publish-release:
     name: Attach standalone binaries to GitHub Release
-    needs: build-binaries
+    needs: [build-binaries, build-source]
     runs-on: ubuntu-22.04
     steps:
       - name: Check out repo
@@ -105,7 +153,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
-      - name: Download all binary artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
@@ -117,7 +165,7 @@ jobs:
           shasum -a 256 trg-*.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Ensure GitHub Release exists and upload assets
+      - name: Publish draft release safely without clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -125,7 +173,4 @@ jobs:
           if [ -z "$tag_name" ] || [ "$tag_name" = "main" ]; then
             tag_name="${{ inputs.tag }}"
           fi
-          echo "Ensuring release $tag_name exists..."
-          gh release view "$tag_name" || gh release create "$tag_name" --verify-tag --generate-notes
-          echo "Uploading binary assets to release $tag_name..."
-          gh release upload "$tag_name" dist/* --clobber
+          python3 tests/safe_release_upload.py --tag "$tag_name" --dist-dir dist
