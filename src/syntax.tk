@@ -541,65 +541,8 @@ pub fn index_of_arrow(s: str) -> Option<usize> {
     return Option<usize>::None
 }
 
-pub fn last_index_of_arrow(s: str) -> Option<usize> {
-    if s.len < 2:usize {
-        return Option<usize>::None
-    }
-    auto i# = s.len - 2:usize
-    loop true {
-        if s.byte_at(i) == ('=' as char) && s.byte_at(i + 1:usize) == ('>' as char) {
-            return Option<usize>::Some(i)
-        }
-        if i == 0 {
-            break
-        }
-        i = i - 1
-    }
-    return Option<usize>::None
-}
-
-pub fn find_arrow_function_pos(s: str) -> Option<usize> {
-    if !s.starts_with("const ") && !s.starts_with("let ") {
-        return Option<usize>::None
-    }
-    auto eq_pos# = Option<usize>::None
-    auto j# = 0:usize
-    loop j < s.len {
-        auto ch = s.byte_at(j)
-        if ch == ('=' as char) {
-            auto is_arr = (j + 1:usize < s.len && s.byte_at(j + 1:usize) == ('>' as char))
-            auto is_eqeq = (j + 1:usize < s.len && s.byte_at(j + 1:usize) == ('=' as char))
-            if !is_arr && !is_eqeq {
-                eq_pos = Option<usize>::Some(j)
-                break
-            }
-        }
-        j = j + 1
-    }
-    if eq_pos.is_none() {
-        return Option<usize>::None
-    }
-    auto start_idx = eq_pos.unwrap() + 1:usize
-    if start_idx + 2:usize > s.len {
-        return Option<usize>::None
-    }
-    auto rem_after_eq = s.substr(start_idx, s.len - start_idx)
-    auto trimmed_rem = rem_after_eq.trim()
-    if trimmed_rem.starts_with("\"") || trimmed_rem.starts_with("'") || trimmed_rem.starts_with("`") {
-        return Option<usize>::None
-    }
-    auto arr_opt = last_index_of_arrow(rem_after_eq)
-    if arr_opt.is_some() {
-        return Option<usize>::Some(start_idx + arr_opt.unwrap())
-    }
-    return Option<usize>::None
-}
-
-pub fn extract_declared_identifier(line: str) -> string {
+pub fn strip_declaration_modifiers(line: str) -> str {
     auto trimmed = line.trim()
-    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
-        return string::from("")
-    }
     auto s# = trimmed
     if s.starts_with("pub ") {
         s = s.substr(4:usize, s.len - 4:usize).trim()
@@ -621,17 +564,136 @@ pub fn extract_declared_identifier(line: str) -> string {
     if s.starts_with("inline ") {
         s = s.substr(7:usize, s.len - 7:usize).trim()
     }
+    return s
+}
+
+pub fn find_arrow_function_pos(line: str) -> Option<usize> {
+    auto stripped = strip_declaration_modifiers(line)
+    if !stripped.starts_with("const ") && !stripped.starts_with("let ") && !stripped.starts_with("auto ") {
+        return Option<usize>::None
+    }
+
+    // Phase A: Locate top-level assignment '=' with quote and escape tracking
+    auto eq_pos# = Option<usize>::None
+    auto in_quote# = 0:char
+    auto i# = 0:usize
+
+    loop i < line.len {
+        auto ch = line.byte_at(i)
+        if in_quote != 0:char {
+            if ch == ('\\' as char) && i + 1:usize < line.len {
+                i = i + 2:usize
+                continue
+            }
+            if ch == in_quote {
+                in_quote = 0:char
+            }
+            i = i + 1:usize
+            continue
+        }
+
+        // Line comment outside quotes
+        if ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('/' as char) {
+            break
+        }
+
+        // Quote transitions
+        if ch == ('\"' as char) || ch == ('\'' as char) || ch == ('`' as char) {
+            in_quote = ch
+            i = i + 1:usize
+            continue
+        }
+
+        // Match assignment '=' outside quotes
+        if ch == ('=' as char) {
+            auto is_arr = (i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('>' as char))
+            auto is_eq = (i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('=' as char))
+            auto is_prev_op# = false
+            if i > 0:usize {
+                auto prev = line.byte_at(i - 1:usize)
+                if prev == ('!' as char) || prev == ('<' as char) || prev == ('>' as char) ||
+                   prev == ('=' as char) || prev == ('+' as char) || prev == ('-' as char) ||
+                   prev == ('*' as char) || prev == ('/' as char) || prev == ('%' as char) ||
+                   prev == ('&' as char) || prev == ('|' as char) || prev == ('^' as char) {
+                    is_prev_op = true
+                }
+            }
+            if !is_arr && !is_eq && !is_prev_op {
+                eq_pos = Option<usize>::Some(i)
+                break
+            }
+        }
+        i = i + 1:usize
+    }
+
+    if eq_pos.is_none() {
+        return Option<usize>::None
+    }
+
+    // Phase B: Scan right of '=' for unquoted '=>'
+    auto start_pos = eq_pos.unwrap() + 1:usize
+    auto last_arrow# = Option<usize>::None
+    in_quote = 0:char
+    auto k# = start_pos
+
+    loop k < line.len {
+        auto ch = line.byte_at(k)
+        if in_quote != 0:char {
+            if ch == ('\\' as char) && k + 1:usize < line.len {
+                k = k + 2:usize
+                continue
+            }
+            if ch == in_quote {
+                in_quote = 0:char
+            }
+            k = k + 1:usize
+            continue
+        }
+
+        // Line comment outside quotes
+        if ch == ('/' as char) && k + 1:usize < line.len && line.byte_at(k + 1:usize) == ('/' as char) {
+            break
+        }
+
+        // Quote transitions
+        if ch == ('\"' as char) || ch == ('\'' as char) || ch == ('`' as char) {
+            in_quote = ch
+            k = k + 1:usize
+            continue
+        }
+
+        // Match unquoted '=>'
+        if ch == ('=' as char) && k + 1:usize < line.len && line.byte_at(k + 1:usize) == ('>' as char) {
+            last_arrow = Option<usize>::Some(k)
+            k = k + 2:usize
+            continue
+        }
+
+        k = k + 1:usize
+    }
+
+    return last_arrow
+}
+
+pub fn extract_declared_identifier(line: str) -> string {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+        return string::from("")
+    }
+    auto s# = strip_declaration_modifiers(trimmed)
 
     auto kw_len# = 0:usize
     auto is_impl# = false
     auto is_arrow# = false
-    if s.starts_with("const ") || s.starts_with("let ") {
-        if find_arrow_function_pos(s).is_some() {
+    if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
+        if find_arrow_function_pos(line).is_some() {
             is_arrow = true
         }
     }
     if is_arrow {
-        if s.starts_with("const ") { kw_len = 6:usize } else { kw_len = 4:usize }
+        if s.starts_with("const ") { kw_len = 6:usize }
+        else if s.starts_with("let ") { kw_len = 4:usize }
+        else { kw_len = 5:usize }
     }
     else if s.starts_with("fn ") { kw_len = 3:usize }
     else if s.starts_with("def ") { kw_len = 4:usize }
@@ -752,27 +814,7 @@ pub fn is_scope_declaration(line: str) -> bool {
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return false
     }
-    auto s# = trimmed
-    if s.starts_with("pub ") {
-        s = s.substr(4:usize, s.len - 4:usize).trim()
-    } else if s.starts_with("pub(") {
-        auto close_paren = s.index_of(')' as char)
-        if close_paren.is_some() {
-            auto idx = close_paren.unwrap() + 1:usize
-            s = s.substr(idx, s.len - idx).trim()
-        }
-    }
-    if s.starts_with("export default ") {
-        s = s.substr(15:usize, s.len - 15:usize).trim()
-    } else if s.starts_with("export ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
-    if s.starts_with("async ") {
-        s = s.substr(6:usize, s.len - 6:usize).trim()
-    }
-    if s.starts_with("inline ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
+    auto s# = strip_declaration_modifiers(trimmed)
 
     if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("func ") || s.starts_with("function ") ||
        s.starts_with("class ") || s.starts_with("struct ") || s.starts_with("shape ") ||
@@ -780,11 +822,11 @@ pub fn is_scope_declaration(line: str) -> bool {
        s.starts_with("enum ") || s.starts_with("impl ") {
         return true
     }
-    if s.starts_with("const ") || s.starts_with("let ") {
-        auto arr_opt = find_arrow_function_pos(s)
+    if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
+        auto arr_opt = find_arrow_function_pos(line)
         if arr_opt.is_some() {
             auto arr_idx = arr_opt.unwrap()
-            auto after_arr = s.substr(arr_idx + 2:usize, s.len - arr_idx - 2:usize).trim()
+            auto after_arr = line.substr(arr_idx + 2:usize, line.len - arr_idx - 2:usize).trim()
             if after_arr.starts_with("{") {
                 return true
             }
@@ -801,27 +843,7 @@ pub fn is_block_construct(line: str) -> bool {
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return false
     }
-    auto s# = trimmed
-    if s.starts_with("pub ") {
-        s = s.substr(4:usize, s.len - 4:usize).trim()
-    } else if s.starts_with("pub(") {
-        auto close_paren = s.index_of(')' as char)
-        if close_paren.is_some() {
-            auto idx = close_paren.unwrap() + 1:usize
-            s = s.substr(idx, s.len - idx).trim()
-        }
-    }
-    if s.starts_with("export default ") {
-        s = s.substr(15:usize, s.len - 15:usize).trim()
-    } else if s.starts_with("export ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
-    if s.starts_with("async ") {
-        s = s.substr(6:usize, s.len - 6:usize).trim()
-    }
-    if s.starts_with("inline ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
+    auto s# = strip_declaration_modifiers(trimmed)
 
     if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
         auto eq_idx = s.index_of('=' as char)
@@ -845,27 +867,7 @@ pub fn detect_block_delimiter(line: str) -> BlockDelimiter {
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return BlockDelimiter::Brace
     }
-    auto s# = trimmed
-    if s.starts_with("pub ") {
-        s = s.substr(4:usize, s.len - 4:usize).trim()
-    } else if s.starts_with("pub(") {
-        auto close_paren = s.index_of(')' as char)
-        if close_paren.is_some() {
-            auto idx = close_paren.unwrap() + 1:usize
-            s = s.substr(idx, s.len - idx).trim()
-        }
-    }
-    if s.starts_with("export default ") {
-        s = s.substr(15:usize, s.len - 15:usize).trim()
-    } else if s.starts_with("export ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
-    if s.starts_with("async ") {
-        s = s.substr(6:usize, s.len - 6:usize).trim()
-    }
-    if s.starts_with("inline ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
+    auto s# = strip_declaration_modifiers(trimmed)
 
     // Explicit Brace-bound keywords: ALWAYS Brace, even if parameter list has '(' on this line
     if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("func ") || s.starts_with("function ") ||
@@ -879,10 +881,10 @@ pub fn detect_block_delimiter(line: str) -> BlockDelimiter {
         return BlockDelimiter::Paren
     }
     if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
-        auto arr_opt = find_arrow_function_pos(s)
+        auto arr_opt = find_arrow_function_pos(line)
         if arr_opt.is_some() {
             auto arr_idx = arr_opt.unwrap()
-            auto after_arr = s.substr(arr_idx + 2:usize, s.len - arr_idx - 2:usize).trim()
+            auto after_arr = line.substr(arr_idx + 2:usize, line.len - arr_idx - 2:usize).trim()
             if after_arr.starts_with("{") {
                 return BlockDelimiter::Brace
             }
@@ -1008,27 +1010,10 @@ pub fn is_multiline_decorator_closer(line: str) -> bool {
 
 pub fn classify_symbol_kind(line: str) -> string {
     auto trimmed = line.trim()
-    auto s# = trimmed
-    if s.starts_with("pub ") {
-        s = s.substr(4:usize, s.len - 4:usize).trim()
-    } else if s.starts_with("pub(") {
-        auto close_paren = s.index_of(')' as char)
-        if close_paren.is_some() {
-            auto idx = close_paren.unwrap() + 1:usize
-            s = s.substr(idx, s.len - idx).trim()
-        }
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+        return string::from("symbol")
     }
-    if s.starts_with("export default ") {
-        s = s.substr(15:usize, s.len - 15:usize).trim()
-    } else if s.starts_with("export ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
-    if s.starts_with("async ") {
-        s = s.substr(6:usize, s.len - 6:usize).trim()
-    }
-    if s.starts_with("inline ") {
-        s = s.substr(7:usize, s.len - 7:usize).trim()
-    }
+    auto s# = strip_declaration_modifiers(trimmed)
 
     if s.starts_with("class ") { return string::from("class") }
     if s.starts_with("struct ") { return string::from("struct") }
@@ -1048,8 +1033,8 @@ pub fn classify_symbol_kind(line: str) -> string {
     if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("function ") {
         return string::from("function")
     }
-    if (s.starts_with("const ") || s.starts_with("let ")) {
-        if find_arrow_function_pos(s).is_some() {
+    if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
+        if find_arrow_function_pos(line).is_some() {
             return string::from("function")
         }
     }
@@ -1062,20 +1047,7 @@ pub fn detect_declaration_scope(line: str) -> string {
         return string::from("")
     }
 
-    auto s# = trimmed
-    if s.starts_with("pub ") {
-        s = s.substr(4:usize, s.len - 4:usize).trim()
-    } else if s.starts_with("pub(") {
-        auto close_paren = s.index_of(')' as char)
-        if close_paren.is_some() {
-            auto idx = close_paren.unwrap() + 1:usize
-            s = s.substr(idx, s.len - idx).trim()
-        }
-    }
-    if s.starts_with("async ") {
-        s = s.substr(6:usize, s.len - 6:usize).trim()
-    }
-
+    auto s# = strip_declaration_modifiers(trimmed)
     auto is_callable = s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("function ") || s.starts_with("func ")
     auto start_search_idx = trimmed.len - s.len
 

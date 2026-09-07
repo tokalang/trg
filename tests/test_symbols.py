@@ -178,17 +178,23 @@ def test_typescript_arrow_functions():
         ts_file = tmp / "math.ts"
         ts_file.write_text("""
 export const add = (a: number, b: number) => a + b;
+export const square = x => x * x;
+export let increment = x => x + 1;
 
 export const complexCalc = (x: number): number => {
     const intermediate = x * 2;
     return intermediate + 1;
 };
 
-export const renderItem: (item: string) => string = (item) => {
-    return item.toUpperCase();
+export const renderItem: (s: string) => string = s => {
+    return s.toUpperCase();
 };
 
 export const fnType: (x: number) => number = myFunc;
+
+const arr = ["foo => bar"];
+const obj = { key: "=>" };
+const tmpl = `arrow: =>`;
 
 export class Calculator {
     multiply = (a: number, b: number) => a * b;
@@ -200,15 +206,32 @@ export class Calculator {
 
         add_sym = next(s for s in syms if s["name"] == "add")
         assert add_sym["range"] == [2, 2]  # concise body self-closed
+        assert add_sym["kind"] == "function"
+
+        # 1. 修复验证：带修饰符且无形参括号的单行箭头函数必须准确自闭合
+        square_sym = next(s for s in syms if s["name"] == "square")
+        assert square_sym["range"] == [3, 3]  # concise body self-closed
+        assert square_sym["kind"] == "function"
+
+        inc_sym = next(s for s in syms if s["name"] == "increment")
+        assert inc_sym["range"] == [4, 4]  # concise body self-closed
+        assert inc_sym["kind"] == "function"
 
         calc_sym = next(s for s in syms if s["name"] == "complexCalc")
-        assert calc_sym["range"] == [4, 7]  # block body
+        assert calc_sym["range"] == [6, 9]  # block body
 
+        # 3. 兼容性验证：带复杂类型注记的箭头函数与普通变量隔离
         render_sym = next(s for s in syms if s["name"] == "renderItem")
-        assert render_sym["range"] == [9, 11]  # block body with function type annotation
+        assert render_sym["range"] == [11, 13]  # block body with function type annotation
+        assert render_sym["kind"] == "function"
 
         # Non-arrow variable fnType should not be classified as a symbol
         assert not any(s["name"] == "fnType" for s in syms)
+
+        # 2. 防穿透验证：字面量与复杂结构中的字符串严禁提取为符号
+        assert not any(s["name"] == "arr" for s in syms), "String literal inside array must not be extracted as symbol"
+        assert not any(s["name"] == "obj" for s in syms), "String literal inside object must not be extracted as symbol"
+        assert not any(s["name"] == "tmpl" for s in syms), "String literal inside template string must not be extracted as symbol"
 
         cls_sym = next(s for s in syms if s["name"] == "Calculator")
         assert cls_sym["kind"] == "class"

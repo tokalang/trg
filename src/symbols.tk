@@ -20,7 +20,8 @@ import src/syntax::{
     is_decorator_or_attr_line,
     is_multiline_decorator_closer,
     check_is_self_closed_structured,
-    find_arrow_function_pos
+    find_arrow_function_pos,
+    strip_declaration_modifiers
 }
 import src/printer::{u64_to_string, json_escape}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
@@ -327,8 +328,9 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                     auto kind# = cede kind_raw
                     auto scope_name# = string::new()
 
-                    if pat_text.starts_with("func ") {
-                        auto recv = extract_go_receiver_type(pat_text)
+                    auto stripped = strip_declaration_modifiers(pat_text)
+                    if stripped.starts_with("func ") {
+                        auto recv = extract_go_receiver_type(stripped)
                         if recv.len() > 0 {
                             scope_name = cede recv
                             kind = string::from("method")
@@ -347,14 +349,12 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                     if check_is_self_closed_structured(delim, lex.depth_after_brace, lex.depth_after_paren, lex.depth_before_brace, lex.has_code_brace_closer, lex.has_code_paren_closer) {
                         is_self_closed = true
                     }
-                    if pat_text.starts_with("const ") || pat_text.starts_with("let ") {
-                        auto arr_opt = find_arrow_function_pos(pat_text)
-                        if arr_opt.is_some() {
-                            auto arr_idx = arr_opt.unwrap()
-                            auto after_arr = pat_text.substr(arr_idx + 2:usize, pat_text.len - arr_idx - 2:usize).trim()
-                            if !after_arr.starts_with("{") {
-                                is_self_closed = true
-                            }
+                    auto arr_opt = find_arrow_function_pos(pat_text)
+                    if arr_opt.is_some() {
+                        auto arr_idx = arr_opt.unwrap()
+                        auto after_arr = pat_text.substr(arr_idx + 2:usize, pat_text.len - arr_idx - 2:usize).trim()
+                        if !after_arr.starts_with("{") {
+                            is_self_closed = true
                         }
                     }
 
