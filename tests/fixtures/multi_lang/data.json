@@ -1,0 +1,18 @@
+{
+  "project": "trg-matrix",
+  "version": 1,
+  "features": [
+    "literal_meta_test.*+?",
+    "utf8_check",
+    "budget_control"
+  ],
+  "active": true,
+  "nested": {
+    "key": "value",
+    "regex_target": "pattern[0-9]+"
+  },
+  "metrics": {
+    "requests": 1024,
+    "error_rate": 0.05
+  }
+}

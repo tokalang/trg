@@ -1,0 +1,6 @@
+Line 1: English header
+Line 2: 简体中文测试：检索内核应当精确计算 UTF-8 字节偏移
+Line 3: 日本語テスト：検索エンジンのバイト位置計算
+Line 4: Emoji test: 🚀 Antigravity Rocket and 🔍 Code Search
+Line 5: Mixed line: Symbol ∑ and π with Chinese 汉字 and Emoji ✨
+Line 6: Footer line

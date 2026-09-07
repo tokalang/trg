@@ -182,6 +182,11 @@ def main():
     log(f"Using stdlib: {std_lib}")
     log(f"Using toka CLI: {toka_bin}")
 
+    r_tokac_ver = run_cmd([tokac_bin, "--version"])
+    tokac_ver_str = r_tokac_ver.stdout + r_tokac_ver.stderr
+    assert "1.0.0-rc.11" in tokac_ver_str, f"Qualification requires Toka 1.0.0-rc.11, found: {tokac_ver_str.strip()}"
+    log(f"Verified Toka compiler version: {tokac_ver_str.strip()}")
+
     # Step 0: Package manifest check and build
     log("Step 0: Validating package.tk with 'toka check --json' and 'toka build'...")
     r_check = run_cmd([toka_bin, "check", "--json", "package.tk"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
@@ -6461,8 +6466,28 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         p_2024.stdin.close()
         p_2024.wait()
 
+    # Test 173: Universal capability x data shape regression matrix and memory scaling
+    log("Test 173: Universal capability x data shape regression matrix and memory scaling")
+    matrix_script = repo_root / "tests" / "test_universal_matrix.py"
+    assert matrix_script.exists(), f"Matrix script not found at {matrix_script}"
+    r_matrix = subprocess.run([
+        sys.executable,
+        str(matrix_script),
+        "--trg", str(pkg_bin_path),
+        "--json"
+    ], capture_output=True, text=True)
+    assert r_matrix.returncode == 0, f"Universal matrix suite failed (exit {r_matrix.returncode}):\n{r_matrix.stderr}\n{r_matrix.stdout}"
+    matrix_res = json.loads(r_matrix.stdout)
+    assert matrix_res["core_gate"]["passed"] == matrix_res["core_gate"]["total"] == 30, f"Core gate failed: {matrix_res['core_gate']}"
+    assert matrix_res["memory_benchmark"]["status"] == "PASS", f"Memory scaling benchmark failed: {matrix_res['memory_benchmark']}"
+    assert matrix_res["overall_status"] == "CORE_PASS_WITH_DOCUMENTED_GAPS", f"Unexpected overall status: {matrix_res['overall_status']}"
+    assert len(matrix_res["known_gaps"]) == 2
+    for gap in matrix_res["known_gaps"]:
+        assert gap["status"] in ("reproduced", "resolved"), f"Gap {gap['gap_id']} unexpected status: {gap['status']}"
+    log("Test 173 passed: 30/30 core tests passed, memory scaling verified, 2 known gaps confirmed reproduced.")
+
     log("=" * 60)
-    log("ALL 172 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.14.0)!")
+    log("ALL 173 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.14.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

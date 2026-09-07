@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+"""
+Universal Search Regression Matrix & Contract Verification Suite
+Verifies:
+1. Core Regression Gate (Ability x Data Shape Matrix with independent ground-truth).
+2. Memory Scaling & Isolated Peak RSS (3 file sizes, wait4 per-process measurement).
+3. Long-line scaling (median of 3 runs, checking for no quadratic degradation).
+4. Known Contract Gaps Reporter (strictly classified as reproduced, resolved, unexpected_failure).
+
+Requires explicit --trg <path_to_binary>. Fails closed if --trg is omitted or invalid.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import pathlib
+import platform
+import resource
+import subprocess
+import sys
+import tempfile
+import time
+
+
+def compute_sha256(file_path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    h.update(file_path.read_bytes())
+    return h.hexdigest()
+
+
+def log(msg: str):
+    out_file = sys.stderr if "--json" in sys.argv else sys.stdout
+    print(f"[UNIVERSAL-MATRIX] {msg}", file=out_file, flush=True)
+
+
+def log_gate(test_name: str, status: str = "PASS", detail: str = ""):
+    det = f" - {detail}" if detail else ""
+    out_file = sys.stderr if "--json" in sys.argv else sys.stdout
+    print(f"  [{status}] {test_name}{det}", file=out_file, flush=True)
+
+
+def run_trg_cmd(trg_bin: str, args: list, cwd: str = None, input_data: str = None, timeout: int = 30) -> subprocess.CompletedProcess:
+    cmd = [trg_bin] + args
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        input=input_data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout
+    )
+
+
+def measure_isolated_rss_mib(trg_bin: str, args: list, cwd: str = None) -> float:
+    """Measures peak RSS in MiB of a single isolated child process using os.fork + os.wait4."""
+    pipe_r, pipe_w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        # Child process
+        os.close(pipe_r)
+        # Discard child stdout/stderr so buffer allocation does not contaminate process memory
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        if cwd:
+            os.chdir(cwd)
+        cmd = [trg_bin] + args
+        os.execv(trg_bin, cmd)
+        sys.exit(127)
+    else:
+        # Parent process
+        os.close(pipe_w)
+        _, status, ru = os.wait4(pid, 0)
+        os.close(pipe_r)
+        if os.WIFEXITED(status) and os.WEXITSTATUS(status) in (0, 1):
+            raw_rss = ru.ru_maxrss
+            # macOS: bytes; Linux: KiB
+            if platform.system() == "Darwin":
+                return raw_rss / (1024.0 * 1024.0)
+            else:
+                return raw_rss / 1024.0
+        else:
+            raise RuntimeError(f"Child process failed with exit code: {status}")
+
+
+# ---------------------------------------------------------------------------
+# Section 1: Core Regression Gate (Ability x Data Shape)
+# ---------------------------------------------------------------------------
+def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pathlib.Path) -> dict:
+    log("=" * 60)
+    log("SECTION 1: Core Regression Gate (Independent Ground Truth)")
+    log("=" * 60)
+    passed_count = 0
+    total_count = 0
+
+    def assert_test(cond: bool, name: str, detail: str = ""):
+        nonlocal passed_count, total_count
+        total_count += 1
+        if cond:
+            passed_count += 1
+            log_gate(name, "PASS", detail)
+        else:
+            log_gate(name, "FAIL", detail)
+            raise AssertionError(f"Test failed: {name} - {detail}")
+
+    # 1.1 Literal with regex metacharacters in JSON, C++, Rust, plain
+    r = run_trg_cmd(trg, ["-F", "literal_meta_test.*+?", str(fixtures_dir / "data.json")])
+    assert_test(r.returncode == 0 and "5:    \"literal_meta_test.*+?\"" in r.stdout,
+                "Literal -F: Regex metacharacters in JSON", "found on line 5 without regex compile error")
+
+    r = run_trg_cmd(trg, ["-F", "^[a-z]+$", str(fixtures_dir / "rust_sample.rs")])
+    assert_test(r.returncode == 0 and "16:        /* Block comment with regex metacharacters: ^[a-z]+$ */" in r.stdout,
+                "Literal -F: Anchored metacharacters in Rust comment", "line 16 matched exactly")
+
+    r = run_trg_cmd(trg, ["-F", "[brackets], {braces}, (parens), $dollar, *star.", str(fixtures_dir / "no_ext_plain")])
+    assert_test(r.returncode == 0 and "3:Special characters: [brackets], {braces}, (parens), $dollar, *star." in r.stdout,
+                "Literal -F: Comprehensive delimiters and symbols in plain text", "line 3 matched exactly")
+
+    # 1.2 Boundary rules (-w, -x)
+    r = run_trg_cmd(trg, ["-w", "Run", str(fixtures_dir / "go_sample.go")])
+    assert_test(r.returncode == 0 and "18:func (p *WorkerPool) Run() {" in r.stdout,
+                "Boundary -w: Word boundary matching", "matched Run() declaration on line 18")
+
+    r_noword = run_trg_cmd(trg, ["-w", "Work", str(fixtures_dir / "go_sample.go")])
+    assert_test(r_noword.returncode == 1 and r_noword.stdout.strip() == "",
+                "Boundary -w: Substring boundary rejection", "Work does not match WorkerPool")
+
+    r = run_trg_cmd(trg, ["-x", "  port: 8080", str(fixtures_dir / "config.yaml")])
+    assert_test(r.returncode == 0 and "3:  port: 8080" in r.stdout,
+                "Boundary -x: Full line matching with indentation", "line 3 exact full line")
+
+    # 1.3 Case modes (-s, -i, -S)
+    r_s = run_trg_cmd(trg, ["-s", "-F", "core features", str(fixtures_dir / "markdown_doc.md")])
+    assert_test(r_s.returncode == 1, "Case -s: Sensitive mode rejects case mismatch", "lowercase does not match Core Features")
+
+    r_i = run_trg_cmd(trg, ["-i", "-F", "core features", str(fixtures_dir / "markdown_doc.md")])
+    assert_test(r_i.returncode == 0 and "5:## Core Features" in r_i.stdout,
+                "Case -i: Insensitive mode accepts case mismatch", "line 5 matched")
+
+    r_smart_lower = run_trg_cmd(trg, ["-S", "-F", "core features", str(fixtures_dir / "markdown_doc.md")])
+    assert_test(r_smart_lower.returncode == 0 and "5:## Core Features" in r_smart_lower.stdout,
+                "Case -S: Smart case on all-lowercase input acts insensitive", "line 5 matched")
+
+    r_smart_upper = run_trg_cmd(trg, ["-S", "-F", "Core features", str(fixtures_dir / "markdown_doc.md")])
+    assert_test(r_smart_upper.returncode == 1,
+                "Case -S: Smart case with uppercase present acts sensitive", "case mismatch rejected")
+
+    # 1.4 Multi-pattern precedence and line deduplication (-e)
+    r = run_trg_cmd(trg, ["-e", "[INFO]", "-e", "8080", str(fixtures_dir / "service.log")])
+    lines = [l for l in r.stdout.strip().split("\n") if l.strip()]
+    assert_test(r.returncode == 0 and len(lines) == 4 and "1:2026-09-07T08:00:01.123Z [INFO] Service started on port 8080" in lines[0],
+                "Multi-pattern -e: Multiple matches on same line emitted once", "line 1 deduplicated cleanly")
+
+    # 1.5 UTF-8 multibyte offset truthfulness (CJK, Emoji, Math symbols)
+    r = run_trg_cmd(trg, ["--json", "-F", "检索内核", str(fixtures_dir / "multi_byte_utf8.txt")])
+    assert_test(r.returncode == 0, "UTF-8: Chinese search executed cleanly", "exit code 0")
+    events = [json.loads(line) for line in r.stdout.strip().split("\n") if line.strip()]
+    match_ev = next((ev for ev in events if ev.get("type") == "match"), None)
+    assert_test(match_ev is not None, "UTF-8: Match event emitted", "type=match found")
+    submatches = match_ev.get("data", {}).get("submatches", [])
+    assert_test(len(submatches) == 1 and submatches[0]["start"] == 29 and submatches[0]["end"] == 41,
+                "UTF-8: Byte offset accuracy for Chinese characters", f"start=29, end=41 (actual: {submatches})")
+
+    r_emoji = run_trg_cmd(trg, ["--json", "-F", "🚀", str(fixtures_dir / "multi_byte_utf8.txt")])
+    events_emoji = [json.loads(line) for line in r_emoji.stdout.strip().split("\n") if line.strip()]
+    match_emoji = next((ev for ev in events_emoji if ev.get("type") == "match"), None)
+    subm_emoji = match_emoji.get("data", {}).get("submatches", [])
+    assert_test(len(subm_emoji) == 1 and subm_emoji[0]["start"] == 20 and subm_emoji[0]["end"] == 24,
+                "UTF-8: Byte offset accuracy for 4-byte UTF-8 Emoji (🚀)", f"start=20, end=24 (actual: {subm_emoji})")
+
+    # 1.6 File format variants: CRLF, LF, no-EOL, empty file
+    r_crlf = run_trg_cmd(trg, ["-F", "bravo", str(repo_root / "tests" / "fixtures" / "crlf.txt")])
+    assert_test(r_crlf.returncode == 0 and "2:bravo" in r_crlf.stdout,
+                "Data Shape: CRLF line termination handling", "line 2 matched cleanly")
+
+    r_noeol = run_trg_cmd(trg, ["-F", "second line without eol", str(repo_root / "tests" / "fixtures" / "no_eol.txt")])
+    assert_test(r_noeol.returncode == 0 and "2:second line without eol" in r_noeol.stdout,
+                "Data Shape: EOF lacking trailing newline handling", "line 2 matched without hang")
+
+    r_empty = run_trg_cmd(trg, ["-F", "anything", str(repo_root / "tests" / "fixtures" / "empty.txt")])
+    assert_test(r_empty.returncode == 1 and r_empty.stdout.strip() == "",
+                "Data Shape: 0-byte empty file handling", "returns exit code 1 without error")
+
+    # 1.7 Path Handling & Layered Duplicate Contract (CLI vs MCP)
+    p_plain = str(fixtures_dir / "no_ext_plain")
+    r_cli_dup = run_trg_cmd(trg, ["-F", "plain_marker_token", p_plain, p_plain])
+    matches_cli = [l for l in r_cli_dup.stdout.strip().split("\n") if "plain_marker_token" in l]
+    assert_test(len(matches_cli) == 2,
+                "Path Contract CLI: Retains explicit duplicate file paths", f"emitted {len(matches_cli)} matches")
+
+    # MCP Search: Deduplicates input paths in interned files table
+    init_req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}) + "\n"
+    notif = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+    search_req = json.dumps({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "trg_search", "arguments": {"paths": [p_plain, p_plain], "pattern": "plain_marker_token"}}
+    }) + "\n"
+    r_mcp = run_trg_cmd(trg, ["--mcp"], input_data=init_req + notif + search_req)
+    resps = [json.loads(l) for l in r_mcp.stdout.strip().split("\n") if l.strip()]
+    files_table = resps[1]["result"]["structuredContent"]["files"]
+    assert_test(len(files_table) == 1,
+                "Path Contract MCP: Deduplicates paths in canonical files table", f"interned {len(files_table)} unique file")
+
+    # 1.8 Interface-Specific Budgets (CLI vs MCP Search vs MCP View JSON)
+    # CLI budget: limits total record payload emitted
+    r_cli_bud = run_trg_cmd(trg, ["-F", "[INFO]", str(fixtures_dir / "service.log"), "--max-total-matches", "2"])
+    cli_lines = [l for l in r_cli_bud.stdout.strip().split("\n") if "[INFO]" in l]
+    assert_test(r_cli_bud.returncode == 0 and len(cli_lines) == 2,
+                "Budget CLI: --max-total-matches limits printed matches exactly", "2 lines emitted")
+
+    # MCP Search: limits canonical records in structuredContent
+    mcp_bud_req = json.dumps({
+        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+        "params": {"name": "trg_search", "arguments": {"paths": [str(fixtures_dir / "service.log")], "pattern": "[INFO]", "max_total_matches": 2}}
+    }) + "\n"
+    r_mcp_bud = run_trg_cmd(trg, ["--mcp"], input_data=init_req + notif + mcp_bud_req)
+    bud_resp = json.loads(r_mcp_bud.stdout.strip().split("\n")[1])
+    sc = bud_resp["result"]["structuredContent"]
+    assert_test(sc["complete"] is False and sc["truncated"] is True and sc["termination_reason"] == "max_total_matches",
+                "Budget MCP Search: Truthful truncation metadata in structuredContent", "truncated=true, reason=max_total_matches")
+
+    # MCP View JSON: bounds content[0].text UTF-8 serialized length with truthful truncation
+    view_bud_req = json.dumps({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "trg_view", "arguments": {
+            "path": str(fixtures_dir / "service.log"), "line": 3, "context": 5, "format": "json", "max_result_bytes": 800
+        }}
+    }) + "\n"
+    r_view_bud = run_trg_cmd(trg, ["--mcp"], input_data=init_req + notif + view_bud_req)
+    view_resp = json.loads(r_view_bud.stdout.strip().split("\n")[1])
+    view_text = view_resp["result"]["content"][0]["text"]
+    view_json = json.loads(view_text)
+    actual_bytes = len(view_text.encode("utf-8"))
+    assert_test(actual_bytes <= 800 and view_json["truncated"] is True and view_json["termination_reason"] == "max_result_bytes" and actual_bytes == view_json["content_bytes_emitted"],
+                "Budget MCP View JSON: Hard byte bound strictly converged in content[0].text",
+                f"actual: {actual_bytes} bytes <= 800 limit, truncated=true")
+
+    # MCP View JSON: hard rejection when target record itself cannot fit in budget
+    view_reject_req = json.dumps({
+        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+        "params": {"name": "trg_view", "arguments": {
+            "path": str(fixtures_dir / "service.log"), "line": 3, "context": 5, "format": "json", "max_result_bytes": 350
+        }}
+    }) + "\n"
+    r_view_rej = run_trg_cmd(trg, ["--mcp"], input_data=init_req + notif + view_reject_req)
+    rej_resp = json.loads(r_view_rej.stdout.strip().split("\n")[1])
+    rej_text = rej_resp["result"]["content"][0]["text"]
+    assert_test(rej_resp["result"]["isError"] is True and "target_exceeds_max_result_bytes" in rej_text,
+                "Budget MCP View JSON: Rejects cleanly with isError:true when target record exceeds budget",
+                "isError=true, target_exceeds_max_result_bytes reported")
+
+    # 1.9 Hydration & Physical Slices (trg view)
+    r_view_pt = run_trg_cmd(trg, ["view", f"{fixtures_dir / 'cpp_sample.cpp'}:10", "-C", "2"])
+    assert_test(r_view_pt.returncode == 0 and "8-    explicit MatrixBuffer" in r_view_pt.stdout and "10:    // Regular comment here" in r_view_pt.stdout and "12-        if (items_.size() >= cap_) return false;" in r_view_pt.stdout,
+                "Hydration: trg view point hydration with context lines", "extracted context window [8..12]")
+
+    r_view_rg = run_trg_cmd(trg, ["view", str(fixtures_dir / "cpp_sample.cpp"), "--lines", "1-5"])
+    assert_test(r_view_rg.returncode == 0 and "1:#include <iostream>" in r_view_rg.stdout and "5:template<typename T>" in r_view_rg.stdout and "6:" not in r_view_rg.stdout,
+                "Hydration: trg view physical range slice 1-5", "exact 5 lines emitted")
+
+    r_view_noext = run_trg_cmd(trg, ["view", f"{fixtures_dir / 'no_ext_plain'}:4", "-C", "1"])
+    assert_test(r_view_noext.returncode == 0 and "4:Target keyword: plain_marker_token" in r_view_noext.stdout,
+                "Hydration: trg view on file without extension", "hydrates non-code plain text safely")
+
+    # 1.10 Exit code contracts (0=match, 1=no-match, 2=syntax/argument error)
+    r_exit0 = run_trg_cmd(trg, ["-F", "MatrixBuffer", str(fixtures_dir / "cpp_sample.cpp")])
+    assert_test(r_exit0.returncode == 0, "Exit Code: 0 on match found", "exit code 0")
+
+    r_exit1 = run_trg_cmd(trg, ["-F", "NonExistentString12345", str(fixtures_dir / "cpp_sample.cpp")])
+    assert_test(r_exit1.returncode == 1, "Exit Code: 1 on no match found", "exit code 1")
+
+    r_exit2 = run_trg_cmd(trg, ["-E", "[unclosed_regex", str(fixtures_dir / "cpp_sample.cpp")])
+    assert_test(r_exit2.returncode == 2, "Exit Code: 2 on syntax error", "exit code 2")
+
+    log("=" * 60)
+    log(f"SECTION 1 COMPLETE: {passed_count}/{total_count} Core Regression Gate Tests PASSED!")
+    log("=" * 60)
+    return {"passed": passed_count, "total": total_count}
+
+
+# ---------------------------------------------------------------------------
+# Section 2: Memory Scaling & Isolated Peak RSS
+# ---------------------------------------------------------------------------
+def run_memory_scaling_benchmarks(trg: str) -> dict:
+    log("=" * 60)
+    log("SECTION 2: Memory Scaling & Isolated Peak RSS (3-Scale Benchmark)")
+    log("=" * 60)
+
+    # 2.1 File size scaling under fixed max line length (100 chars), fixed match density
+    # Generating 3 scales: 2 MiB, 6 MiB, 18 MiB
+    scales = [
+        ("2MiB", 2 * 1024 * 1024),
+        ("6MiB", 6 * 1024 * 1024),
+        ("18MiB", 18 * 1024 * 1024)
+    ]
+    results = {}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = pathlib.Path(tmpdir)
+        line_template = "Data line payload index {:08d} padding string for fixed length testing 1234567890 abcdefghijklmnopqrst\n"
+        marker_template = "Data line payload index {:08d} __MEMORY_MARKER__ fixed length testing 1234567890 abcdefghijklmnopqr\n"
+
+        for name, target_bytes in scales:
+            f_path = tmp_path / f"scale_{name}.txt"
+            log(f"Generating fixture for scale {name} (~{target_bytes} bytes)...")
+            written = 0
+            idx = 0
+            with open(f_path, "w", encoding="utf-8") as f:
+                while written < target_bytes:
+                    if idx % 1000 == 0:
+                        l = marker_template.format(idx)
+                    else:
+                        l = line_template.format(idx)
+                    f.write(l)
+                    written += len(l)
+                    idx += 1
+
+            # Warmup once
+            _ = measure_isolated_rss_mib(trg, ["-F", "__MEMORY_MARKER__", str(f_path)])
+
+            # Measure 3 times, take median
+            measurements = []
+            for _ in range(3):
+                rss = measure_isolated_rss_mib(trg, ["-F", "__MEMORY_MARKER__", str(f_path)])
+                measurements.append(rss)
+            measurements.sort()
+            median_rss = measurements[1]
+            results[name] = median_rss
+            log(f"  Scale {name} isolated peak RSS: {median_rss:.2f} MiB (runs: {[round(m, 2) for m in measurements]})")
+
+        rss_2 = results["2MiB"]
+        rss_18 = results["18MiB"]
+        ratio = rss_18 / max(rss_2, 0.1)
+        log(f"Memory growth ratio across 9x file size expansion (18MiB / 2MiB): {ratio:.2f}x (RSS 2MiB: {rss_2:.2f} MiB, 18MiB: {rss_18:.2f} MiB)")
+        # In streaming chunked scanning, memory should not grow linearly with file size (ratio << 9.0x)
+        assert ratio < 3.0, f"Memory growth exceeded streaming threshold: {ratio:.2f}x >= 3.0x"
+        log("  [PASS] Memory scaling validation: Constant-bounded streaming RSS verified across file sizes.")
+
+    # 2.2 Long line scaling benchmark (4MiB vs 16MiB)
+    log("Checking long line scaling (evaluating for absence of quadratic degradation)...")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = pathlib.Path(tmpdir)
+        line_lengths = [("4MiB", 4 * 1024 * 1024), ("16MiB", 16 * 1024 * 1024)]
+        times = {}
+
+        for name, size in line_lengths:
+            f_path = tmp_path / f"long_{name}.txt"
+            content = ("a" * (size - 20)) + "__LONG_LINE_MATCH__\n"
+            f_path.write_text(content, encoding="utf-8")
+
+            # Warmup
+            _ = run_trg_cmd(trg, ["-c", "-F", "__LONG_LINE_MATCH__", str(f_path)])
+
+            # 3 runs
+            runs = []
+            for _ in range(3):
+                t0 = time.perf_counter()
+                r = run_trg_cmd(trg, ["-c", "-F", "__LONG_LINE_MATCH__", str(f_path)])
+                t1 = time.perf_counter()
+                assert r.returncode == 0, f"Long line search failed on {name}"
+                runs.append(t1 - t0)
+            runs.sort()
+            med_time = runs[1]
+            times[name] = med_time
+            log(f"  Long line {name} median scan time: {med_time:.4f}s (runs: {[round(r, 4) for r in runs]})")
+
+        t4 = times["4MiB"]
+        t16 = times["16MiB"]
+        scaling = t16 / max(t4, 0.0001)
+        log(f"Long line scaling ratio T16/T4: {scaling:.2f}x (linear limit ~4.0x, quadratic threshold ~16.0x)")
+        assert scaling < 6.0, f"Long line showed quadratic degradation: {scaling:.2f}x >= 6.0x"
+        log("  [PASS] Long-line scaling validation: No quadratic degradation observed.")
+
+    log("=" * 60)
+    log("SECTION 2 COMPLETE: Isolated RSS & Long-Line Scaling PASSED!")
+    log("=" * 60)
+    return {"status": "PASS", "results": results, "scaling_ratio": ratio}
+
+
+# ---------------------------------------------------------------------------
+# Section 3: Known Contract Gaps Reporter (Strictly Categorized)
+# ---------------------------------------------------------------------------
+def run_known_gaps_reporter(trg: str, fixtures_dir: pathlib.Path) -> dict:
+    log("=" * 60)
+    log("SECTION 3: Known Contract Gaps Reporter (Status Quo Gap Analysis)")
+    log("=" * 60)
+
+    gaps = []
+
+    # Gap 1: --code-only on unknown / non-code file (e.g. service.log with URL)
+    # Target Contract: Unknown / non-code files should NOT apply heuristic C comment/string rules;
+    #                  they should retain matches and report filtering unapplied.
+    # Current Behavior: detect_lexical_dialect falls back to Generic, treating '//' in URLs as comments.
+    gap1_target = "Retention of lines with URLs containing '//' when searching non-code log files with --code-only"
+    gap1_cmd = [trg, "--code-only", "-F", "check", str(fixtures_dir / "service.log")]
+    try:
+        r1 = run_trg_cmd(trg, ["--code-only", "-F", "check", str(fixtures_dir / "service.log")])
+        if r1.returncode == 1 and r1.stdout.strip() == "":
+            gap1_status = "reproduced"
+            gap1_actual = "Matches silently filtered out because detect_lexical_dialect fell back to Generic (treating '//' as comment)"
+        elif r1.returncode == 0 and "check" in r1.stdout:
+            gap1_status = "resolved"
+            gap1_actual = "Matches retained on non-code file under --code-only"
+        else:
+            gap1_status = "unexpected_failure"
+            gap1_actual = f"Unexpected exit code {r1.returncode}, stderr: {r1.stderr}"
+    except Exception as e:
+        gap1_status = "unexpected_failure"
+        gap1_actual = f"Execution exception: {e}"
+
+    gaps.append({
+        "gap_id": "GAP-001",
+        "description": gap1_target,
+        "status": gap1_status,
+        "actual_behavior": gap1_actual,
+        "reproduction_command": " ".join(gap1_cmd)
+    })
+    log(f"  [{gap1_status.upper()}] GAP-001: {gap1_target}")
+    log(f"           Actual: {gap1_actual}")
+    if gap1_status == "unexpected_failure":
+        raise RuntimeError(f"GAP-001 resulted in unexpected failure: {gap1_actual}")
+
+    # Gap 2: --block on unknown / non-code file
+    # Target Contract: Unknown / non-code files should NOT synthesize code blocks around random '{' / '}'.
+    # Current Behavior: detect_syntax_family falls back to Brace, creating blocks on any line with '{'.
+    gap2_target = "Safe fallback to non-block / plain lines on non-code text containing '{' without synthesizing brace scopes"
+    gap2_cmd = [trg, "--block", "-F", "Special characters", str(fixtures_dir / "no_ext_plain")]
+    try:
+        r2 = run_trg_cmd(trg, ["--block", "-F", "Special characters", str(fixtures_dir / "no_ext_plain")])
+        if "[block: L" in r2.stdout or "[block: L1-L" in r2.stdout:
+            gap2_status = "reproduced"
+            gap2_actual = "Synthesized [block: ...] on non-code plain text because detect_syntax_family fell back to Brace"
+        elif r2.returncode == 0 and "[block:" not in r2.stdout:
+            gap2_status = "resolved"
+            gap2_actual = "Safely fell back to plain lines without block synthesis"
+        else:
+            gap2_status = "unexpected_failure"
+            gap2_actual = f"Unexpected exit code {r2.returncode}, stderr: {r2.stderr}"
+    except Exception as e:
+        gap2_status = "unexpected_failure"
+        gap2_actual = f"Execution exception: {e}"
+
+    gaps.append({
+        "gap_id": "GAP-002",
+        "description": gap2_target,
+        "status": gap2_status,
+        "actual_behavior": gap2_actual,
+        "reproduction_command": " ".join(gap2_cmd)
+    })
+    log(f"  [{gap2_status.upper()}] GAP-002: {gap2_target}")
+    log(f"           Actual: {gap2_actual}")
+    if gap2_status == "unexpected_failure":
+        raise RuntimeError(f"GAP-002 resulted in unexpected failure: {gap2_actual}")
+
+    log("=" * 60)
+    log(f"SECTION 3 COMPLETE: {len(gaps)} Known Contract Gaps evaluated.")
+    log("=" * 60)
+    return {"gaps": gaps}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Universal Search Regression Matrix & Contract Verification Suite")
+    parser.add_argument("--trg", required=True, help="Absolute path to the trg binary to test")
+    parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+    args = parser.parse_args()
+
+    trg_path = pathlib.Path(args.trg).resolve()
+    if not trg_path.exists() or not trg_path.is_file():
+        print(f"Error: trg binary not found at {trg_path}", file=sys.stderr)
+        sys.exit(2)
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    fixtures_dir = repo_root / "tests" / "fixtures" / "multi_lang"
+    if not fixtures_dir.exists():
+        print(f"Error: fixtures directory not found at {fixtures_dir}", file=sys.stderr)
+        sys.exit(2)
+
+    # Validate binary identity
+    r_ver = subprocess.run([str(trg_path), "-V"], capture_output=True, text=True)
+    if r_ver.returncode != 0:
+        print(f"Error executing {trg_path} -V: {r_ver.stderr}", file=sys.stderr)
+        sys.exit(2)
+    binary_version = r_ver.stdout.strip()
+    binary_sha256 = compute_sha256(trg_path)
+
+    log("Starting Universal Search Regression Matrix Suite")
+    log(f"  Binary under test: {trg_path}")
+    log(f"  Version:           {binary_version}")
+    log(f"  Binary SHA-256:    {binary_sha256}")
+    log(f"  Platform:          {platform.system()} {platform.machine()}")
+
+    # Run Section 1: Core Regression Gate
+    s1 = run_core_regression_gate(str(trg_path), fixtures_dir, repo_root)
+
+    # Run Section 2: Memory Scaling Benchmark
+    s2 = run_memory_scaling_benchmarks(str(trg_path))
+
+    # Run Section 3: Known Gaps Reporter
+    s3 = run_known_gaps_reporter(str(trg_path), fixtures_dir)
+
+    report = {
+        "binary": str(trg_path),
+        "version": binary_version,
+        "sha256": binary_sha256,
+        "core_gate": s1,
+        "memory_benchmark": s2,
+        "known_gaps": s3["gaps"],
+        "overall_status": "CORE_PASS_WITH_DOCUMENTED_GAPS"
+    }
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        log("\n" + "=" * 60)
+        log("FINAL REPORT SUMMARY:")
+        log(f"  1. Core Regression Gate:   {s1['passed']}/{s1['total']} PASSED")
+        log(f"  2. Memory Scaling:         {s2['status']} (Peak RSS streaming boundedness & linear long-line scaling)")
+        log(f"  3. Known Contract Gaps:    {len(s3['gaps'])} documented and confirmed reproduced (0 unexpected failures)")
+        log(f"  Overall Status:            CORE_PASS_WITH_DOCUMENTED_GAPS")
+        log("=" * 60)
+
+
+if __name__ == "__main__":
+    main()

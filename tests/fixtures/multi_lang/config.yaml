@@ -1,0 +1,12 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+  debug: false # Debug mode disabled in production
+
+logging:
+  level: "info"
+  dest: "/var/log/trg-service.log"
+
+metrics:
+  enabled: true
+  interval_seconds: 15

@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+echo "Starting matrix execution..."
+TARGET_DIR="/tmp/matrix_run"
+echo "Target is: $TARGET_DIR"

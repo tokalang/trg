@@ -848,7 +848,9 @@ fn scan_and_process_line(
         }
     }
 
-    if !opts.files_with_matches && !opts.count && !opts.quiet {
+    auto line_needed_for_context = opts.before_context > 0 || opts.context_block || context_state.pending_after > 0 || context_state.block_active
+    auto line_active = line_matches || line_needed_for_context
+    if line_active && !opts.files_with_matches && !opts.count && !opts.quiet {
         auto l_record = LogicalLine(
             text = string::from(line_text),
             line_number = line_num,

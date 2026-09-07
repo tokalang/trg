@@ -1,0 +1,5 @@
+Universal search plain text file without extension.
+This file has no shebang and no programming language syntax.
+Special characters: [brackets], {braces}, (parens), $dollar, *star.
+Target keyword: plain_marker_token for exact boundary testing.
+Line 5: end of plain text.

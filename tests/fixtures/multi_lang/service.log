@@ -1,0 +1,6 @@
+2026-09-07T08:00:01.123Z [INFO] Service started on port 8080
+2026-09-07T08:00:02.456Z [INFO] Incoming request: GET http://api.domain.internal/v1/health//check#status
+2026-09-07T08:00:03.789Z [WARN] Retrying connection to redis://127.0.0.1:6379/0
+2026-09-07T08:00:04.012Z [INFO] Payload received: {"event": "login", "user_id": 9942, "ip": "10.0.0.1"}
+2026-09-07T08:00:05.345Z [ERROR] Failed to query database: timeout after 5000ms
+2026-09-07T08:00:06.678Z [INFO] Shutdown signal received, terminating worker threads

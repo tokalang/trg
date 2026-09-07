@@ -1,0 +1,5 @@
+xyz_header: configuration_block
+url_item: "http://example.xyz/api//path#fragment"
+comment_like: // this is not guaranteed to be a code comment in xyz
+token_data: target_token_xyz
+xyz_footer: complete
