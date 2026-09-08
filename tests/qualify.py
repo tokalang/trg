@@ -236,8 +236,12 @@ def main():
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.16.0
-    log("Test 1: Help & Version flags (exact 0.16.0 release identity)")
+    # Test 1: Help & Version exact 0.16.0 & Bare invocation exit 0
+    log("Test 1: Help & Version flags (exact 0.16.0 release identity) & Bare invocation")
+    r_bare = run_cmd([trg])
+    assert r_bare.returncode == 0, f"Expected bare trg to exit 0, got {r_bare.returncode}"
+    assert "trg 0.16.0 - Fast, agent-friendly code search tool" in r_bare.stdout, f"Unexpected bare help: {r_bare.stdout}"
+
     r = run_cmd([trg, "--help"])
     assert r.returncode == 0
     assert "trg 0.16.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
@@ -245,7 +249,10 @@ def main():
     r = run_cmd([trg, "--version"])
     assert r.returncode == 0
     assert r.stdout.strip() == "trg 0.16.0 (Toka)", f"Unexpected version: {r.stdout}"
-    assert r.returncode == 0
+
+    # Syntax error with options but missing pattern must still exit with code 2
+    r_syntax_err = run_cmd([trg, "-n"], check=False)
+    assert r_syntax_err.returncode == 2, f"Expected trg -n to exit 2, got {r_syntax_err.returncode}"
 
     # Test 2: Basic literal search (-F)
     log("Test 2: Basic literal search")

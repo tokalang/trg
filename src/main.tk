@@ -1,7 +1,7 @@
 import std/env as env
 import src/types::{OutputFormat, OutputSink}
 import src/posix::{posix_init_signals, print_err}
-import src/cli::{parse_cli_args}
+import src/cli::{parse_cli_args, print_help}
 import src/mcp::{run_mcp_server}
 import src/view::{execute_view_cli}
 import src/symbols::{execute_symbols_cli}
@@ -19,6 +19,12 @@ fn main() -> i32 {
     posix_init_signals()
 
     auto raw_args = env::args()
+    if raw_args.len() <= 1:usize {
+        // No arguments provided: print help and exit 0 for intuitive CLI discovery
+        // and clean package manager verification (WinGet, Scoop, Homebrew).
+        print_help()
+        return 0
+    }
     if raw_args.len() >= 2:usize && raw_args.borrow(1).as_str() == "view" {
         return execute_view_cli(raw_args)
     }
