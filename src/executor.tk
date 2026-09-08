@@ -112,12 +112,7 @@ pub fn execute_search(
     // Fail-fast on regex/plan compilation before touching filesystem
     auto plan_res = SearchPlan::create(opts)
     if plan_res.is_err() {
-        return Result<SearchReport, SearchDiagnostic>::Err(SearchDiagnostic::new(
-            string::from("regex"),
-            Option<string>::None,
-            plan_res.unwrap_err(),
-            Option<i32>::None
-        ))
+        return Result<SearchReport, SearchDiagnostic>::Err(plan_res.unwrap_err())
     }
     auto plan = plan_res.unwrap()
 

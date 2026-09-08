@@ -356,7 +356,13 @@ pub fn format_errors(diagnostics: Vec<SearchDiagnostic>) -> string {
             }
         }
         s#.push_str(",\"message\":\"")
-        s#.push_str(json_escape(d.message.as_str()).as_str())
+        if d.kind == "regex" {
+            auto m# = string::from("regex parse error: ")
+            m#.push_str(d.message.as_str())
+            s#.push_str(json_escape(m.as_str()).as_str())
+        } else {
+            s#.push_str(json_escape(d.message.as_str()).as_str())
+        }
         s#.push_str("\",\"errno\":")
         match d.errno {
             auto Option<i32>::Some(n) => {
@@ -492,6 +498,9 @@ pub fn format_tool_call_response(
                     _ => {}
                 }
                 text_out#.push_str(": ")
+                if d.kind == "regex" {
+                    text_out#.push_str("regex parse error: ")
+                }
                 text_out#.push_str(d.message.as_str())
                 text_out#.push_str("\n")
                 d_idx = d_idx + 1

@@ -822,11 +822,41 @@ def main():
     assert r_ef.returncode == 2
     assert "cannot be combined" in r_ef.stderr
 
-    # Test 47: Regex pattern parse error propagation
-    log("Test 47: Regex pattern parse error propagation (exit code 2)")
-    r_err = run_cmd([trg, "-E", "([a-z", str(repo_root / "src")], check=False)
-    assert r_err.returncode == 2
-    assert "regex parse error" in r_err.stderr
+    # Test 47: Regex pattern parse error propagation & literal isolation
+    log("Test 47: Regex pattern parse error propagation & literal isolation")
+    t47_fixture = fixtures_dir / "test_invalid_regex_fixture.txt"
+    try:
+        t47_fixture.write_text("prefix ([a-z suffix\nanother line\n", encoding="utf-8")
+
+        # 1. Default mode: literal search hits the pattern, does not error
+        r_def = run_cmd([trg, "([a-z", str(t47_fixture)])
+        assert r_def.returncode == 0, f"Expected exit 0 for literal match in default mode, got {r_def.returncode}"
+        assert "prefix ([a-z suffix" in r_def.stdout
+        assert "INVALID_REGEX" not in r_def.stderr
+
+        # 2. -F mode: explicit literal search hits the pattern, does not error
+        r_f = run_cmd([trg, "-F", "([a-z", str(t47_fixture)])
+        assert r_f.returncode == 0, f"Expected exit 0 for literal match with -F, got {r_f.returncode}"
+        assert "prefix ([a-z suffix" in r_f.stdout
+        assert "INVALID_REGEX" not in r_f.stderr
+
+        # 3. -E mode: regex compilation fails fast before search, produces structured diagnostic
+        r_err = run_cmd([trg, "-E", "([a-z", str(t47_fixture)], check=False)
+        assert r_err.returncode == 2, f"Expected exit 2 for invalid regex, got {r_err.returncode}"
+        assert r_err.stdout == "", f"Expected empty stdout on error, got: {r_err.stdout}"
+        assert "INVALID_REGEX: missing closing ']'" in r_err.stderr
+        assert "hint: fix the regex syntax; if literal text was intended, replace -E with -F" in r_err.stderr
+
+        # 4. CLI JSON mode (--json): preserves legacy stderr projection and exits 2
+        r_json_err = run_cmd([trg, "--json", "-E", "([a-z", str(t47_fixture)], check=False)
+        assert r_json_err.returncode == 2, f"Expected exit 2 for JSON invalid regex, got {r_json_err.returncode}"
+        assert r_json_err.stdout == "", f"Expected empty stdout on JSON error, got: {r_json_err.stdout}"
+        assert "regex parse error: missing closing ']'" in r_json_err.stderr
+        assert "INVALID_REGEX" not in r_json_err.stderr
+        assert "hint:" not in r_json_err.stderr
+    finally:
+        if t47_fixture.exists():
+            t47_fixture.unlink()
 
     # Test 48: Regex -E -v, -E -l, -E -c
     log("Test 48: Regex -E with -v, -l, -c")
@@ -2682,7 +2712,7 @@ def main():
     log("Test 100: Regex Compile Fail-Fast before Target Walk")
     r_ff = run_cmd([trg, "-E", "(", "/definitely/nonexistent/and/missing/dir/12345"], check=False)
     assert r_ff.returncode == 2, f"Expected exit code 2, got {r_ff.returncode}"
-    assert "regex parse error" in r_ff.stderr.lower() or "error" in r_ff.stderr.lower(), f"Expected regex error, got: {r_ff.stderr}"
+    assert "invalid_regex" in r_ff.stderr.lower(), f"Expected regex error, got: {r_ff.stderr}"
     assert "no such file or directory" not in r_ff.stderr.lower(), f"Filesystem walk ran before regex compilation! stderr: {r_ff.stderr}"
     log("Regex fail-fast verified.")
 

@@ -495,7 +495,9 @@ pub shape SearchDiagnostic (
     kind: string,
     path: Option<string>,
     message: string,
-    errno: Option<i32>
+    errno: Option<i32>,
+    code: Option<string>,
+    hint: Option<string>
 )
 
 impl SearchDiagnostic {
@@ -504,8 +506,62 @@ impl SearchDiagnostic {
             kind = cede kind,
             path = cede path,
             message = cede message,
-            errno = errno
+            errno = errno,
+            code = Option<string>::None,
+            hint = Option<string>::None
         )
+    }
+
+    pub fn with_code_hint(
+        cede kind: string,
+        cede path: Option<string>,
+        cede message: string,
+        errno: Option<i32>,
+        cede code: Option<string>,
+        cede hint: Option<string>
+    ) -> SearchDiagnostic {
+        return SearchDiagnostic(
+            kind = cede kind,
+            path = cede path,
+            message = cede message,
+            errno = errno,
+            code = cede code,
+            hint = cede hint
+        )
+    }
+
+    pub fn format_cli(self) -> string {
+        auto s# = string::new()
+        match self.code {
+            auto Option<string>::Some(&c) => {
+                s#.push_str(c.as_str())
+                s#.push_str(": ")
+                s#.push_str(self.message.as_str())
+            }
+            _ => {
+                if self.kind == "regex" {
+                    s#.push_str("regex parse error: ")
+                }
+                s#.push_str(self.message.as_str())
+            }
+        }
+        match self.hint {
+            auto Option<string>::Some(&h) => {
+                s#.push_str("\nhint: ")
+                s#.push_str(h.as_str())
+            }
+            _ => {}
+        }
+        return cede s
+    }
+
+    pub fn format_legacy(self) -> string {
+        auto s# = string::new()
+        if self.kind == "regex" {
+            s#.push_str("regex parse error: ")
+        }
+        s#.push_str(self.message.as_str())
+        return cede s
     }
 }
 

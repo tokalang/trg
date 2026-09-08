@@ -60,7 +60,14 @@ fn main() -> i32 {
     auto writer# = OutputBudgetWriter::new_cli(format, OutputSink::Stdout, opts.text_layout, opts.path_style, fmt_cfg)
     auto search_res = execute_search(opts, writer#)
     if search_res.is_err() {
-        print_err(search_res.unwrap_err().message.as_str())
+        auto diag = search_res.unwrap_err()
+        if opts.json_mode || opts.json_compact {
+            auto legacy_msg = diag.format_legacy()
+            print_err(legacy_msg.as_str())
+        } else {
+            auto cli_msg = diag.format_cli()
+            print_err(cli_msg.as_str())
+        }
         return 2
     }
     auto report = search_res.unwrap()

@@ -3,7 +3,7 @@ import core/option::{Option}
 import core/result::{Result}
 import std/vec::{Vec}
 import official/regex::{Regex, RegexOptions, RegexAnalysis, CompiledRegex, RegexError}
-import src/types::{CliOptions, MatchRange, MatchDecision, CaseMode}
+import src/types::{CliOptions, MatchRange, MatchDecision, CaseMode, SearchDiagnostic}
 
 pub shape LiteralMatcher (
     needles: Vec<string>,
@@ -382,7 +382,7 @@ fn resolve_multi_ignore_case(patterns: Vec<string>, mode: CaseMode, is_regex: bo
 }
 
 impl SearchPlan {
-    pub fn create(opts: CliOptions) -> Result<SearchPlan, string> {
+    pub fn create(opts: CliOptions) -> Result<SearchPlan, SearchDiagnostic> {
         auto eff_ignore_case = resolve_multi_ignore_case(opts.patterns, opts.case_mode, opts.regexp)
         auto num_pats = opts.patterns.len()
 
@@ -395,7 +395,7 @@ impl SearchPlan {
 
             if num_pats == 0 {
                 auto dummy_regex = Regex::compile_with_options("a^", regex_opts).unwrap()
-                return Result<SearchPlan, string>::Ok(SearchPlan::RegexPlan(RegexMatcher(
+                return Result<SearchPlan, SearchDiagnostic>::Ok(SearchPlan::RegexPlan(RegexMatcher(
                     compiled = cede dummy_regex,
                     required_literal = Option<string>::None,
                     no_prefilter = opts.no_prefilter,
@@ -422,16 +422,21 @@ impl SearchPlan {
             auto compile_res = Regex::compile_with_options(combined_regex_str.as_str(), regex_opts)
             if compile_res.is_err() {
                 auto err = compile_res.unwrap_err()
-                auto err_msg# = string::from("regex parse error: ")
-                err_msg#.push_str(err.message().as_str())
-                return Result<SearchPlan, string>::Err(cede err_msg)
+                return Result<SearchPlan, SearchDiagnostic>::Err(SearchDiagnostic::with_code_hint(
+                    string::from("regex"),
+                    Option<string>::None,
+                    err.message(),
+                    Option<i32>::None,
+                    Option<string>::Some(string::from("INVALID_REGEX")),
+                    Option<string>::Some(string::from("fix the regex syntax; if literal text was intended, replace -E with -F"))
+                ))
             }
             auto compiled = compile_res.unwrap()
             auto required# = Option<string>::None
             if num_pats == 1 {
                 required = compiled.required_literal()
             }
-            return Result<SearchPlan, string>::Ok(SearchPlan::RegexPlan(RegexMatcher(
+            return Result<SearchPlan, SearchDiagnostic>::Ok(SearchPlan::RegexPlan(RegexMatcher(
                 compiled = cede compiled,
                 required_literal = cede required,
                 no_prefilter = opts.no_prefilter,
@@ -439,7 +444,7 @@ impl SearchPlan {
             )))
         }
 
-        return Result<SearchPlan, string>::Ok(SearchPlan::Literal(LiteralMatcher(
+        return Result<SearchPlan, SearchDiagnostic>::Ok(SearchPlan::Literal(LiteralMatcher(
             needles = opts.patterns.clone(),
             ignore_case = eff_ignore_case,
             word_regexp = opts.word_regexp,
