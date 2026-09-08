@@ -18,8 +18,8 @@ import sys
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate WinGet manifests for trg release")
-    parser.add_argument("--version", default="0.16.0", help="Semantic version without v")
-    parser.add_argument("--tag", default=None, help="Release tag name (e.g. v0.16.0)")
+    parser.add_argument("--version", default="0.16.1", help="Semantic version without v")
+    parser.add_argument("--tag", default=None, help="Release tag name (e.g. v0.16.1)")
     parser.add_argument("--x64-sha", help="SHA-256 digest of Windows x64 ZIP")
     parser.add_argument("--arm64-sha", help="SHA-256 digest of Windows ARM64 ZIP")
     parser.add_argument("--x64-zip", help="Path to Windows x64 ZIP to compute digest")

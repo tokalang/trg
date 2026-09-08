@@ -325,7 +325,7 @@ def main():
     parser = argparse.ArgumentParser(description="trg Standalone Binary Release Verifier")
     parser.add_argument("--archive", required=True, help="Path to standalone binary archive (.tar.gz or .zip)")
     parser.add_argument("--expected-sha", help="Expected SHA-256 digest of binary archive")
-    parser.add_argument("--expected-version", default="0.16.0", help="Expected version string")
+    parser.add_argument("--expected-version", default="0.16.1", help="Expected version string")
     parser.add_argument("--run-matrix", action="store_true", help="Run test_universal_matrix.py against extracted binary")
     args = parser.parse_args()
 
