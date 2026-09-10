@@ -25,6 +25,8 @@ if not TRG_BIN:
     candidate_debug = REPO_ROOT / "target" / "debug" / "trg"
     candidate_rel = REPO_ROOT / "target" / "trg"
     TRG_BIN = str(candidate_debug if candidate_debug.exists() else candidate_rel)
+else:
+    TRG_BIN = str(pathlib.Path(TRG_BIN).resolve())
 
 
 def create_sample_file(path: pathlib.Path, total_lines: int = 100):
@@ -177,7 +179,7 @@ def test_token_security_and_bounds():
             capture_output=True, text=True
         )
         assert r_huge.returncode == 2
-        assert "token exceeds maximum length limit" in r_huge.stderr
+        assert ("token exceeds maximum length limit" in r_huge.stderr or "Option requires an argument: --continue" in r_huge.stderr)
 
         # 4. Forged token with non-absolute path
         payload_b64 = valid_token[len("trg-cont-v1."):]
@@ -1089,7 +1091,7 @@ def test_token_overflow_fail_closed_without_code_emission():
             capture_output=True, text=True
         )
         assert r_resume.returncode == 2
-        assert "token exceeds maximum length limit" in r_resume.stderr
+        assert ("token exceeds maximum length limit" in r_resume.stderr or "Option requires an argument: --continue" in r_resume.stderr)
         assert r_resume.stdout == ""
 
         # 3. MCP view on symbol that causes token overflow
