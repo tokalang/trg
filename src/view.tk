@@ -5452,7 +5452,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
             println("      --block               Expand enclosing syntactic block context")
             println("      --lines <M-N>         Extract explicit physical line range M to N")
             println("      --symbol <NAME>       Extract enclosing code range for target symbol (e.g. 'fn_name' or 'Scope::name')")
-            println("      --scope <SCOPE>       Optional enclosing scope to disambiguate target symbol")
+            println("      --scope <SCOPE>       Optional enclosing scope to disambiguate target symbol (for block context, use --block)")
             println("      --continuation        Enable sequential range paging and emit continuation token on truncation")
             println("      --continue <TOKEN>    Resume hydration from previous continuation token")
             println("      --max-lines <NUM>     Maximum lines of output before truncating")
@@ -5514,7 +5514,12 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
 
         if view == "--scope" {
             if i + 1 >= num_args {
-                print_err("Option requires an argument: --scope")
+                print_err("view --scope requires a symbol scope name; use --block to expand the enclosing block.")
+                return 2
+            }
+            auto &next_arg = args.borrow(i + 1)
+            if next_arg.as_str().starts_with("-") {
+                print_err("view --scope requires a symbol scope name; use --block to expand the enclosing block.")
                 return 2
             }
             i = i + 1
@@ -5526,6 +5531,10 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
 
         if view.starts_with("--scope=") {
             auto val_str = view.substr(8:usize, view.len - 8:usize)
+            if val_str.len == 0 {
+                print_err("Invalid scope name: cannot be empty")
+                return 2
+            }
             scope_raw_opt = Option<string>::Some(string::from(val_str))
             i = i + 1
             continue

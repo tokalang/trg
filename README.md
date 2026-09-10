@@ -27,9 +27,10 @@ Designed for modern AI coding agents and developers, `trg` recursively searches 
   - Available via CLI (`trg symbols <path> [--json] [-k kinds] [--max-symbols N] [--max-bytes SIZE]`) and MCP stdio (`trg_symbols`).
 - **Stateless Point & Block Hydration (`trg view <path>:<line>`, `trg_view` MCP Tool)**:
   - Sub-3ms stateless code hydration for inspecting lines and code blocks around target coordinates.
-  - Line context mode: `trg view <path>:<line> [-C N]` (default 10 lines).
-  - Syntactic block mode: `trg view <path>:<line> --block` (expands to the enclosing function/class with decorator snapping).
+  - Line context mode: `trg view <path>:<line> [-C N]` (default 10 lines; recommended for local facts, conditions, and error branches).
   - Explicit line range: `trg view <path> --lines <start>-<end>`.
+  - Syntactic block mode: `trg view <path>:<line> --block` (expands to the enclosing function/class block with decorator snapping).
+  - Symbol mode: `trg view <path> --symbol <SPEC> [--scope <SCOPE>] [--max-lines N]` (extracts symbol range; pair with `--max-lines` on large functions. Note: `view --scope` is a scope name filter, not a boolean flag).
 - **Syntactic Block Context Expansion (`--context-block` / `--block`, `--max-block-lines`)**:
   - Automatically expands surrounding context to enclose complete syntactic code blocks (functions, methods, classes) without AST or tree-sitter overhead.
   - **Dual-Family Heuristic Engine**:
