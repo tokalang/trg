@@ -195,6 +195,24 @@ jobs:
       - name: Run Windows qualification matrix (native x64)
         run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_x64.exe --arch x64
 
+      - name: Setup pinned ripgrep (v14.1.1 x64) for differential parity
+        run: |
+          set -euo pipefail
+          curl -fsSL -o rg_x64.zip https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-pc-windows-msvc.zip
+          python3 -c "
+          import zipfile, shutil, glob
+          with zipfile.ZipFile('rg_x64.zip') as z:
+              for f in z.namelist():
+                  if f.endswith('rg.exe'):
+                      z.extract(f, 'bin_rg')
+          for p in glob.glob('bin_rg/**/rg.exe', recursive=True):
+              shutil.copy(p, 'rg.exe')
+          "
+          ./rg.exe --version
+
+      - name: Run Ripgrep differential parity suite (Windows x64)
+        run: python3 tests/test_rg_differential.py --trg trg.exe --rg ./rg.exe
+
   qualify-windows-arm64:
     name: trg qualification (windows-arm64 on windows-11-arm)
     needs: build-cross-windows-objects
@@ -254,6 +272,24 @@ jobs:
 
       - name: Run Windows qualification matrix (native ARM64)
         run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_arm64.exe --arch arm64
+
+      - name: Setup pinned ripgrep (v14.1.1 ARM64) for differential parity
+        run: |
+          set -euo pipefail
+          curl -fsSL -o rg_arm64.zip https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-aarch64-pc-windows-msvc.zip
+          python3 -c "
+          import zipfile, shutil, glob
+          with zipfile.ZipFile('rg_arm64.zip') as z:
+              for f in z.namelist():
+                  if f.endswith('rg.exe'):
+                      z.extract(f, 'bin_rg')
+          for p in glob.glob('bin_rg/**/rg.exe', recursive=True):
+              shutil.copy(p, 'rg.exe')
+          "
+          ./rg.exe --version
+
+      - name: Run Ripgrep differential parity suite (Windows ARM64)
+        run: python3 tests/test_rg_differential.py --trg trg.exe --rg ./rg.exe
 
   qualification-gate:
     name: Four-platform qualification gate

@@ -73,6 +73,8 @@ def run_bin(bin_path: str, args: list, stdin_data: str = None, stdin_devnull: bo
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=cwd
         )
         if delayed_pipe is not None:
@@ -188,8 +190,28 @@ class DiffRunner:
                 self.failed += 1
                 return False
 
-        # 3. For exit code 2, ensure diagnostics were actually produced on stderr
+        # 3. For exit code 1 (zero-match), stdout must be strictly empty for both
+        if expected_exit == 1:
+            if trg_out.strip():
+                print(f"[FAIL] {name}: trg exit code 1 (zero-match) but produced non-empty stdout: {trg_out!r}")
+                self.failed += 1
+                return False
+            if rg_out.strip():
+                print(f"[FAIL] {name}: rg exit code 1 (zero-match) but produced non-empty stdout: {rg_out!r}")
+                self.failed += 1
+                return False
+
+        # 4. For exit code 2 (syntax/argument/regex compile error),
+        # stdout must be empty AND stderr must contain a diagnostic message
         if expected_exit == 2:
+            if trg_out.strip():
+                print(f"[FAIL] {name}: trg exit code 2 (error) but produced non-empty stdout: {trg_out!r}")
+                self.failed += 1
+                return False
+            if rg_out.strip():
+                print(f"[FAIL] {name}: rg exit code 2 (error) but produced non-empty stdout: {rg_out!r}")
+                self.failed += 1
+                return False
             if not trg_err.strip():
                 print(f"[FAIL] {name}: trg exited with 2 but produced no stderr diagnostic")
                 self.failed += 1
@@ -219,9 +241,14 @@ def main():
             repo_root / "target" / "debug" / "trg",
             repo_root / "target" / "release" / "trg",
             repo_root / "target" / "trg",
+            repo_root / "trg.exe",
+            repo_root / "target" / "debug" / "trg.exe",
+            repo_root / "target" / "release" / "trg.exe",
+            repo_root / "target" / "x86_64-pc-windows-gnu" / "trg.exe",
+            repo_root / "target" / "aarch64-pc-windows-gnu" / "trg.exe",
         ]
         for c in candidates:
-            if c.is_file() and os.access(c, os.X_OK):
+            if c.is_file() and (os.access(c, os.X_OK) or str(c).endswith(".exe")):
                 trg_bin = str(c)
                 break
     if not trg_bin or not os.path.exists(trg_bin):
@@ -229,7 +256,7 @@ def main():
         sys.exit(2)
 
     # Locate rg
-    rg_bin = args.rg or shutil.which("rg")
+    rg_bin = args.rg or shutil.which("rg") or shutil.which("rg.exe")
     if not rg_bin or not os.path.exists(rg_bin):
         print("Error: ripgrep (rg) binary not found on PATH. Install it or pass --rg.")
         sys.exit(2)
