@@ -979,6 +979,37 @@ impl ViewResult {
         }
         return Result<string, string>::Ok(cede final_json)
     }
+
+    pub fn print_cli_truncation_notice(self#, max_lines_opt: Option<usize>, max_bytes_opt: Option<usize>) {
+        if self.truncated && self.reason.len() > 0 {
+            posix_write_stderr("trg: [trg_view: truncated=true, reason=")
+            posix_write_stderr(self.reason.as_str())
+            posix_write_stderr("]\n")
+
+            match self.continuation_token {
+                auto Option<string>::Some(&tok) => {
+                    posix_write_stderr("hint: continue reading: trg view --continue ")
+                    posix_write_stderr(tok.as_str())
+                    match max_lines_opt {
+                        auto Option<usize>::Some(ml) => {
+                            posix_write_stderr(" --max-lines ")
+                            posix_write_stderr(u64_to_string(ml as u64).as_str())
+                        }
+                        _ => {}
+                    }
+                    match max_bytes_opt {
+                        auto Option<usize>::Some(mb) => {
+                            posix_write_stderr(" --max-bytes ")
+                            posix_write_stderr(u64_to_string(mb as u64).as_str())
+                        }
+                        _ => {}
+                    }
+                    posix_write_stderr("\n")
+                }
+                auto Option<string>::None => {}
+            }
+        }
+    }
 }
 
 impl ViewOptions {
@@ -5783,33 +5814,8 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
             return 2
         }
 
-        auto view_res = res.unwrap()
-        if view_res.truncated && view_res.reason.len() > 0 {
-            auto has_token# = false
-            auto tok_val# = string::new()
-            match view_res.continuation_token {
-                auto Option<string>::Some(&tok) => {
-                    tok_val = string::from(tok.as_str())
-                    has_token = true
-                }
-                auto Option<string>::None => {}
-            }
-            if has_token {
-                posix_write_stderr("trg: [trg_view: truncated=true, reason=")
-                posix_write_stderr(view_res.reason.as_str())
-                posix_write_stderr(", continuation_token=")
-                posix_write_stderr(tok_val.as_str())
-                posix_write_stderr("]\n")
-
-                posix_write_stderr("trg: hint: continue reading: trg view --continue ")
-                posix_write_stderr(tok_val.as_str())
-                posix_write_stderr("\n")
-            } else {
-                posix_write_stderr("trg: [trg_view: truncated=true, reason=")
-                posix_write_stderr(view_res.reason.as_str())
-                posix_write_stderr("]\n")
-            }
-        }
+        auto view_res# = res.unwrap()
+        view_res#.print_cli_truncation_notice(max_lines_opt, max_bytes_opt)
         auto write_res = posix_write_stdout(view_res.text.as_str())
         if write_res == 2 {
             return 2
@@ -5944,7 +5950,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         return 2
     }
 
-    auto view_res = res.unwrap()
+    auto view_res# = res.unwrap()
     if view_res.mode == "symbol" {
         if view_res.selection_status == "not_found" {
             print_err(view_res.text.as_str())
@@ -5959,32 +5965,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         }
     }
 
-    if view_res.truncated && view_res.reason.len() > 0 {
-        auto has_token# = false
-        auto tok_val# = string::new()
-        match view_res.continuation_token {
-            auto Option<string>::Some(&tok) => {
-                tok_val = string::from(tok.as_str())
-                has_token = true
-            }
-            auto Option<string>::None => {}
-        }
-        if has_token {
-            posix_write_stderr("trg: [trg_view: truncated=true, reason=")
-            posix_write_stderr(view_res.reason.as_str())
-            posix_write_stderr(", continuation_token=")
-            posix_write_stderr(tok_val.as_str())
-            posix_write_stderr("]\n")
-
-            posix_write_stderr("trg: hint: continue reading: trg view --continue ")
-            posix_write_stderr(tok_val.as_str())
-            posix_write_stderr("\n")
-        } else {
-            posix_write_stderr("trg: [trg_view: truncated=true, reason=")
-            posix_write_stderr(view_res.reason.as_str())
-            posix_write_stderr("]\n")
-        }
-    }
+    view_res#.print_cli_truncation_notice(max_lines_opt, max_bytes_opt)
     auto write_res = posix_write_stdout(view_res.text.as_str())
     if write_res == 2 {
         return 2

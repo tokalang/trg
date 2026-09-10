@@ -14,6 +14,7 @@ Comprehensive qualification test suite for:
 import os
 import sys
 import json
+import shlex
 import base64
 import tempfile
 import pathlib
@@ -40,10 +41,18 @@ def create_sample_file(path: pathlib.Path, total_lines: int = 100):
 def parse_token_from_stderr(stderr: str) -> str:
     for line in stderr.splitlines():
         if "hint: continue reading: trg view --continue " in line:
-            return line.split("hint: continue reading: trg view --continue ")[1].strip()
+            part = line.split("hint: continue reading: trg view --continue ")[1].strip()
+            return part.split()[0]
         if "continuation_token=" in line:
             part = line.split("continuation_token=")[1]
             return part.split("]")[0].strip()
+    return ""
+
+
+def parse_hint_command_from_stderr(stderr: str) -> str:
+    for line in stderr.splitlines():
+        if "hint: continue reading: " in line:
+            return line.split("hint: continue reading: ")[1].strip()
     return ""
 
 
@@ -1129,6 +1138,138 @@ def test_token_overflow_fail_closed_without_code_emission():
         proc.terminate()
 
 
+def test_cli_hint_preserves_budget_and_single_token_output():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        py_file = tmp / "budget_flow.py"
+        create_sample_file(py_file, 100)
+
+        # 1. First invocation: --continuation with --max-lines 20
+        r1 = subprocess.run(
+            [TRG_BIN, "view", str(py_file), "--symbol", "long_computation", "--continuation", "--max-lines", "20"],
+            capture_output=True, text=True
+        )
+        assert r1.returncode == 0, f"r1 failed: {r1.stderr}"
+        # Stderr status line only contains reason, NOT continuation_token=
+        assert "[trg_view: truncated=true, reason=max_lines]" in r1.stderr
+        assert "continuation_token=" not in r1.stderr
+        token1 = parse_token_from_stderr(r1.stderr)
+        assert token1.startswith("trg-cont-v1.")
+        # Token must appear EXACTLY ONCE in stderr (only in hint)
+        assert r1.stderr.count(token1) == 1, f"Token should appear exactly once in stderr: {r1.stderr}"
+        hint_cmd1 = parse_hint_command_from_stderr(r1.stderr)
+        assert hint_cmd1.startswith("trg view --continue ")
+        assert hint_cmd1.endswith("--max-lines 20")
+
+        # 2. Execute hint command directly (replacing 'trg' with TRG_BIN)
+        parts1 = shlex.split(hint_cmd1)
+        assert parts1[0] == "trg" and parts1[1] == "view"
+        cmd2 = [TRG_BIN] + parts1[1:]
+        r2 = subprocess.run(cmd2, capture_output=True, text=True)
+        assert r2.returncode == 0, f"r2 failed: {r2.stderr}"
+        assert "21-    val_21 = 21 * 2" in r2.stdout
+        assert "40-    val_40 = 40 * 2" in r2.stdout
+        assert "41-    val_41" not in r2.stdout
+        assert "[trg_view: truncated=true, reason=max_lines]" in r2.stderr
+        assert "continuation_token=" not in r2.stderr
+        token2 = parse_token_from_stderr(r2.stderr)
+        assert token2.startswith("trg-cont-v1.")
+        assert r2.stderr.count(token2) == 1
+        hint_cmd2 = parse_hint_command_from_stderr(r2.stderr)
+        # Budget is preserved across continuation!
+        assert hint_cmd2.endswith("--max-lines 20")
+
+        # 3. Adjust budget on next invocation: change --max-lines to 15
+        cmd3 = [TRG_BIN, "view", "--continue", token2, "--max-lines", "15"]
+        r3 = subprocess.run(cmd3, capture_output=True, text=True)
+        assert r3.returncode == 0, f"r3 failed: {r3.stderr}"
+        assert "41-    val_41 = 41 * 2" in r3.stdout
+        assert "55-    val_55 = 55 * 2" in r3.stdout
+        assert "56-    val_56" not in r3.stdout
+        token3 = parse_token_from_stderr(r3.stderr)
+        assert token3.startswith("trg-cont-v1.")
+        assert r3.stderr.count(token3) == 1
+        hint_cmd3 = parse_hint_command_from_stderr(r3.stderr)
+        # Adjusted budget is reflected in the next hint!
+        assert hint_cmd3.endswith("--max-lines 15")
+
+        # 4. Bare continuation without budget: emits remainder without extra budget flags
+        cmd4 = [TRG_BIN, "view", "--continue", token3]
+        r4 = subprocess.run(cmd4, capture_output=True, text=True)
+        assert r4.returncode == 0, f"r4 failed: {r4.stderr}"
+        assert "56-    val_56 = 56 * 2" in r4.stdout
+        assert "100-    return 42" in r4.stdout
+        assert "hint: continue reading:" not in r4.stderr
+        assert parse_token_from_stderr(r4.stderr) == ""
+
+        # 5. Test --max-bytes budget preservation
+        rb1 = subprocess.run(
+            [TRG_BIN, "view", str(py_file), "--symbol", "long_computation", "--continuation", "--max-bytes", "600"],
+            capture_output=True, text=True
+        )
+        assert rb1.returncode == 0
+        assert "[trg_view: truncated=true, reason=max_result_bytes]" in rb1.stderr
+        assert "continuation_token=" not in rb1.stderr
+        tok_b1 = parse_token_from_stderr(rb1.stderr)
+        assert rb1.stderr.count(tok_b1) == 1
+        hint_b1 = parse_hint_command_from_stderr(rb1.stderr)
+        assert "--max-bytes 600" in hint_b1
+        # Execute hint directly
+        b_parts = shlex.split(hint_b1)
+        rb2 = subprocess.run([TRG_BIN] + b_parts[1:], capture_output=True, text=True)
+        assert rb2.returncode == 0
+        assert "[trg_view: truncated=true, reason=max_result_bytes]" in rb2.stderr
+        hint_b2 = parse_hint_command_from_stderr(rb2.stderr)
+        assert "--max-bytes 600" in hint_b2
+        tok_b2 = parse_token_from_stderr(rb2.stderr)
+        assert rb2.stderr.count(tok_b2) == 1
+
+        # 6. Test both --max-lines and --max-bytes in hint
+        r_both = subprocess.run(
+            [TRG_BIN, "view", str(py_file), "--symbol", "long_computation", "--continuation", "--max-lines", "10", "--max-bytes", "500"],
+            capture_output=True, text=True
+        )
+        assert r_both.returncode == 0
+        hint_both = parse_hint_command_from_stderr(r_both.stderr)
+        assert "--max-lines 10" in hint_both
+        assert "--max-bytes 500" in hint_both
+        tok_both = parse_token_from_stderr(r_both.stderr)
+        assert r_both.stderr.count(tok_both) == 1
+
+        # 7. Sequential paging with NO omissions and NO duplicates using generated hints
+        # Start at L1 with max-lines 25, continually execute hint until completion
+        curr_cmd = [TRG_BIN, "view", str(py_file), "--symbol", "long_computation", "--continuation", "--max-lines", "25"]
+        all_lines = []
+        page_count = 0
+        while True:
+            page_count += 1
+            res = subprocess.run(curr_cmd, capture_output=True, text=True)
+            assert res.returncode == 0, f"Page {page_count} failed: {res.stderr}"
+            for line in res.stdout.splitlines():
+                if line.startswith("[file:"):
+                    continue
+                if ":" in line:
+                    num_str = line.split(":", 1)[0]
+                elif "-" in line:
+                    num_str = line.split("-", 1)[0]
+                else:
+                    continue
+                try:
+                    all_lines.append(int(num_str))
+                except ValueError:
+                    pass
+            next_hint = parse_hint_command_from_stderr(res.stderr)
+            if not next_hint:
+                break
+            h_parts = shlex.split(next_hint)
+            curr_cmd = [TRG_BIN] + h_parts[1:]
+
+        assert page_count == 4, f"Expected 4 pages for 100 lines at 25 lines/page, got {page_count}"
+        assert all_lines == list(range(1, 101)), (
+            f"Expected strictly sequential lines 1..100 without loss or duplicate. Got {len(all_lines)} lines: {all_lines[:10]}...{all_lines[-10:]}"
+        )
+
+
 if __name__ == "__main__":
     print(f"Running view continuation qualification suite using binary: {TRG_BIN}")
     test_cli_sequential_range_start_paging()
@@ -1146,6 +1287,7 @@ if __name__ == "__main__":
     test_json_auto_pruning_budget_convergence()
     test_mcp_output_schema_tools_list_full_validation()
     test_token_overflow_fail_closed_without_code_emission()
+    test_cli_hint_preserves_budget_and_single_token_output()
     print("ALL test_view_continuation.py tests PASSED successfully!")
 
 
