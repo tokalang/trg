@@ -190,25 +190,25 @@ class DiffRunner:
                 self.failed += 1
                 return False
 
-        # 3. For exit code 1 (zero-match), stdout must be strictly empty for both
+        # 3. For exit code 1 (zero-match), stdout must be strictly zero output for both
         if expected_exit == 1:
-            if trg_out.strip():
+            if trg_out != "":
                 print(f"[FAIL] {name}: trg exit code 1 (zero-match) but produced non-empty stdout: {trg_out!r}")
                 self.failed += 1
                 return False
-            if rg_out.strip():
+            if rg_out != "":
                 print(f"[FAIL] {name}: rg exit code 1 (zero-match) but produced non-empty stdout: {rg_out!r}")
                 self.failed += 1
                 return False
 
         # 4. For exit code 2 (syntax/argument/regex compile error),
-        # stdout must be empty AND stderr must contain a diagnostic message
+        # stdout must be strictly zero output AND stderr must contain a diagnostic message
         if expected_exit == 2:
-            if trg_out.strip():
+            if trg_out != "":
                 print(f"[FAIL] {name}: trg exit code 2 (error) but produced non-empty stdout: {trg_out!r}")
                 self.failed += 1
                 return False
-            if rg_out.strip():
+            if rg_out != "":
                 print(f"[FAIL] {name}: rg exit code 2 (error) but produced non-empty stdout: {rg_out!r}")
                 self.failed += 1
                 return False

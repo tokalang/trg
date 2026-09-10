@@ -195,12 +195,17 @@ jobs:
       - name: Run Windows qualification matrix (native x64)
         run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_x64.exe --arch x64
 
-      - name: Setup pinned ripgrep (v14.1.1 x64) for differential parity
+      - name: Setup pinned ripgrep (v15.1.0 x64) for differential parity
         run: |
           set -euo pipefail
-          curl -fsSL -o rg_x64.zip https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-pc-windows-msvc.zip
+          curl -fsSL -o rg_x64.zip https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-x86_64-pc-windows-msvc.zip
           python3 -c "
-          import zipfile, shutil, glob
+          import hashlib, zipfile, shutil, glob
+          expected = '124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a'
+          with open('rg_x64.zip', 'rb') as f:
+              actual = hashlib.sha256(f.read()).hexdigest()
+          assert actual == expected, f'SHA256 mismatch: {actual} != {expected}'
+          print(f'Verified rg_x64.zip SHA256: {actual}')
           with zipfile.ZipFile('rg_x64.zip') as z:
               for f in z.namelist():
                   if f.endswith('rg.exe'):
@@ -273,12 +278,17 @@ jobs:
       - name: Run Windows qualification matrix (native ARM64)
         run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_arm64.exe --arch arm64
 
-      - name: Setup pinned ripgrep (v14.1.1 ARM64) for differential parity
+      - name: Setup pinned ripgrep (v15.1.0 ARM64) for differential parity
         run: |
           set -euo pipefail
-          curl -fsSL -o rg_arm64.zip https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-aarch64-pc-windows-msvc.zip
+          curl -fsSL -o rg_arm64.zip https://github.com/BurntSushi/ripgrep/releases/download/15.1.0/ripgrep-15.1.0-aarch64-pc-windows-msvc.zip
           python3 -c "
-          import zipfile, shutil, glob
+          import hashlib, zipfile, shutil, glob
+          expected = '00d931fb5237c9696ca49308818edb76d8eb6fc132761cb2a1bd616b2df02f8e'
+          with open('rg_arm64.zip', 'rb') as f:
+              actual = hashlib.sha256(f.read()).hexdigest()
+          assert actual == expected, f'SHA256 mismatch: {actual} != {expected}'
+          print(f'Verified rg_arm64.zip SHA256: {actual}')
           with zipfile.ZipFile('rg_arm64.zip') as z:
               for f in z.namelist():
                   if f.endswith('rg.exe'):
