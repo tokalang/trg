@@ -19,6 +19,7 @@ import src/types::{
     path_kind_name,
     ResolvedPath,
     InternedRecord,
+    ScopeMetadata,
     SnippetProjection,
     PathBase,
     FileEntry,
@@ -210,6 +211,24 @@ pub fn format_interned_record_json(rec: InternedRecord) -> string {
     return cede s
 }
 
+pub fn format_scope_human_tag(sm: ScopeMetadata) -> string {
+    auto out# = string::new()
+    if sm.is_repeated {
+        out#.push_str(sm.name.as_str())
+    } else {
+        out#.push_str(sm.name.as_str())
+        out#.push_str(" ")
+        out#.push_str(u64_to_string(sm.range_start as u64).as_str())
+        out#.push_str("-")
+        if sm.has_range_end {
+            out#.push_str(u64_to_string(sm.range_end as u64).as_str())
+        }
+        out#.push_str("; ")
+        out#.push_str(sm.reliability.as_str())
+    }
+    return cede out
+}
+
 pub fn format_json_match_interned(path: str, rec: InternedRecord) -> string {
     auto esc_path = json_escape(path)
     auto match_json# = string::from("{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"")
@@ -245,15 +264,43 @@ pub fn format_json_match_interned(path: str, rec: InternedRecord) -> string {
         s_idx = s_idx + 1
     }
 
-    match rec.scope {
-        auto Option<string>::Some(&sc) => {
-            match_json#.push_str("],\"scope\":{\"text\":\"")
-            auto esc_scope = json_escape(sc.as_str())
-            match_json#.push_str(esc_scope.as_str())
-            match_json#.push_str("\"}")
+    if rec.has_scope_meta {
+        auto sc_text# = ""
+        match rec.scope {
+            auto Option<string>::Some(&sc) => {
+                sc_text = sc.as_str()
+            }
+            _ => {}
         }
-        _ => {
-            match_json#.push_str("]")
+        match_json#.push_str("],\"scope\":{\"text\":\"")
+        auto esc_scope = json_escape(sc_text)
+        match_json#.push_str(esc_scope.as_str())
+        match_json#.push_str("\",\"name\":\"")
+        match_json#.push_str(json_escape(rec.scope_name.as_str()).as_str())
+        match_json#.push_str("\",\"kind\":\"")
+        match_json#.push_str(json_escape(rec.scope_kind.as_str()).as_str())
+        match_json#.push_str("\",\"range_start\":")
+        match_json#.push_str(u64_to_string(rec.scope_start as u64).as_str())
+        match_json#.push_str(",\"range_end\":")
+        if rec.scope_has_end {
+            match_json#.push_str(u64_to_string(rec.scope_end as u64).as_str())
+        } else {
+            match_json#.push_str("null")
+        }
+        match_json#.push_str(",\"reliability\":\"")
+        match_json#.push_str(json_escape(rec.scope_reliability.as_str()).as_str())
+        match_json#.push_str("\"}")
+    } else {
+        match rec.scope {
+            auto Option<string>::Some(&sc) => {
+                match_json#.push_str("],\"scope\":{\"text\":\"")
+                auto esc_scope = json_escape(sc.as_str())
+                match_json#.push_str(esc_scope.as_str())
+                match_json#.push_str("\"}")
+            }
+            _ => {
+                match_json#.push_str("]")
+            }
         }
     }
     match rec.block_range {
@@ -396,7 +443,9 @@ fn render_batch_text(
     separator_needed: bool,
     needs_heading: bool,
     has_emitted_heading: bool,
-    last_scope#: Option<string>
+    last_scope#: Option<string>,
+    last_scope_start#: usize,
+    last_scope_name#: string
 ) -> string {
     auto out# = string::new()
     match format {
@@ -527,13 +576,41 @@ fn render_batch_text(
                                 out#.push_str(":")
                             }
                             if fmt_cfg.scope {
-                                match rec.scope {
-                                    auto Option<string>::Some(&sc) => {
-                                        out#.push_str("[")
-                                        out#.push_str(sc.as_str())
-                                        out#.push_str("] ")
+                                auto sc_tag# = string::new()
+                                if rec.has_scope_meta {
+                                    auto sc_name = rec.scope_name.as_str()
+                                    auto is_rep = (last_scope_start == rec.scope_start) && (last_scope_name.as_str() == sc_name)
+                                    if is_rep {
+                                        sc_tag#.push_str(sc_name)
+                                    } else {
+                                        last_scope_start = rec.scope_start
+                                        last_scope_name = string::from(sc_name)
+                                        sc_tag#.push_str(sc_name)
+                                        sc_tag#.push_str(" ")
+                                        sc_tag#.push_str(u64_to_string(rec.scope_start as u64).as_str())
+                                        sc_tag#.push_str("-")
+                                        if rec.scope_has_end {
+                                            sc_tag#.push_str(u64_to_string(rec.scope_end as u64).as_str())
+                                        }
+                                        sc_tag#.push_str("; ")
+                                        sc_tag#.push_str(rec.scope_reliability.as_str())
                                     }
-                                    _ => {}
+                                } else {
+                                    match rec.scope {
+                                        auto Option<string>::Some(&sc) => {
+                                            sc_tag#.push_str(sc.as_str())
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if sc_tag.len() > 0 {
+                                    if out.len() > 0 {
+                                        out#.push_str(" [")
+                                    } else {
+                                        out#.push_str("[")
+                                    }
+                                    out#.push_str(sc_tag.as_str())
+                                    out#.push_str("] ")
                                 }
                             }
                             if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
@@ -619,13 +696,41 @@ fn render_batch_text(
                                 out#.push_str(":")
                             }
                             if fmt_cfg.scope || fmt_cfg.group_by_scope {
-                                match rec.scope {
-                                    auto Option<string>::Some(&sc) => {
-                                        out#.push_str("[")
-                                        out#.push_str(sc.as_str())
-                                        out#.push_str("] ")
+                                auto sc_tag# = string::new()
+                                if rec.has_scope_meta {
+                                    auto sc_name = rec.scope_name.as_str()
+                                    auto is_rep = (last_scope_start == rec.scope_start) && (last_scope_name.as_str() == sc_name)
+                                    if is_rep {
+                                        sc_tag#.push_str(sc_name)
+                                    } else {
+                                        last_scope_start = rec.scope_start
+                                        last_scope_name = string::from(sc_name)
+                                        sc_tag#.push_str(sc_name)
+                                        sc_tag#.push_str(" ")
+                                        sc_tag#.push_str(u64_to_string(rec.scope_start as u64).as_str())
+                                        sc_tag#.push_str("-")
+                                        if rec.scope_has_end {
+                                            sc_tag#.push_str(u64_to_string(rec.scope_end as u64).as_str())
+                                        }
+                                        sc_tag#.push_str("; ")
+                                        sc_tag#.push_str(rec.scope_reliability.as_str())
                                     }
-                                    _ => {}
+                                } else {
+                                    match rec.scope {
+                                        auto Option<string>::Some(&sc) => {
+                                            sc_tag#.push_str(sc.as_str())
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                if sc_tag.len() > 0 {
+                                    if out.len() > 0 {
+                                        out#.push_str(" [")
+                                    } else {
+                                        out#.push_str("[")
+                                    }
+                                    out#.push_str(sc_tag.as_str())
+                                    out#.push_str("] ")
                                 }
                             }
                             if fmt_cfg.max_columns > 0 && rec.text.len() > fmt_cfg.max_columns {
@@ -717,7 +822,9 @@ pub shape OutputBudgetWriter (
     records_emitted#: usize,
     current_scan_pass#: ScanPass,
     fmt_cfg: FormatConfig,
-    last_scope#: Option<string>
+    last_scope#: Option<string>,
+    last_printed_scope_start#: usize,
+    last_printed_scope_name#: string
 )
 
 impl OutputBudgetWriter {
@@ -746,7 +853,9 @@ impl OutputBudgetWriter {
             records_emitted = 0:usize,
             current_scan_pass = ScanPass::All,
             fmt_cfg = fmt_cfg,
-            last_scope = Option<string>::None
+            last_scope = Option<string>::None,
+            last_printed_scope_start = 0:usize,
+            last_printed_scope_name = string::new()
         )
     }
 
@@ -774,7 +883,9 @@ impl OutputBudgetWriter {
             records_emitted = 0:usize,
             current_scan_pass = ScanPass::All,
             fmt_cfg = fmt_cfg,
-            last_scope = Option<string>::None
+            last_scope = Option<string>::None,
+            last_printed_scope_start = 0:usize,
+            last_printed_scope_name = string::new()
         )
     }
 
@@ -782,11 +893,15 @@ impl OutputBudgetWriter {
         self.active_segment_file_id = Option<usize>::None
         self.last_emitted_file_key = string::new()
         self.last_scope = Option<string>::None
+        self.last_printed_scope_start = 0:usize
+        self.last_printed_scope_name = string::new()
         self.current_scan_pass = next_pass
     }
 
     pub fn reset_scope_state(self#) {
         self.last_scope = Option<string>::None
+        self.last_printed_scope_start = 0:usize
+        self.last_printed_scope_name = string::new()
     }
 
     pub fn set_effective_projection(self#, layout: TextLayout, style: PathStyle, with_filename: bool) {
@@ -845,7 +960,12 @@ impl OutputBudgetWriter {
 
                 if self.last_emitted_file_key != resolved_path.identity_key {
                     self.last_scope = Option<string>::None
+                    self.last_printed_scope_start = 0:usize
+                    self.last_printed_scope_name = string::new()
                 }
+
+                auto temp_scope_start# = self.last_printed_scope_start
+                auto temp_scope_name# = self.last_printed_scope_name.clone()
 
                 auto text = render_batch_text(
                     self.format,
@@ -856,7 +976,9 @@ impl OutputBudgetWriter {
                     batch.separator_needed,
                     needs_heading,
                     self.has_emitted_heading,
-                    self.last_scope#
+                    self.last_scope#,
+                    temp_scope_start#,
+                    temp_scope_name#
                 )
 
                 auto delta = text.len()
@@ -911,14 +1033,17 @@ impl OutputBudgetWriter {
 
                 if needs_heading {
                     self.has_emitted_heading = true
-                    self.last_emitted_file_key = resolved_path.identity_key.clone()
                 }
+                self.last_emitted_file_key = resolved_path.identity_key.clone()
 
                 if batch.is_payload {
                     budget_state.result_payload_bytes_emitted = budget_state.result_payload_bytes_emitted + delta
                 } else {
                     budget_state.protocol_bytes_emitted = budget_state.protocol_bytes_emitted + delta
                 }
+
+                self.last_printed_scope_start = temp_scope_start
+                self.last_printed_scope_name = cede temp_scope_name
 
                 return EmitOutcome::Written
             }
@@ -1038,7 +1163,12 @@ impl OutputBudgetWriter {
 
                 if self.last_emitted_file_key != resolved_path.identity_key {
                     self.last_scope = Option<string>::None
+                    self.last_printed_scope_start = 0:usize
+                    self.last_printed_scope_name = string::new()
                 }
+
+                auto temp_scope_start# = self.last_printed_scope_start
+                auto temp_scope_name# = self.last_printed_scope_name.clone()
 
                 auto text = render_batch_text(
                     OutputFormat::Human,
@@ -1049,16 +1179,20 @@ impl OutputBudgetWriter {
                     batch.separator_needed,
                     needs_heading,
                     self.has_emitted_heading,
-                    self.last_scope#
+                    self.last_scope#,
+                    temp_scope_start#,
+                    temp_scope_name#
                 )
 
                 if needs_heading {
                     self.has_emitted_heading = true
-                    self.last_emitted_file_key = resolved_path.identity_key.clone()
                 }
+                self.last_emitted_file_key = resolved_path.identity_key.clone()
 
                 self.memory_str#.push_str(text.as_str())
                 self.text_record_bytes = self.text_record_bytes + text.len()
+                self.last_printed_scope_start = temp_scope_start
+                self.last_printed_scope_name = cede temp_scope_name
 
                 return EmitOutcome::Written
             }
@@ -1367,10 +1501,30 @@ pub fn format_human_match(ev: MatchEvent, opts: CliOptions, multiple_files: bool
         out#.push_str(":")
     }
 
-    if opts.scope && ev.scope_name.len() > 0 {
-        out#.push_str("[")
-        out#.push_str(ev.scope_name.as_str())
-        out#.push_str("] ")
+    if opts.scope {
+        auto sc_tag# = string::new()
+        if ev.has_scope_meta {
+            sc_tag#.push_str(ev.scope_name.as_str())
+            sc_tag#.push_str(" ")
+            sc_tag#.push_str(u64_to_string(ev.scope_start as u64).as_str())
+            sc_tag#.push_str("-")
+            if ev.scope_has_end {
+                sc_tag#.push_str(u64_to_string(ev.scope_end as u64).as_str())
+            }
+            sc_tag#.push_str("; ")
+            sc_tag#.push_str(ev.scope_reliability.as_str())
+        } else if ev.scope_name.len() > 0 {
+            sc_tag = ev.scope_name.clone()
+        }
+        if sc_tag.len() > 0 {
+            if out.len() > 0 {
+                out#.push_str(" [")
+            } else {
+                out#.push_str("[")
+            }
+            out#.push_str(sc_tag.as_str())
+            out#.push_str("] ")
+        }
     }
 
     if opts.max_columns > 0 && ev.line_text.len() > opts.max_columns {

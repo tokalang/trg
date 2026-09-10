@@ -2019,7 +2019,8 @@ def main():
         # Human output
         r_sc = run_cmd([trg, "--scope", "target", str(scope_dir / "service.tk")])
         assert r_sc.returncode == 0
-        assert "[fn compute()]" in r_sc.stdout
+        assert "[compute 2-5; confirmed]" in r_sc.stdout
+        assert "[compute]" in r_sc.stdout
 
         # JSON output
         r_sc_j = run_cmd([trg, "--scope", "--json", "target", str(scope_dir / "service.tk")])
@@ -2028,7 +2029,10 @@ def main():
         match_evs = [ev for ev in j_lines if ev.get("type") == "match"]
         assert len(match_evs) == 2
         assert "scope" in match_evs[0]["data"]
-        assert "fn compute" in match_evs[0]["data"]["scope"]["text"]
+        assert "compute" in match_evs[0]["data"]["scope"]["text"]
+        assert match_evs[0]["data"]["scope"]["range_start"] == 2
+        assert match_evs[0]["data"]["scope"]["range_end"] == 5
+        assert match_evs[0]["data"]["scope"]["reliability"] == "confirmed"
     finally:
         if scope_dir.exists():
             shutil.rmtree(scope_dir)
@@ -2288,7 +2292,7 @@ def main():
         call_text = resp_call["result"]["content"][0]["text"]
         assert "def execute(self)" in call_text
         assert "return 42" in call_text
-        assert "[def execute()]" in call_text
+        assert "[execute 2-3; confirmed]" in call_text
         assert resp_call["result"]["_meta"]["summary"]["complete"] is True
         assert resp_call["result"]["_meta"]["summary"]["truncated"] is False
     finally:
@@ -4611,12 +4615,12 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         )
         r_sc = run_cmd([trg, "--scope", "flag", str(test_file)])
         assert r_sc.returncode == 0
-        assert "[pub fn send_packet()]" in r_sc.stdout
+        assert "[send_packet 7-10; confirmed]" in r_sc.stdout
         assert "data:" not in r_sc.stdout
 
         r_sc2 = run_cmd([trg, "--scope", "auto x", str(test_file)])
         assert r_sc2.returncode == 0
-        assert "[pub async fn duplex_loop()]" in r_sc2.stdout
+        assert "[duplex_loop 1-4; confirmed]" in r_sc2.stdout
         assert "a: i32" not in r_sc2.stdout
 
     # Test 137: Single-match KWIC snippet with '...' boundaries
@@ -5276,7 +5280,7 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         j_lines = [json.loads(l) for l in r_sc.stdout.strip().split("\n") if l.strip()]
         match_ev = next(ev for ev in j_lines if ev.get("type") == "match")
         sc = match_ev["data"].get("scope", {}).get("text")
-        assert sc == "pub fn enclosing_function()", f"Scope corrupted by local variable: '{sc}'"
+        assert sc in ["enclosing_function", "pub fn enclosing_function()"], f"Scope corrupted by local variable: '{sc}'"
 
     # Test 156: CLI flag aliases and --sort help synchronization
     log("Test 156: CLI flag aliases and --sort help synchronization")
@@ -5490,7 +5494,7 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         j_lines = [json.loads(l) for l in r_scope.stdout.strip().split("\n") if l.strip()]
         match_ev = next(ev for ev in j_lines if ev.get("type") == "match")["data"]
         sc = match_ev.get("scope", {}).get("text")
-        assert sc == "pub fn run_mcp_server()", f"Scope corrupted by lifetime shape: '{sc}'"
+        assert sc in ["run_mcp_server", "pub fn run_mcp_server()"], f"Scope corrupted by lifetime shape: '{sc}'"
 
         # JS single-quote string with embedded closer delimiter: must not prematurely close block
         js_file = tdp / "strings.js"
@@ -6618,8 +6622,22 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_cont.returncode == 0, f"Continuation test suite failed (exit {r_v_cont.returncode}):\n{r_v_cont.stderr}\n{r_v_cont.stdout}"
     log("Test 178 passed: View continuation, sequential range-start paging, anti-torn-read, and strict token validation verified.")
 
+    # Test 179: Search Scope Boundary Suite
+    log("Test 179: Search Scope Boundary Suite (tests/test_search_scope_suite.py)")
+    scope_suite_script = repo_root / "tests" / "test_search_scope_suite.py"
+    assert scope_suite_script.exists(), f"Scope suite test script not found at {scope_suite_script}"
+    env_v_scope = dict(os.environ)
+    env_v_scope["TRG_BIN"] = str(pkg_bin_path)
+    r_v_scope = subprocess.run([
+        sys.executable,
+        str(scope_suite_script),
+        str(pkg_bin_path)
+    ], cwd=str(repo_root), env=env_v_scope, capture_output=True, text=True)
+    assert r_v_scope.returncode == 0, f"Scope test suite failed (exit {r_v_scope.returncode}):\n{r_v_scope.stderr}\n{r_v_scope.stdout}"
+    log("Test 179 passed: Search scope boundary suite, resource caps, and deduplication verified.")
+
     log("=" * 60)
-    log("ALL 178 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.0)!")
+    log("ALL 179 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":

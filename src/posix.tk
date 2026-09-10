@@ -32,6 +32,7 @@ pub fn posix_close(fd: i32) -> i32 {
 pub shape StatInfo (
     mode: u32,
     size: u64,
+    mtime: i64,
     is_dir: bool,
     is_file: bool,
     is_symlink: bool
@@ -107,6 +108,7 @@ pub fn posix_stat(path: string) -> Result<StatInfo, i32> {
                 return Result<StatInfo, i32>::Ok(StatInfo(
                     mode = 40960:u32, // S_IFLNK
                     size = 0:u64,
+                    mtime = 0:i64,
                     is_dir = false,
                     is_file = false,
                     is_symlink = true
@@ -133,6 +135,7 @@ pub fn posix_stat(path: string) -> Result<StatInfo, i32> {
                 return Result<StatInfo, i32>::Ok(StatInfo(
                     mode = 40960:u32, // S_IFLNK
                     size = 0:u64,
+                    mtime = 0:i64,
                     is_dir = false,
                     is_file = false,
                     is_symlink = true
@@ -151,6 +154,7 @@ pub fn posix_stat(path: string) -> Result<StatInfo, i32> {
 
         auto mode = sys_fs::stat_get_mode_impl(stat_ptr)
         auto size = sys_fs::stat_get_size_impl(stat_ptr)
+        auto mtime = sys_fs::stat_get_mtime_impl(stat_ptr)
         auto is_dir = sys_fs::stat_is_dir_impl(mode)
         auto is_file = sys_fs::stat_is_file_impl(mode)
         sys_fs::stat_free_impl(stat_ptr)
@@ -158,6 +162,7 @@ pub fn posix_stat(path: string) -> Result<StatInfo, i32> {
         return Result<StatInfo, i32>::Ok(StatInfo(
             mode = mode,
             size = size,
+            mtime = mtime,
             is_dir = is_dir,
             is_file = is_file,
             is_symlink = false

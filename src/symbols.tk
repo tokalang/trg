@@ -40,6 +40,7 @@ pub shape SymbolRecord (
 pub shape SymbolsOptions (
     file_path: string,
     kinds: Option<Vec<string>>,
+    max_input_bytes: Option<usize>,
     max_symbols: Option<usize>,
     max_result_bytes: Option<usize>,
     json_output: bool
@@ -190,6 +191,16 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
         _ => {}
     }
 
+    auto max_input_bytes_val# = 0:usize
+    auto has_max_input_bytes# = false
+    match opts.max_input_bytes {
+        auto Option<usize>::Some(v) => {
+            max_input_bytes_val = v
+            has_max_input_bytes = true
+        }
+        _ => {}
+    }
+
     auto family = detect_syntax_family(opts.file_path.as_str())
     auto dialect = detect_lexical_dialect(opts.file_path.as_str())
 
@@ -203,6 +214,7 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
     auto truncated# = false
     auto term_reason# = string::from("completed")
     auto total_lines# = 0:usize
+    auto total_input_bytes# = 0:usize
     auto approx_bytes_accum# = 0:usize
 
     unsafe {
@@ -227,7 +239,19 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
         auto at_eof# = false
 
         loop true {
-            auto n# = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            auto read_len# = 65536:usize
+            if has_max_input_bytes {
+                if total_input_bytes >= max_input_bytes_val {
+                    truncated = true
+                    term_reason = string::from("max_input_bytes")
+                    break
+                }
+                auto remaining = max_input_bytes_val - total_input_bytes
+                if remaining < read_len {
+                    read_len = remaining
+                }
+            }
+            auto n# = libc_fread(*buf, 1:usize, read_len, *file)
             auto chunk_str# = string::new()
             if n == 0 {
                 if posix_ferror((*file) as Addr) {
@@ -241,6 +265,11 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                     break
                 }
             } else {
+                total_input_bytes = total_input_bytes + n
+                if has_max_input_bytes && total_input_bytes >= max_input_bytes_val {
+                    truncated = true
+                    term_reason = string::from("max_input_bytes")
+                }
                 auto *c_ptr = ((*buf) as Addr) as *char
                 chunk_str = string::from_with_len(*c_ptr, n)
             }
@@ -401,6 +430,9 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                         }
 
                         auto detail_str# = string::from(pat_text.trim())
+                        if detail_str.as_str().ends_with("{") {
+                            detail_str = string::from(detail_str.as_str().substr(0, detail_str.len() - 1:usize).trim())
+                        }
                         if detail_str.len() > 100:usize {
                             detail_str = string::from(detail_str.as_str().substr(0, 97))
                             detail_str#.push_str("...")
@@ -678,6 +710,9 @@ pub fn outline_symbols_lines(
                 }
 
                 auto detail_str# = string::from(pat_text.trim())
+                if detail_str.as_str().ends_with("{") {
+                    detail_str = string::from(detail_str.as_str().substr(0, detail_str.len() - 1:usize).trim())
+                }
                 if detail_str.len() > 100:usize {
                     detail_str = string::from(detail_str.as_str().substr(0, 97))
                     detail_str#.push_str("...")
@@ -906,6 +941,7 @@ pub fn execute_symbols_cli(raw_args: Vec<string>) -> i32 {
     auto has_kinds# = false
     auto max_syms# = Option<usize>::None
     auto max_bytes# = Option<usize>::None
+    auto max_in_bytes# = Option<usize>::None
 
     auto i# = 2:usize
     loop i < raw_args.len() {
@@ -984,6 +1020,26 @@ pub fn execute_symbols_cli(raw_args: Vec<string>) -> i32 {
                 return 2
             }
             max_bytes = Option<usize>::Some(parsed.unwrap())
+        } else if arg == "--max-input-bytes" {
+            if i + 1 >= raw_args.len() {
+                print_err("Error: --max-input-bytes requires a size argument")
+                return 2
+            }
+            i = i + 1
+            auto parsed = parse_size_bytes_strict(raw_args.borrow(i).as_str(), arg)
+            if parsed.is_err() {
+                print_err(parsed.unwrap_err().as_str())
+                return 2
+            }
+            max_in_bytes = Option<usize>::Some(parsed.unwrap())
+        } else if arg.starts_with("--max-input-bytes=") {
+            auto v = arg.substr(18:usize, arg.len - 18:usize)
+            auto parsed = parse_size_bytes_strict(v, "--max-input-bytes")
+            if parsed.is_err() {
+                print_err(parsed.unwrap_err().as_str())
+                return 2
+            }
+            max_in_bytes = Option<usize>::Some(parsed.unwrap())
         } else if path_val.len() == 0 && !arg.starts_with("-") {
             path_val = string::from(arg)
         } else {
@@ -1009,6 +1065,7 @@ pub fn execute_symbols_cli(raw_args: Vec<string>) -> i32 {
     auto opts = SymbolsOptions(
         file_path = cede path_val,
         kinds = cede kinds_opt,
+        max_input_bytes = max_in_bytes,
         max_symbols = max_syms,
         max_result_bytes = max_bytes,
         json_output = json_out

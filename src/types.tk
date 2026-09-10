@@ -366,6 +366,16 @@ impl SnippetProjection {
     }
 }
 
+pub shape ScopeMetadata (
+    name: string,
+    kind: string,
+    range_start: usize,
+    range_end: usize,
+    has_range_end: bool,
+    reliability: string,
+    is_repeated: bool
+)
+
 pub shape InternedRecord (
     kind: string,
     group_id: usize,
@@ -374,6 +384,13 @@ pub shape InternedRecord (
     text: string,
     submatches: Vec<SubMatch>,
     scope: Option<string>,
+    scope_name: string,
+    has_scope_meta: bool,
+    scope_kind: string,
+    scope_start: usize,
+    scope_end: usize,
+    scope_has_end: bool,
+    scope_reliability: string,
     block_truncated: bool,
     block_range: Option<BlockRange>,
     snippet: Option<SnippetProjection>
@@ -416,6 +433,13 @@ impl InternedRecord {
             text = self.text.clone(),
             submatches = cede subs,
             scope = cede sc,
+            scope_name = self.scope_name.clone(),
+            has_scope_meta = self.has_scope_meta,
+            scope_kind = self.scope_kind.clone(),
+            scope_start = self.scope_start,
+            scope_end = self.scope_end,
+            scope_has_end = self.scope_has_end,
+            scope_reliability = self.scope_reliability.clone(),
             block_truncated = self.block_truncated,
             block_range = cede br_opt,
             snippet = cede snip_opt
@@ -442,6 +466,12 @@ pub shape MatchEvent (
     absolute_offset: usize,
     submatches: Vec<SubMatch>,
     scope_name: string,
+    has_scope_meta: bool,
+    scope_kind: string,
+    scope_start: usize,
+    scope_end: usize,
+    scope_has_end: bool,
+    scope_reliability: string,
     block_truncated: bool,
     is_context: bool,
     group_id: usize,

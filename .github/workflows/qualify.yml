@@ -80,6 +80,11 @@ jobs:
         env:
           TRG_BIN: ./target/debug/trg
 
+      - name: Run search scope boundary suite
+        run: python3 tests/test_search_scope_suite.py ./target/debug/trg
+        env:
+          TRG_BIN: ./target/debug/trg
+
       - name: Verify standalone installer behavior
         run: python3 tests/verify_installer.py
 
@@ -212,6 +217,11 @@ jobs:
         env:
           TRG_BIN: trg.exe
 
+      - name: Run search scope boundary suite (Windows x64)
+        run: python3 tests/test_search_scope_suite.py trg.exe
+        env:
+          TRG_BIN: trg.exe
+
       - name: Run Windows qualification matrix (native x64)
         run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_x64.exe --arch x64
 
@@ -302,6 +312,11 @@ jobs:
 
       - name: Run view continuation test suite (Windows ARM64)
         run: python3 tests/test_view_continuation.py
+        env:
+          TRG_BIN: trg.exe
+
+      - name: Run search scope boundary suite (Windows ARM64)
+        run: python3 tests/test_search_scope_suite.py trg.exe
         env:
           TRG_BIN: trg.exe
 

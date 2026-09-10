@@ -29,7 +29,7 @@ import src/types::{
 }
 import src/path_norm::{resolve_path, normalize_cwd}
 import src/matcher::{SearchPlan}
-import src/posix::{posix_ferror, posix_get_errno, posix_get_crt_errno, posix_clear_crt_errno, posix_close}
+import src/posix::{posix_ferror, posix_get_errno, posix_get_crt_errno, posix_clear_crt_errno, posix_close, posix_stat, StatInfo, print_err}
 import src/printer::{
     OutputBudgetWriter,
     FileFrameState,
@@ -40,7 +40,14 @@ import src/printer::{
     emit_json_begin,
     emit_json_end,
     write_line,
-    u64_to_string
+    u64_to_string,
+    format_scope_human_tag
+}
+import src/symbols::{
+    outline_symbols_file,
+    SymbolsOptions,
+    SymbolRecord,
+    SymbolsResult
 }
 
 extern fn write(fd: i32, *buf: void, count: usize) -> isize
@@ -96,6 +103,140 @@ fn is_binary_chunk(content: str) -> bool {
         i = i + 1
     }
     return false
+}
+
+shape FileScopeResolver (
+    target_path: string,
+    enabled: bool,
+    symbols_loaded#: bool,
+    symbols#: Vec<SymbolRecord>,
+    has_resolved#: bool,
+    res_name#: string,
+    res_signature#: string,
+    res_kind#: string,
+    res_range_start#: usize,
+    res_range_end#: usize,
+    res_has_range_end#: bool,
+    res_reliability#: string
+)
+
+impl FileScopeResolver {
+    pub fn new(cede target_path: string, enabled: bool) -> FileScopeResolver {
+        return FileScopeResolver(
+            target_path = cede target_path,
+            enabled = enabled,
+            symbols_loaded = false,
+            symbols = Vec<SymbolRecord>::new(),
+            has_resolved = false,
+            res_name = string::new(),
+            res_signature = string::new(),
+            res_kind = string::new(),
+            res_range_start = 0,
+            res_range_end = 0,
+            res_has_range_end = false,
+            res_reliability = string::new()
+        )
+    }
+
+    pub fn resolve_match(self#, line_num: usize) -> bool {
+        if !self.enabled {
+            self.has_resolved = false
+            return false
+        }
+        if !self.symbols_loaded {
+            self.symbols_loaded = true
+            if self.target_path.as_str() != "-" {
+                // Hard resource caps: 4 MiB hard input reading cap, 2048 symbol count cap, 2 MiB symbols result budget cap
+                auto sym_opts = SymbolsOptions(
+                    file_path = self.target_path.clone(),
+                    kinds = Option<Vec<string>>::None,
+                    max_input_bytes = Option<usize>::Some(4194304:usize),
+                    max_symbols = Option<usize>::Some(2048:usize),
+                    max_result_bytes = Option<usize>::Some(2097152:usize),
+                    json_output = false
+                )
+                auto sym_res = outline_symbols_file(sym_opts)
+                if sym_res.is_ok() {
+                    auto sr = sym_res.unwrap()
+                    self.symbols = cede sr.symbols
+                }
+            }
+        }
+
+        auto best_idx# = Option<usize>::None
+        auto best_start# = 0:usize
+        auto best_span# = 999999999:usize
+
+        auto i# = 0:usize
+        loop i < self.symbols.len() {
+            auto &sym = self.symbols.borrow(i)
+            if sym.range_start <= line_num {
+                auto encloses# = false
+                auto span# = 999999999:usize
+                match sym.range_end {
+                    auto Option<usize>::Some(re) => {
+                        if re >= line_num {
+                            encloses = true
+                            span = re - sym.range_start
+                        }
+                    }
+                    auto Option<usize>::None => {
+                        encloses = true
+                    }
+                }
+
+                if encloses {
+                    if best_idx.is_none() || sym.range_start > best_start || (sym.range_start == best_start && span < best_span) {
+                        best_idx = Option<usize>::Some(i)
+                        best_start = sym.range_start
+                        best_span = span
+                    }
+                }
+            }
+            i = i + 1
+        }
+
+        match best_idx {
+            auto Option<usize>::Some(b_idx) => {
+                auto &sym = self.symbols.borrow(b_idx)
+                auto is_whitelisted = sym.range_end.is_some() &&
+                    (sym.range_reliability.as_str() == "observed_close" ||
+                     sym.range_reliability.as_str() == "single_line" ||
+                     sym.range_reliability.as_str() == "valid_indent_eof")
+
+                auto rel# = string::from("heuristic")
+                if is_whitelisted {
+                    rel = string::from("confirmed")
+                }
+
+                self.has_resolved = true
+                self.res_name = sym.name.clone()
+                if sym.detail.len() > 0 {
+                    self.res_signature = sym.detail.clone()
+                } else {
+                    self.res_signature = sym.name.clone()
+                }
+                self.res_kind = sym.kind.clone()
+                self.res_range_start = sym.range_start
+                match sym.range_end {
+                    auto Option<usize>::Some(re) => {
+                        self.res_range_end = re
+                        self.res_has_range_end = true
+                    }
+                    _ => {
+                        self.res_range_end = 0
+                        self.res_has_range_end = false
+                    }
+                }
+                self.res_reliability = cede rel
+                return true
+            }
+            _ => {
+                self.has_resolved = false
+                return false
+            }
+        }
+    }
 }
 
 fn flush_block_window(
@@ -165,7 +306,8 @@ fn process_logical_line(
     file_matched_lines_emitted#: usize,
     file_has_emitted_match#: bool,
     file_match_observed#: bool,
-    scope_name: str
+    scope_name: str,
+    scope_resolver#: FileScopeResolver
 ) -> LineProcessOutcome {
     if line_matches {
         auto is_first_for_file = !file_has_emitted_match
@@ -214,8 +356,37 @@ fn process_logical_line(
                 }
                 auto submatch_count = submatches.len()
                 auto sc_opt# = Option<string>::None
-                if scope_name.len() > 0 {
+                auto sc_ident# = string::new()
+                auto has_sc_meta# = false
+                auto sc_kind# = string::new()
+                auto sc_start# = 0:usize
+                auto sc_end# = 0:usize
+                auto sc_has_end# = false
+                auto sc_rel# = string::new()
+
+                if opts.scope {
+                    if scope_resolver#.resolve_match(line.line_number) {
+                        if scope_name.len() > 0 {
+                            sc_opt = Option<string>::Some(string::from(scope_name))
+                        } else if scope_resolver.res_signature.len() > 0 {
+                            sc_opt = Option<string>::Some(scope_resolver.res_signature.clone())
+                        } else {
+                            sc_opt = Option<string>::Some(scope_resolver.res_name.clone())
+                        }
+                        sc_ident = scope_resolver.res_name.clone()
+                        has_sc_meta = true
+                        sc_kind = scope_resolver.res_kind.clone()
+                        sc_start = scope_resolver.res_range_start
+                        sc_end = scope_resolver.res_range_end
+                        sc_has_end = scope_resolver.res_has_range_end
+                        sc_rel = scope_resolver.res_reliability.clone()
+                    } else if scope_name.len() > 0 {
+                        sc_opt = Option<string>::Some(string::from(scope_name))
+                        sc_ident = string::from(scope_name)
+                    }
+                } else if scope_name.len() > 0 {
                     sc_opt = Option<string>::Some(string::from(scope_name))
+                    sc_ident = string::from(scope_name)
                 }
 
                 auto snip_proj_opt# = Option<SnippetProjection>::None
@@ -232,6 +403,13 @@ fn process_logical_line(
                     text = line.text.clone(),
                     submatches = cede submatches,
                     scope = cede sc_opt,
+                    scope_name = cede sc_ident,
+                    has_scope_meta = has_sc_meta,
+                    scope_kind = cede sc_kind,
+                    scope_start = sc_start,
+                    scope_end = sc_end,
+                    scope_has_end = sc_has_end,
+                    scope_reliability = cede sc_rel,
                     block_truncated = false,
                     block_range = Option<BlockRange>::None,
                     snippet = cede snip_proj_opt
@@ -401,6 +579,13 @@ fn process_logical_line(
                     text = r_line.text.clone(),
                     submatches = Vec<SubMatch>::new(),
                     scope = Option<string>::None,
+                    scope_name = string::new(),
+                    has_scope_meta = false,
+                    scope_kind = string::new(),
+                    scope_start = 0,
+                    scope_end = 0,
+                    scope_has_end = false,
+                    scope_reliability = string::new(),
                     block_truncated = false,
                     block_range = Option<BlockRange>::None,
                     snippet = Option<SnippetProjection>::None
@@ -437,8 +622,37 @@ fn process_logical_line(
         }
         auto submatch_count = submatches.len()
         auto sc_opt# = Option<string>::None
-        if scope_name.len() > 0 {
+        auto sc_ident# = string::new()
+        auto has_sc_meta# = false
+        auto sc_kind# = string::new()
+        auto sc_start# = 0:usize
+        auto sc_end# = 0:usize
+        auto sc_has_end# = false
+        auto sc_rel# = string::new()
+
+        if opts.scope {
+            if scope_resolver#.resolve_match(line.line_number) {
+                if scope_name.len() > 0 {
+                    sc_opt = Option<string>::Some(string::from(scope_name))
+                } else if scope_resolver.res_signature.len() > 0 {
+                    sc_opt = Option<string>::Some(scope_resolver.res_signature.clone())
+                } else {
+                    sc_opt = Option<string>::Some(scope_resolver.res_name.clone())
+                }
+                sc_ident = scope_resolver.res_name.clone()
+                has_sc_meta = true
+                sc_kind = scope_resolver.res_kind.clone()
+                sc_start = scope_resolver.res_range_start
+                sc_end = scope_resolver.res_range_end
+                sc_has_end = scope_resolver.res_has_range_end
+                sc_rel = scope_resolver.res_reliability.clone()
+            } else if scope_name.len() > 0 {
+                sc_opt = Option<string>::Some(string::from(scope_name))
+                sc_ident = string::from(scope_name)
+            }
+        } else if scope_name.len() > 0 {
             sc_opt = Option<string>::Some(string::from(scope_name))
+            sc_ident = string::from(scope_name)
         }
 
         auto snip_proj_opt# = Option<SnippetProjection>::None
@@ -455,6 +669,13 @@ fn process_logical_line(
             text = line.text.clone(),
             submatches = cede submatches,
             scope = cede sc_opt,
+            scope_name = cede sc_ident,
+            has_scope_meta = has_sc_meta,
+            scope_kind = cede sc_kind,
+            scope_start = sc_start,
+            scope_end = sc_end,
+            scope_has_end = sc_has_end,
+            scope_reliability = cede sc_rel,
             block_truncated = false,
             block_range = Option<BlockRange>::None,
             snippet = cede snip_proj_opt
@@ -595,6 +816,13 @@ fn process_logical_line(
                     text = line.text.clone(),
                     submatches = Vec<SubMatch>::new(),
                     scope = Option<string>::None,
+                    scope_name = string::new(),
+                    has_scope_meta = false,
+                    scope_kind = string::new(),
+                    scope_start = 0,
+                    scope_end = 0,
+                    scope_has_end = false,
+                    scope_reliability = string::new(),
                     block_truncated = is_block_truncated,
                     block_range = Option<BlockRange>::None,
                     snippet = Option<SnippetProjection>::None
@@ -632,6 +860,13 @@ fn process_logical_line(
                 text = line.text.clone(),
                 submatches = Vec<SubMatch>::new(),
                 scope = Option<string>::None,
+                scope_name = string::new(),
+                has_scope_meta = false,
+                scope_kind = string::new(),
+                scope_start = 0,
+                scope_end = 0,
+                scope_has_end = false,
+                scope_reliability = string::new(),
                 block_truncated = false,
                 block_range = Option<BlockRange>::None,
                 snippet = Option<SnippetProjection>::None
@@ -732,6 +967,7 @@ fn scan_and_process_line(
     line_indent: usize,
     lex: LineLexicalInfo,
     scope_tracker: ScopeTracker,
+    scope_resolver#: FileScopeResolver,
     pass_mode: ScanPass,
     matches_count#: usize,
     has_match#: bool,
@@ -884,7 +1120,8 @@ fn scan_and_process_line(
             file_matched_lines_emitted#,
             file_has_emitted_match#,
             file_match_observed#,
-            cur_scope.as_str()
+            cur_scope.as_str(),
+            scope_resolver#
         )
     }
 
@@ -1080,6 +1317,8 @@ pub fn scan_file_stream_with_pass(
         }
         auto context_state# = make_context_state(before_cap, family)
         auto scope_tracker# = ScopeTracker::new()
+        auto scope_enabled = opts.scope && !opts.quiet && !opts.files_with_matches && !opts.count
+        auto scope_resolver# = FileScopeResolver::new(target_path.clone(), scope_enabled)
         auto cur_depths# = DelimiterDepths::new()
         auto line_num# = 1:usize
         auto abs_offset# = 0:usize
@@ -1148,7 +1387,7 @@ pub fn scan_file_stream_with_pass(
                         outcome = scan_and_process_line(
                             plan, opts, context_state#, resolved_path, multiple_files,
                             line_text, line_num, abs_offset, delim_len,
-                            line_indent, lex, scope_tracker, pass_mode,
+                            line_indent, lex, scope_tracker, scope_resolver#, pass_mode,
                             matches_count#, has_match#, max_count_reached#,
                             writer#, budget_state#, frame_state#,
                             file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
@@ -1173,7 +1412,7 @@ pub fn scan_file_stream_with_pass(
                             outcome = scan_and_process_line(
                                 plan, opts, context_state#, resolved_path, multiple_files,
                                 line_text, line_num, abs_offset, delim_len,
-                                line_indent, lex, scope_tracker, pass_mode,
+                                line_indent, lex, scope_tracker, scope_resolver#, pass_mode,
                                 matches_count#, has_match#, max_count_reached#,
                                 writer#, budget_state#, frame_state#,
                                 file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#
@@ -1239,7 +1478,7 @@ pub fn scan_file_stream_with_pass(
                     outcome = scan_and_process_line(
                         plan, opts, context_state#, resolved_path, multiple_files,
                         line_text, line_num, abs_offset, delim_len,
-                        line_indent, lex, scope_tracker, pass_mode,
+                        line_indent, lex, scope_tracker, scope_resolver#, pass_mode,
                         matches_count#, has_match#, max_count_reached#,
                         writer#, budget_state#, frame_state#,
                         file_matched_lines_emitted#, file_has_emitted_match#, file_match_observed#

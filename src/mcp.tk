@@ -1667,6 +1667,7 @@ pub fn run_mcp_server() -> i32 {
                                                         auto sym_opts = SymbolsOptions(
                                                             file_path = cede target_path,
                                                             kinds = cede kinds_opt,
+                                                            max_input_bytes = Option<usize>::None,
                                                             max_symbols = max_symbols_opt,
                                                             max_result_bytes = max_bytes_opt,
                                                             json_output = format_is_json

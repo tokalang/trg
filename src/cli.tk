@@ -72,7 +72,7 @@ pub fn print_help() {
     println("      --block                Expand context to enclose syntactic code block (alias: --context-block)")
     println("      --context-block        Expand context to enclose syntactic code block")
     println("      --max-block-lines <NUM> Maximum lines for syntactic block context (default: 80)")
-    println("      --scope                Show enclosing symbol scope (human: [scope], JSON: scope field)")
+    println("      --scope                Show enclosing symbol scope and boundary (e.g. [name start-end; confirmed])")
     println("      --group-by-scope       Group matches by enclosing scope hierarchy")
     println("      --symbol-variants      Expand search pattern to naming variants (snake, camel, pascal, etc.)")
     println("      --snippet              KWIC centered snippet view around matches (alias: --kwic)")
