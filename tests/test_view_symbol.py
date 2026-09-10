@@ -192,6 +192,12 @@ def test_cli_mutual_exclusion_and_validation():
             ([TRG_BIN, "view", path_str, "--symbol", ""], "Invalid symbol name"),
             ([TRG_BIN, "view", path_str, "--symbol", "::foo"], "empty scope or symbol name"),
             ([TRG_BIN, "view", path_str, "--symbol", "foo::"], "empty scope or symbol name"),
+            # Regression tests: bare --scope, option-following --scope, and empty --scope=
+            ([TRG_BIN, "view", path_str, "--scope"], "view --scope requires a symbol scope name; use --block to expand the enclosing block"),
+            ([TRG_BIN, "view", f"{path_str}:1", "--scope"], "view --scope requires a symbol scope name; use --block to expand the enclosing block"),
+            ([TRG_BIN, "view", path_str, "--scope", "--lines", "1-2"], "view --scope requires a symbol scope name; use --block to expand the enclosing block"),
+            ([TRG_BIN, "view", f"{path_str}:1", "--scope", "--block"], "view --scope requires a symbol scope name; use --block to expand the enclosing block"),
+            ([TRG_BIN, "view", path_str, "--symbol", "test", "--scope="], "Invalid scope name: cannot be empty"),
         ]
 
         for cmd, err_substr in bad_cases:
@@ -199,6 +205,16 @@ def test_cli_mutual_exclusion_and_validation():
             assert r.returncode == 2, f"Expected exit code 2 for {cmd}, got {r.returncode}"
             assert r.stdout == "", f"Expected empty stdout for {cmd}"
             assert err_substr.lower() in r.stderr.lower(), f"Expected '{err_substr}' in {r.stderr} for {cmd}"
+
+
+def test_search_scope_unaffected():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        f = tmp / "sample.py"
+        f.write_text("def my_func():\n    return 42\n")
+        r = subprocess.run([TRG_BIN, "return", str(f), "--scope"], capture_output=True, text=True)
+        assert r.returncode == 0, f"Expected 0, got {r.returncode}: {r.stderr}"
+        assert "my_func" in r.stdout
 
 
 def test_semantic_range_reliability():
@@ -578,6 +594,7 @@ def main():
     test_cli_io_error()
     test_cli_candidate_truncation()
     test_cli_mutual_exclusion_and_validation()
+    test_search_scope_unaffected()
     test_semantic_range_reliability()
     test_budget_and_truncation()
     test_single_read_memory_ceiling()
