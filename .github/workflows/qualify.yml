@@ -193,7 +193,7 @@ jobs:
           clang -c build_win/toka_rt.c -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
           clang build_win/trg_x64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o trg.exe -lbcrypt -lws2_32 -lshell32
-          ./trg.exe -V | grep -F "0.19.0"
+          ./trg.exe -V | grep -F "0.19.1"
           clang build_win/trg_win_compat.c build_win/test_c_bridge_write.c \
             -o test_c_write_x64.exe -lkernel32 -lmsvcrt -O2
 
@@ -291,7 +291,7 @@ jobs:
           clang -c build_win/toka_rt.c -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
           clang build_win/trg_arm64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o trg.exe -lbcrypt -lws2_32 -lshell32
-          ./trg.exe -V | grep -F "0.19.0"
+          ./trg.exe -V | grep -F "0.19.1"
           clang build_win/trg_win_compat.c build_win/test_c_bridge_write.c \
             -o test_c_write_arm64.exe -lkernel32 -lmsvcrt -O2
 
