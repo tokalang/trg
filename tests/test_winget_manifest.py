@@ -24,7 +24,7 @@ class TestWinGetManifestGeneration(unittest.TestCase):
         self.x64_sha = hashlib.sha256(b"fake-x64-zip").hexdigest().upper()
         self.arm64_sha = hashlib.sha256(b"fake-arm64-zip").hexdigest().upper()
 
-    def run_generator(self, version="0.18.0", tag="v0.18.0"):
+    def run_generator(self, version="0.19.0", tag="v0.19.0"):
         cmd = [
             sys.executable,
             str(GENERATOR),
@@ -37,10 +37,10 @@ class TestWinGetManifestGeneration(unittest.TestCase):
         return subprocess.run(cmd, capture_output=True, text=True)
 
     def test_winget_manifest_structure_and_values(self):
-        r = self.run_generator(version="0.18.0", tag="v0.18.0")
+        r = self.run_generator(version="0.19.0", tag="v0.19.0")
         self.assertEqual(r.returncode, 0, f"Generator failed: {r.stderr}")
 
-        pkg_dir = self.out_dir / "manifests" / "t" / "Tokalang" / "trg" / "0.18.0"
+        pkg_dir = self.out_dir / "manifests" / "t" / "Tokalang" / "trg" / "0.19.0"
         self.assertTrue(pkg_dir.exists(), f"Package directory not created: {pkg_dir}")
 
         ver_file = pkg_dir / "Tokalang.trg.yaml"
@@ -54,7 +54,7 @@ class TestWinGetManifestGeneration(unittest.TestCase):
         # 1. Validate version manifest
         ver_text = ver_file.read_text(encoding="utf-8")
         self.assertIn("PackageIdentifier: Tokalang.trg", ver_text)
-        self.assertIn("PackageVersion: 0.18.0", ver_text)
+        self.assertIn("PackageVersion: 0.19.0", ver_text)
         self.assertIn("ManifestType: version", ver_text)
         self.assertIn("ManifestVersion: 1.9.0", ver_text)
 
@@ -78,14 +78,14 @@ class TestWinGetManifestGeneration(unittest.TestCase):
         self.assertIn("Architecture: arm64", inst_text)
         self.assertIn(f"InstallerSha256: {self.x64_sha}", inst_text)
         self.assertIn(f"InstallerSha256: {self.arm64_sha}", inst_text)
-        self.assertIn("trg-v0.18.0-windows-x64\\trg.exe", inst_text)
-        self.assertIn("trg-v0.18.0-windows-arm64\\trg.exe", inst_text)
+        self.assertIn("trg-v0.19.0-windows-x64\\trg.exe", inst_text)
+        self.assertIn("trg-v0.19.0-windows-arm64\\trg.exe", inst_text)
 
     def test_missing_sha_fails(self):
         cmd = [
             sys.executable,
             str(GENERATOR),
-            "--version", "0.18.0",
+            "--version", "0.19.0",
             "--output-dir", str(self.out_dir)
         ]
         r = subprocess.run(cmd, capture_output=True, text=True)

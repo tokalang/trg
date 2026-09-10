@@ -8,7 +8,7 @@
 
 [CmdletBinding()]
 param (
-    [string]$Version = "v0.18.0",
+    [string]$Version = "v0.19.0",
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\trg",
     [switch]$NoModifyPath,
     [switch]$Help
@@ -24,7 +24,7 @@ Usage:
     install.ps1 [OPTIONS]
 
 Options:
-    -Version <str>      Release version tag to install (default: v0.18.0)
+    -Version <str>      Release version tag to install (default: v0.19.0)
     -InstallDir <str>   Directory to install trg.exe into (default: %LOCALAPPDATA%\Programs\trg)
     -NoModifyPath       Do not append InstallDir to user PATH environment variable
     -Help               Show this help message
@@ -34,7 +34,7 @@ Options:
 
 # 1. Validate version format
 if ($Version -notmatch '^v\d+\.\d+\.\d+') {
-    Write-Error "Invalid version '$Version'. Expected format like 'v0.18.0'."
+    Write-Error "Invalid version '$Version'. Expected format like 'v0.19.0'."
     exit 1
 }
 
