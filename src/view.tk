@@ -4,7 +4,7 @@ import core/str::{str}
 import std/vec::{Vec}
 import std/io::{println}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
-import src/posix::{posix_ferror, print_err, posix_write_stdout}
+import src/posix::{posix_ferror, print_err, posix_write_stdout, posix_write_stderr}
 import src/types::{BlockRange, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo}
 import src/syntax::{
     detect_syntax_family,
@@ -24,7 +24,66 @@ import src/symbols::{outline_symbols_lines, SymbolRecord}
 import src/printer::{u64_to_string, json_escape}
 import src/parse::{parse_size_bytes_strict}
 import std/env as env
-import src/path_norm::{normalize_cwd, compute_identity_key}
+import src/path_norm::{normalize_cwd, compute_identity_key, resolves_to_root}
+import stdx/serde/json::{JsonNode}
+import stdx/crypto/sha256::{Sha256}
+import stdx/encoding/base64
+
+pub shape FileCapture (
+    lines: Vec<string>,
+    sha256_hex: string,
+    size_exceeded: bool,
+    read_err: bool,
+    open_err: bool
+)
+
+pub shape ContinuationToken (
+    version: usize,
+    path: string,
+    req_start: usize,
+    req_end: usize,
+    next_line: usize,
+    end_line: usize,
+    sha256_hex: string,
+    mode: string,
+    symbol: Option<string>,
+    scope: Option<string>,
+    range_status: string,
+    max_columns: Option<usize>
+)
+
+impl ContinuationToken {
+    pub fn clone(self) -> ContinuationToken {
+        auto sym_clone# = Option<string>::None
+        match self.symbol {
+            auto Option<string>::Some(&s) => {
+                sym_clone = Option<string>::Some(string::from(s.as_str()))
+            }
+            auto Option<string>::None => {}
+        }
+        auto sc_clone# = Option<string>::None
+        match self.scope {
+            auto Option<string>::Some(&sc) => {
+                sc_clone = Option<string>::Some(string::from(sc.as_str()))
+            }
+            auto Option<string>::None => {}
+        }
+        return ContinuationToken(
+            version = self.version,
+            path = string::from(self.path.as_str()),
+            req_start = self.req_start,
+            req_end = self.req_end,
+            next_line = self.next_line,
+            end_line = self.end_line,
+            sha256_hex = string::from(self.sha256_hex.as_str()),
+            mode = string::from(self.mode.as_str()),
+            symbol = cede sym_clone,
+            scope = cede sc_clone,
+            range_status = string::from(self.range_status.as_str()),
+            max_columns = self.max_columns
+        )
+    }
+}
 
 pub shape ViewLineRecord (
     line_number: usize,
@@ -95,7 +154,9 @@ pub shape ViewOptions (
     max_lines: Option<usize>,
     max_result_bytes: Option<usize>,
     max_columns: Option<usize>,
-    max_block_lines: usize
+    max_block_lines: usize,
+    continuation: bool,
+    continuation_token: Option<string>
 )
 
 pub shape ViewResult (
@@ -120,7 +181,8 @@ pub shape ViewResult (
     output_status: string,
     target_symbol: Vec<SymbolTargetInfo>,
     candidates: Vec<SymbolCandidateInfo>,
-    candidates_truncated: bool
+    candidates_truncated: bool,
+    continuation_token: Option<string>
 )
 
 pub fn format_view_line_record_json(line_number: usize, kind: str, text: str) -> string {
@@ -244,6 +306,17 @@ impl ViewResult {
             r_i = r_i + 1:usize
         }
         resp#.push_str("]")
+        resp#.push_str(",\"continuation_token\":")
+        match self.continuation_token {
+            auto Option<string>::Some(&tok) => {
+                resp#.push_str("\"")
+                resp#.push_str(json_escape(tok.as_str()).as_str())
+                resp#.push_str("\"")
+            }
+            auto Option<string>::None => {
+                resp#.push_str("null")
+            }
+        }
         if self.mode == "symbol" {
             auto sym_suffix = self.format_symbol_suffix_str(self.truncated)
             resp#.push_str(sym_suffix.as_str())
@@ -459,11 +532,19 @@ impl ViewResult {
         auto l_bytes_emitted = u64_to_string(limit as u64).len()
         auto s_records_open = ",\"records\":["
         auto l_records_open = s_records_open.len
-        auto s_records_close = "]}"
-        auto l_records_close# = s_records_close.len
+        auto s_tok_tag = ",\"continuation_token\":"
+        auto l_tok_tag = s_tok_tag.len
+        auto l_tok# = 4:usize // "null"
+        match self.continuation_token {
+            auto Option<string>::Some(&tok) => {
+                l_tok = 2:usize + json_escape(tok.as_str()).len()
+            }
+            auto Option<string>::None => {}
+        }
+        auto l_records_close# = 1:usize + l_tok_tag + l_tok + 1:usize
         if self.mode == "symbol" {
             auto sym_suffix = self.format_symbol_suffix_str(is_pruned)
-            l_records_close = 2:usize + sym_suffix.len()
+            l_records_close = 1:usize + l_tok_tag + l_tok + sym_suffix.len() + 1:usize
         }
 
         return l_schema + l_mode + l_path_tag + l_path + l_req_line_tag + l_req_line +
@@ -614,7 +695,8 @@ impl ViewResult {
                 output_status = string::from("budget_truncated"),
                 target_symbol = cede target_sym_clone,
                 candidates = Vec<SymbolCandidateInfo>::new(),
-                candidates_truncated = false
+                candidates_truncated = false,
+                continuation_token = Option<string>::None
             )
             auto to_conv = target_only_vr#.converge_structured()
             if to_conv.is_err() {
@@ -685,7 +767,7 @@ impl ViewResult {
                 if cand_total <= limit {
                     break
                 }
-                if w_end > 0:usize {
+                if w_end > w_start {
                     cur_recs_len = cur_recs_len - rec_lens.get(w_end)
                     w_end = w_end - 1:usize
                 } else {
@@ -729,8 +811,29 @@ impl ViewResult {
                 start = self.records.borrow(0).line_number,
                 end = self.records.borrow(self.records.len() - 1:usize).line_number
             ))
+            match self.continuation_token {
+                auto Option<string>::Some(&old_tok_str) => {
+                    auto dec_res = decode_continuation_token(old_tok_str.as_str())
+                    if dec_res.is_ok() {
+                        auto old_tok = dec_res.unwrap()
+                        auto new_end = self.records.borrow(self.records.len() - 1:usize).line_number
+                        if new_end < old_tok.end_line {
+                            auto updated_tok# = old_tok.clone()
+                            updated_tok.next_line = new_end + 1:usize
+                            self.continuation_token = Option<string>::Some(encode_continuation_token(updated_tok))
+                        } else {
+                            self.continuation_token = Option<string>::None
+                        }
+                    }
+                }
+                auto Option<string>::None => {}
+            }
         } else {
             self.emitted_range = Option<BlockRange>::None
+            if self.continuation_token.is_some() {
+                auto err = string::from("target_exceeds_max_result_bytes: Budget too small to emit even a single line with continuation token")
+                return Result<string, string>::Err(cede err)
+            }
         }
 
         // 5. Converge byte count and final assertion
@@ -760,7 +863,560 @@ impl ViewOptions {
             max_lines = Option<usize>::None,
             max_result_bytes = Option<usize>::None,
             max_columns = Option<usize>::None,
-            max_block_lines = 80:usize
+            max_block_lines = 80:usize,
+            continuation = false,
+            continuation_token = Option<string>::None
+        )
+    }
+}
+
+pub fn encode_continuation_token(token: ContinuationToken) -> string {
+    auto json# = string::from("{\"version\":1,\"path\":\"")
+    json#.push_str(json_escape(token.path.as_str()).as_str())
+    json#.push_str("\",\"req_start\":")
+    json#.push_str(u64_to_string(token.req_start as u64).as_str())
+    json#.push_str(",\"req_end\":")
+    json#.push_str(u64_to_string(token.req_end as u64).as_str())
+    json#.push_str(",\"next_line\":")
+    json#.push_str(u64_to_string(token.next_line as u64).as_str())
+    json#.push_str(",\"end_line\":")
+    json#.push_str(u64_to_string(token.end_line as u64).as_str())
+    json#.push_str(",\"sha256\":\"")
+    json#.push_str(token.sha256_hex.as_str())
+    json#.push_str("\",\"mode\":\"")
+    json#.push_str(token.mode.as_str())
+    json#.push_str("\"")
+
+    match token.symbol {
+        auto Option<string>::Some(&s) => {
+            json#.push_str(",\"symbol\":\"")
+            json#.push_str(json_escape(s.as_str()).as_str())
+            json#.push_str("\"")
+        }
+        auto Option<string>::None => {}
+    }
+
+    match token.scope {
+        auto Option<string>::Some(&sc) => {
+            json#.push_str(",\"scope\":\"")
+            json#.push_str(json_escape(sc.as_str()).as_str())
+            json#.push_str("\"")
+        }
+        auto Option<string>::None => {}
+    }
+
+    json#.push_str(",\"range_status\":\"")
+    json#.push_str(token.range_status.as_str())
+    json#.push_str("\"")
+
+    match token.max_columns {
+        auto Option<usize>::Some(mc) => {
+            json#.push_str(",\"max_columns\":")
+            json#.push_str(u64_to_string(mc as u64).as_str())
+        }
+        auto Option<usize>::None => {}
+    }
+
+    json#.push_str("}")
+
+    auto b64 = encode_url_safe_b64(json.as_str())
+    auto out# = string::from("trg-cont-v1.")
+    out#.push_str(b64.as_str())
+    return cede out
+}
+
+fn base64_url_char(val: u8) -> u8 {
+    if val < 26:u8 { return ('A' as u8) + val }
+    if val < 52:u8 { return ('a' as u8) + (val - 26:u8) }
+    if val < 62:u8 { return ('0' as u8) + (val - 52:u8) }
+    if val == 62:u8 { return ('-' as u8) }
+    return ('_' as u8)
+}
+
+fn encode_url_safe_b64(input: str) -> string {
+    auto encoded# = string::new()
+    auto index# = 0:usize
+    loop index < input.len {
+        auto remaining = input.len - index
+        auto first = input.byte_at(index) as u32
+        auto second# = 0:u32
+        auto third# = 0:u32
+        if remaining > 1:usize { second = input.byte_at(index + 1:usize) as u32 }
+        if remaining > 2:usize { third = input.byte_at(index + 2:usize) as u32 }
+        auto triple = (first << 16:u32) | (second << 8:u32) | third
+        encoded#.push_byte_raw(base64_url_char(((triple >> 18:u32) & 63:u32) as u8))
+        encoded#.push_byte_raw(base64_url_char(((triple >> 12:u32) & 63:u32) as u8))
+        if remaining > 1:usize {
+            encoded#.push_byte_raw(base64_url_char(((triple >> 6:u32) & 63:u32) as u8))
+        }
+        if remaining > 2:usize {
+            encoded#.push_byte_raw(base64_url_char((triple & 63:u32) as u8))
+        }
+        index = index + 3:usize
+    }
+    return cede encoded
+}
+
+fn is_hex_char(c: char) -> bool {
+    if c >= ('0' as char) && c <= ('9' as char) {
+        return true
+    }
+    if c >= ('a' as char) && c <= ('f' as char) {
+        return true
+    }
+    if c >= ('A' as char) && c <= ('F' as char) {
+        return true
+    }
+    return false
+}
+
+pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, string> {
+    if token_str.len > 4096:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: token exceeds maximum length limit (4096 bytes)"))
+    }
+    if !token_str.starts_with("trg-cont-v1.") {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: unrecognized format or version prefix"))
+    }
+    auto payload_view = token_str.substr(12:usize, token_str.len - 12:usize)
+    if payload_view.len == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: empty payload"))
+    }
+
+    // Convert URL-safe base64 characters to standard base64 and pad
+    auto std_b64# = string::new()
+    auto pi# = 0:usize
+    loop pi < payload_view.len {
+        auto c = payload_view.byte_at(pi)
+        if c == ('-' as char) {
+            std_b64#.push_byte_raw('+' as u8)
+        } else if c == ('_' as char) {
+            std_b64#.push_byte_raw('/' as u8)
+        } else {
+            std_b64#.push_byte_raw(c as u8)
+        }
+        pi = pi + 1:usize
+    }
+    loop std_b64.len() % 4:usize != 0:usize {
+        std_b64#.push_byte_raw('=' as u8)
+    }
+
+    auto decode_res = base64::decode(std_b64.as_str())
+    if decode_res.is_err() {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: malformed base64 payload"))
+    }
+    auto bytes_vec = decode_res.unwrap()
+
+    auto json_raw# = string::new()
+    auto bi# = 0:usize
+    loop bi < bytes_vec.len() {
+        json_raw#.push_byte_raw(bytes_vec.get(bi))
+        bi = bi + 1:usize
+    }
+
+    auto root# = JsonNode::NullNode(0):JsonNode
+    auto parse_res = root#.parse_json(json_raw.as_str().trim())
+    if parse_res.is_err() {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: malformed JSON payload"))
+    }
+
+    match root {
+        auto JsonNode::ObjectNode(&map) => {
+            // Check version
+            auto v_opt# = map.try_borrow(string::from("version"))
+            if v_opt.is_none() {
+                v_opt = map.try_borrow(string::from("v"))
+            }
+            match v_opt {
+                auto Option<&JsonNode>::Some(&v_node) => {
+                    match v_node {
+                        auto JsonNode::NumNode(n) => {
+                            if n != 1.0 {
+                                return Result<ContinuationToken, string>::Err(string::from("Unsupported continuation token version"))
+                            }
+                        }
+                        _ => {
+                            return Result<ContinuationToken, string>::Err(string::from("Invalid version in continuation token"))
+                        }
+                    }
+                }
+                auto Option<&JsonNode>::None => {
+                    return Result<ContinuationToken, string>::Err(string::from("Missing version in continuation token"))
+                }
+            }
+
+            // Path
+            auto path_val# = string::new()
+            auto p_opt# = map.try_borrow(string::from("path"))
+            if p_opt.is_none() {
+                p_opt = map.try_borrow(string::from("p"))
+            }
+            match p_opt {
+                auto Option<&JsonNode>::Some(&p_node) => {
+                    match p_node {
+                        auto JsonNode::StrNode(&s) => {
+                            if s.len() == 0:usize {
+                                return Result<ContinuationToken, string>::Err(string::from("Empty path in continuation token"))
+                            }
+                            auto s_view = s.as_str()
+                            auto is_abs# = s_view.starts_with("/")
+                            if !is_abs && s_view.len >= 3:usize && s_view.byte_at(1) == (':' as char) && (s_view.byte_at(2) == ('/' as char) || s_view.byte_at(2) == ('\\' as char)) {
+                                is_abs = true
+                            }
+                            if !is_abs {
+                                return Result<ContinuationToken, string>::Err(string::from("Continuation token path must be absolute"))
+                            }
+                            if resolves_to_root("/", s_view) {
+                                return Result<ContinuationToken, string>::Err(string::from("Continuation token path cannot be filesystem root"))
+                            }
+                            path_val = s.clone()
+                        }
+                        _ => {
+                            return Result<ContinuationToken, string>::Err(string::from("Invalid path in continuation token"))
+                        }
+                    }
+                }
+                auto Option<&JsonNode>::None => {
+                    return Result<ContinuationToken, string>::Err(string::from("Missing path in continuation token"))
+                }
+            }
+
+            // req_start
+            auto rs_val# = 0:usize
+            auto rs_opt# = map.try_borrow(string::from("req_start"))
+            if rs_opt.is_none() {
+                rs_opt = map.try_borrow(string::from("rs"))
+            }
+            match rs_opt {
+                auto Option<&JsonNode>::Some(&n_node) => {
+                    match n_node {
+                        auto JsonNode::NumNode(n) => {
+                            if n >= 1.0 { rs_val = n as usize }
+                            else { return Result<ContinuationToken, string>::Err(string::from("Invalid req_start in continuation token")) }
+                        }
+                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid req_start in continuation token")) }
+                    }
+                }
+                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing req_start in continuation token")) }
+            }
+
+            // req_end
+            auto re_val# = 0:usize
+            auto re_opt# = map.try_borrow(string::from("req_end"))
+            if re_opt.is_none() {
+                re_opt = map.try_borrow(string::from("re"))
+            }
+            match re_opt {
+                auto Option<&JsonNode>::Some(&n_node) => {
+                    match n_node {
+                        auto JsonNode::NumNode(n) => {
+                            if n >= 1.0 { re_val = n as usize }
+                            else { return Result<ContinuationToken, string>::Err(string::from("Invalid req_end in continuation token")) }
+                        }
+                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid req_end in continuation token")) }
+                    }
+                }
+                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing req_end in continuation token")) }
+            }
+            if re_val < rs_val {
+                return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: req_end < req_start"))
+            }
+
+            // next_line
+            auto nl_val# = 0:usize
+            auto nl_opt# = map.try_borrow(string::from("next_line"))
+            if nl_opt.is_none() {
+                nl_opt = map.try_borrow(string::from("nl"))
+            }
+            match nl_opt {
+                auto Option<&JsonNode>::Some(&n_node) => {
+                    match n_node {
+                        auto JsonNode::NumNode(n) => {
+                            if n >= 1.0 { nl_val = n as usize }
+                            else { return Result<ContinuationToken, string>::Err(string::from("Invalid next_line in continuation token")) }
+                        }
+                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid next_line in continuation token")) }
+                    }
+                }
+                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing next_line in continuation token")) }
+            }
+
+            // end_line
+            auto el_val# = 0:usize
+            auto el_opt# = map.try_borrow(string::from("end_line"))
+            if el_opt.is_none() {
+                el_opt = map.try_borrow(string::from("el"))
+            }
+            match el_opt {
+                auto Option<&JsonNode>::Some(&n_node) => {
+                    match n_node {
+                        auto JsonNode::NumNode(n) => {
+                            if n >= 1.0 { el_val = n as usize }
+                            else { return Result<ContinuationToken, string>::Err(string::from("Invalid end_line in continuation token")) }
+                        }
+                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid end_line in continuation token")) }
+                    }
+                }
+                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing end_line in continuation token")) }
+            }
+            if el_val < nl_val {
+                return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: end_line < next_line"))
+            }
+
+            // sha256 hex
+            auto h_val# = string::new()
+            auto h_opt# = map.try_borrow(string::from("sha256"))
+            if h_opt.is_none() {
+                h_opt = map.try_borrow(string::from("h"))
+            }
+            match h_opt {
+                auto Option<&JsonNode>::Some(&h_node) => {
+                    match h_node {
+                        auto JsonNode::StrNode(&s) => {
+                            if s.len() != 64:usize {
+                                return Result<ContinuationToken, string>::Err(string::from("Invalid sha256 length in continuation token"))
+                            }
+                            auto hi# = 0:usize
+                            loop hi < 64:usize {
+                                auto c = s.as_str().byte_at(hi)
+                                if !is_hex_char(c) {
+                                    return Result<ContinuationToken, string>::Err(string::from("Invalid hex character in sha256"))
+                                }
+                                hi = hi + 1:usize
+                            }
+                            h_val = s.clone()
+                        }
+                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid sha256 in continuation token")) }
+                    }
+                }
+                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing sha256 in continuation token")) }
+            }
+
+            // mode
+            auto m_val# = string::new()
+            auto m_opt# = map.try_borrow(string::from("mode"))
+            if m_opt.is_none() {
+                m_opt = map.try_borrow(string::from("m"))
+            }
+            match m_opt {
+                auto Option<&JsonNode>::Some(&m_node) => {
+                    match m_node {
+                        auto JsonNode::StrNode(&s) => {
+                            if s.as_str() != "symbol" && s.as_str() != "lines" && s.as_str() != "block" && s.as_str() != "point" && s.as_str() != "range" {
+                                return Result<ContinuationToken, string>::Err(string::from("Invalid mode in continuation token"))
+                            }
+                            m_val = s.clone()
+                        }
+                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid mode in continuation token")) }
+                    }
+                }
+                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing mode in continuation token")) }
+            }
+
+            // range_status
+            auto st_val# = string::from("confirmed")
+            auto st_opt# = map.try_borrow(string::from("range_status"))
+            if st_opt.is_none() {
+                st_opt = map.try_borrow(string::from("st"))
+            }
+            match st_opt {
+                auto Option<&JsonNode>::Some(&st_node) => {
+                    match st_node {
+                        auto JsonNode::StrNode(&s) => {
+                            if s.as_str() != "confirmed" && s.as_str() != "unknown" {
+                                return Result<ContinuationToken, string>::Err(string::from("Invalid range_status in continuation token"))
+                            }
+                            st_val = s.clone()
+                        }
+                        _ => {}
+                    }
+                }
+                auto Option<&JsonNode>::None => {}
+            }
+
+            // symbol
+            auto s_val# = Option<string>::None
+            auto s_opt# = map.try_borrow(string::from("symbol"))
+            if s_opt.is_none() {
+                s_opt = map.try_borrow(string::from("s"))
+            }
+            match s_opt {
+                auto Option<&JsonNode>::Some(&s_node) => {
+                    match s_node {
+                        auto JsonNode::StrNode(&s) => { s_val = Option<string>::Some(s.clone()) }
+                        _ => {}
+                    }
+                }
+                auto Option<&JsonNode>::None => {}
+            }
+
+            // scope
+            auto c_val# = Option<string>::None
+            auto c_opt# = map.try_borrow(string::from("scope"))
+            if c_opt.is_none() {
+                c_opt = map.try_borrow(string::from("c"))
+            }
+            match c_opt {
+                auto Option<&JsonNode>::Some(&c_node) => {
+                    match c_node {
+                        auto JsonNode::StrNode(&c) => { c_val = Option<string>::Some(c.clone()) }
+                        _ => {}
+                    }
+                }
+                auto Option<&JsonNode>::None => {}
+            }
+
+            // max_columns
+            auto mc_val# = Option<usize>::None
+            auto mc_opt# = map.try_borrow(string::from("max_columns"))
+            if mc_opt.is_none() {
+                mc_opt = map.try_borrow(string::from("mc"))
+            }
+            match mc_opt {
+                auto Option<&JsonNode>::Some(&mc_node) => {
+                    match mc_node {
+                        auto JsonNode::NumNode(n) => {
+                            if n >= 0.0 { mc_val = Option<usize>::Some(n as usize) }
+                        }
+                        _ => {}
+                    }
+                }
+                auto Option<&JsonNode>::None => {}
+            }
+
+            return Result<ContinuationToken, string>::Ok(ContinuationToken(
+                version = 1:usize,
+                path = cede path_val,
+                req_start = rs_val,
+                req_end = re_val,
+                next_line = nl_val,
+                end_line = el_val,
+                sha256_hex = cede h_val,
+                mode = cede m_val,
+                symbol = cede s_val,
+                scope = cede c_val,
+                range_status = cede st_val,
+                max_columns = mc_val
+            ))
+        }
+        _ => {
+            return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: expected JSON object"))
+        }
+    }
+}
+
+pub fn capture_file_bounded(path: str, max_bytes: usize) -> FileCapture {
+    auto path_str = string::from(path)
+    auto mode_buf# = [0:char; 4]
+    mode_buf[0] = 'r' as char
+    mode_buf[1] = 'b' as char
+    mode_buf[2] = 0 as char
+
+    auto lines# = Vec<string>::new()
+    auto read_err# = false
+    auto size_exceeded# = false
+    auto open_err# = false
+    auto bytes_read_accum# = 0:usize
+
+    unsafe {
+        auto *mode_ptr = &mode_buf[0] as *char
+        auto *path_c = path_str.c_str()
+        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
+        if *fp == null {
+            return FileCapture(
+                lines = cede lines,
+                sha256_hex = string::new(),
+                size_exceeded = false,
+                read_err = false,
+                open_err = true
+            )
+        }
+        auto *file = fp.unwrap()
+        auto nul *raw_buf = libc_malloc(65536:usize)
+        if *raw_buf == null {
+            libc_fclose(*file)
+            return FileCapture(
+                lines = cede lines,
+                sha256_hex = string::new(),
+                size_exceeded = false,
+                read_err = true,
+                open_err = false
+            )
+        }
+        auto *buf = raw_buf.unwrap()
+        auto line_buf# = string::new()
+        auto hasher# = Sha256::new()
+
+        loop true {
+            auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
+            if n == 0 {
+                if posix_ferror((*file) as Addr) {
+                    read_err = true
+                }
+                break
+            }
+
+            bytes_read_accum = bytes_read_accum + n
+            if bytes_read_accum > max_bytes {
+                size_exceeded = true
+                break
+            }
+
+            auto *c_ptr = ((*buf) as Addr) as *char
+            auto chunk_str = string::from_with_len(*c_ptr, n)
+            hasher#.update(chunk_str.as_str())
+
+            auto chunk_view = chunk_str.as_str()
+            auto cursor# = 0:usize
+
+            loop cursor < chunk_view.len {
+                auto rem = chunk_view.substr(cursor, chunk_view.len - cursor)
+                auto nl_opt = rem.index_of('\n' as char)
+                if nl_opt.is_none() {
+                    line_buf#.push_str(rem)
+                    break
+                }
+                auto nl_pos = nl_opt.unwrap()
+                auto chunk_slice = rem.substr(0, nl_pos)
+                line_buf#.push_str(chunk_slice)
+                {
+                    auto full_view = line_buf.as_str()
+                    auto pat_text# = full_view
+                    if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                        pat_text = full_view.substr(0, full_view.len - 1)
+                    }
+                    lines#.push(string::from(pat_text))
+                }
+                line_buf#.clear()
+                cursor = cursor + nl_pos + 1:usize
+            }
+        }
+
+        if !read_err && !size_exceeded && line_buf.len() > 0 {
+            {
+                auto full_view = line_buf.as_str()
+                auto pat_text# = full_view
+                if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+                    pat_text = full_view.substr(0, full_view.len - 1)
+                }
+                lines#.push(string::from(pat_text))
+            }
+            line_buf#.clear()
+        }
+
+        libc_free(*buf)
+        libc_fclose(*file)
+
+        auto hex_digest# = string::new()
+        if !read_err && !size_exceeded {
+            hex_digest = hasher#.finalize_hex()
+        }
+
+        return FileCapture(
+            lines = cede lines,
+            sha256_hex = cede hex_digest,
+            size_exceeded = size_exceeded,
+            read_err = read_err,
+            open_err = false
         )
     }
 }
@@ -1191,7 +1847,8 @@ fn execute_view_stream_lines(
         output_status = cede out_stat,
         target_symbol = Vec<SymbolTargetInfo>::new(),
         candidates = Vec<SymbolCandidateInfo>::new(),
-        candidates_truncated = false
+        candidates_truncated = false,
+        continuation_token = Option<string>::None
     ))
 }
 
@@ -1569,7 +2226,8 @@ fn execute_view_stream_point(
         output_status = cede out_stat,
         target_symbol = Vec<SymbolTargetInfo>::new(),
         candidates = Vec<SymbolCandidateInfo>::new(),
-        candidates_truncated = false
+        candidates_truncated = false,
+        continuation_token = Option<string>::None
     ))
 }
 
@@ -2428,7 +3086,8 @@ fn execute_view_stream_block(
         output_status = cede out_stat,
         target_symbol = Vec<SymbolTargetInfo>::new(),
         candidates = Vec<SymbolCandidateInfo>::new(),
-        candidates_truncated = false
+        candidates_truncated = false,
+        continuation_token = Option<string>::None
     ))
 }
 
@@ -2477,88 +3136,14 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             output_status = string::from("complete"),
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
-            candidates_truncated = false
+            candidates_truncated = false,
+            continuation_token = Option<string>::None
         ))
     }
 
-    // 2. Single bounded read into memory (10MB ceiling)
-    auto path_str = string::from(opts.file_path.as_str())
-    auto mode_buf# = [0:char; 4]
-    mode_buf[0] = 'r' as char
-    mode_buf[1] = 'b' as char
-    mode_buf[2] = 0 as char
-
-    auto lines# = Vec<string>::new()
-    auto read_err# = false
-    auto size_exceeded# = false
-    auto open_err# = false
-    auto bytes_read_accum# = 0:usize
-    auto max_file_read_bytes = 10485760:usize
-
-    unsafe {
-        auto *mode_ptr = &mode_buf[0] as *char
-        auto *path_c = path_str.c_str()
-        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
-        if *fp == null {
-            open_err = true
-        } else {
-            auto *file = fp.unwrap()
-            auto nul *raw_buf = libc_malloc(65536:usize)
-            if *raw_buf == null {
-                libc_fclose(*file)
-                read_err = true
-            } else {
-                auto *buf = raw_buf.unwrap()
-                auto line_buf# = string::new()
-
-                loop true {
-                    auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
-                    if n == 0 {
-                        if posix_ferror((*file) as Addr) {
-                            read_err = true
-                        }
-                        break
-                    }
-
-                    bytes_read_accum = bytes_read_accum + n
-                    if bytes_read_accum > max_file_read_bytes {
-                        size_exceeded = true
-                        break
-                    }
-
-                    auto *c_ptr = ((*buf) as Addr) as *char
-                    auto chunk_str = string::from_with_len(*c_ptr, n)
-                    auto chunk_view = chunk_str.as_str()
-                    auto cursor# = 0:usize
-
-                    loop cursor < chunk_view.len {
-                        auto rem = chunk_view.substr(cursor, chunk_view.len - cursor)
-                        auto nl_opt = rem.index_of('\n' as char)
-                        if nl_opt.is_none() {
-                            line_buf#.push_str(rem)
-                            break
-                        }
-                        auto nl_pos = nl_opt.unwrap()
-                        auto chunk_slice = rem.substr(0, nl_pos)
-                        line_buf#.push_str(chunk_slice)
-                        lines#.push(line_buf.clone())
-                        line_buf#.clear()
-                        cursor = cursor + nl_pos + 1:usize
-                    }
-                }
-
-                if !read_err && !size_exceeded && line_buf.len() > 0 {
-                    lines#.push(line_buf.clone())
-                    line_buf#.clear()
-                }
-
-                libc_free(*buf)
-                libc_fclose(*file)
-            }
-        }
-    }
-
-    if open_err || read_err {
+    // 2. Single bounded capture into memory (10MB ceiling)
+    auto capture = capture_file_bounded(opts.file_path.as_str(), 10485760:usize)
+    if capture.open_err || capture.read_err {
         auto msg# = string::from("trg view: error reading '")
         msg#.push_str(opts.file_path.as_str())
         msg#.push_str("'")
@@ -2584,11 +3169,12 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             output_status = string::from("complete"),
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
-            candidates_truncated = false
+            candidates_truncated = false,
+            continuation_token = Option<string>::None
         ))
     }
 
-    if size_exceeded {
+    if capture.size_exceeded {
         auto msg# = string::from("trg view: symbol scan incomplete for '")
         msg#.push_str(opts.file_path.as_str())
         msg#.push_str("' (file too large, exceeds 10MiB input read limit)")
@@ -2614,9 +3200,13 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             output_status = string::from("complete"),
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
-            candidates_truncated = false
+            candidates_truncated = false,
+            continuation_token = Option<string>::None
         ))
     }
+
+    auto lines = cede capture.lines
+    auto sha256_hex = cede capture.sha256_hex
 
     // 3. Scan symbols from in-memory lines
     auto sym_res = outline_symbols_lines(lines, opts.file_path.as_str(), Option<Vec<string>>::None, Option<usize>::Some(5000:usize), Option<usize>::None)
@@ -2646,7 +3236,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             output_status = string::from("complete"),
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
-            candidates_truncated = false
+            candidates_truncated = false,
+            continuation_token = Option<string>::None
         ))
     }
 
@@ -2677,7 +3268,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             output_status = string::from("complete"),
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
-            candidates_truncated = false
+            candidates_truncated = false,
+            continuation_token = Option<string>::None
         ))
     }
 
@@ -2732,7 +3324,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             output_status = string::from("complete"),
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
-            candidates_truncated = false
+            candidates_truncated = false,
+            continuation_token = Option<string>::None
         ))
     }
 
@@ -2938,7 +3531,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             output_status = cede output_status_str,
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = cede final_cands,
-            candidates_truncated = is_cands_truncated
+            candidates_truncated = is_cands_truncated,
+            continuation_token = Option<string>::None
         ))
     }
 
@@ -2973,30 +3567,223 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
     }
 
     auto header# = string::new()
-    if range_status_str == "confirmed" {
-        header#.push_str("[symbol: ")
-        header#.push_str(target_sym.name.as_str())
-        if target_sym.scope.len() > 0:usize {
-            header#.push_str(", scope: ")
-            header#.push_str(target_sym.scope.as_str())
+    if opts.continuation {
+        if range_status_str == "confirmed" {
+            header#.push_str("[file: ")
+            header#.push_str(opts.file_path.as_str())
+            header#.push_str(", symbol: ")
+            header#.push_str(target_sym.name.as_str())
+            if target_sym.scope.len() > 0:usize {
+                header#.push_str(", scope: ")
+                header#.push_str(target_sym.scope.as_str())
+            }
+            header#.push_str(", lines: L")
+            header#.push_str(u64_to_string(sym_start as u64).as_str())
+            header#.push_str("-L")
+            header#.push_str(u64_to_string(sym_end as u64).as_str())
+            header#.push_str("]\n")
+        } else {
+            header#.push_str("[file: ")
+            header#.push_str(opts.file_path.as_str())
+            header#.push_str(", symbol: ")
+            header#.push_str(target_sym.name.as_str())
+            if target_sym.scope.len() > 0:usize {
+                header#.push_str(", scope: ")
+                header#.push_str(target_sym.scope.as_str())
+            }
+            header#.push_str(", preview: L")
+            header#.push_str(u64_to_string(sym_start as u64).as_str())
+            header#.push_str("-L")
+            header#.push_str(u64_to_string(sym_end as u64).as_str())
+            header#.push_str(" (unclosed structure)]\n")
         }
-        header#.push_str(", lines: L")
-        header#.push_str(u64_to_string(sym_start as u64).as_str())
-        header#.push_str("-L")
-        header#.push_str(u64_to_string(sym_end as u64).as_str())
-        header#.push_str("]\n")
     } else {
-        header#.push_str("[symbol: ")
-        header#.push_str(target_sym.name.as_str())
-        if target_sym.scope.len() > 0:usize {
-            header#.push_str(", scope: ")
-            header#.push_str(target_sym.scope.as_str())
+        if range_status_str == "confirmed" {
+            header#.push_str("[symbol: ")
+            header#.push_str(target_sym.name.as_str())
+            if target_sym.scope.len() > 0:usize {
+                header#.push_str(", scope: ")
+                header#.push_str(target_sym.scope.as_str())
+            }
+            header#.push_str(", lines: L")
+            header#.push_str(u64_to_string(sym_start as u64).as_str())
+            header#.push_str("-L")
+            header#.push_str(u64_to_string(sym_end as u64).as_str())
+            header#.push_str("]\n")
+        } else {
+            header#.push_str("[symbol: ")
+            header#.push_str(target_sym.name.as_str())
+            if target_sym.scope.len() > 0:usize {
+                header#.push_str(", scope: ")
+                header#.push_str(target_sym.scope.as_str())
+            }
+            header#.push_str(", preview: L")
+            header#.push_str(u64_to_string(sym_start as u64).as_str())
+            header#.push_str("-L")
+            header#.push_str(u64_to_string(sym_end as u64).as_str())
+            header#.push_str(" (unclosed structure)]\n")
         }
-        header#.push_str(", preview: L")
-        header#.push_str(u64_to_string(sym_start as u64).as_str())
-        header#.push_str("-L")
-        header#.push_str(u64_to_string(sym_end as u64).as_str())
-        header#.push_str(" (unclosed structure)]\n")
+    }
+
+    if opts.continuation {
+        if has_max_lines && max_lines_val < 1:usize {
+            return Result<ViewResult, string>::Err(string::from("target_exceeds_max_lines: Target line cannot fit within max_lines 0"))
+        }
+
+        auto cur_line# = sym_start
+        auto lines_emitted# = 0:usize
+        auto bytes_emitted# = header.len()
+        auto truncated# = false
+        auto trunc_reason# = string::from("completed")
+        auto records# = Vec<ViewLineRecord>::new()
+        auto out# = string::new()
+        out#.push_str(header.as_str())
+        auto content_omitted# = false
+        auto target_seen# = false
+
+        loop cur_line <= sym_end {
+            if has_max_lines && lines_emitted >= max_lines_val {
+                truncated = true
+                trunc_reason = string::from("max_lines")
+                break
+            }
+
+            auto raw = lines.borrow(cur_line - 1:usize).as_str()
+            auto clean_l# = raw
+            if raw.len > 0 && raw.byte_at(raw.len - 1) == ('\r' as char) {
+                clean_l = raw.substr(0, raw.len - 1)
+            }
+            auto disp# = clean_l
+            if has_max_cols && max_cols_val > 0 && clean_l.len > max_cols_val {
+                disp = "[omitted]"
+                content_omitted = true
+            }
+
+            auto is_target = (cur_line == target_sym.line)
+            if is_target {
+                target_seen = true
+            }
+
+            auto line_entry# = string::new()
+            line_entry#.push_str(u64_to_string(cur_line as u64).as_str())
+            if is_target {
+                line_entry#.push_str(":")
+            } else {
+                line_entry#.push_str("-")
+            }
+            line_entry#.push_str(disp)
+            line_entry#.push_str("\n")
+
+            if has_max_bytes && bytes_emitted + line_entry.len() > max_bytes_val {
+                truncated = true
+                trunc_reason = string::from("max_result_bytes")
+                break
+            }
+
+            auto rec_kind# = string::from("context")
+            if is_target {
+                rec_kind = string::from("target")
+            }
+
+            bytes_emitted = bytes_emitted + line_entry.len()
+            out#.push_str(line_entry.as_str())
+            records#.push(ViewLineRecord(
+                line_number = cur_line,
+                kind = cede rec_kind,
+                text = string::from(disp)
+            ))
+            lines_emitted = lines_emitted + 1:usize
+            cur_line = cur_line + 1:usize
+        }
+
+        if lines_emitted == 0:usize {
+            auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record exceeds max_result_bytes (")
+            if has_max_bytes {
+                err#.push_str(u64_to_string(max_bytes_val as u64).as_str())
+            }
+            err#.push_str(" bytes)")
+            return Result<ViewResult, string>::Err(cede err)
+        }
+
+        auto continuation_tok# = Option<string>::None
+        if truncated && cur_line <= sym_end {
+            auto sc_opt# = Option<string>::None
+            if target_sym.scope.len() > 0:usize {
+                sc_opt = Option<string>::Some(string::from(target_sym.scope.as_str()))
+            }
+            auto ct = ContinuationToken(
+                version = 1:usize,
+                path = string::from(opts.file_path.as_str()),
+                req_start = sym_start,
+                req_end = sym_end,
+                next_line = cur_line,
+                end_line = sym_end,
+                sha256_hex = string::from(sha256_hex.as_str()),
+                mode = string::from("symbol"),
+                symbol = Option<string>::Some(string::from(target_sym.name.as_str())),
+                scope = cede sc_opt,
+                range_status = string::from(range_status_str.as_str()),
+                max_columns = opts.max_columns
+            )
+            continuation_tok = Option<string>::Some(encode_continuation_token(ct))
+        }
+
+        auto emitted_range = Option<BlockRange>::Some(BlockRange(
+            start = sym_start,
+            end = cur_line - 1:usize
+        ))
+        auto target_included = Option<bool>::Some(target_seen)
+
+        auto target_info = SymbolTargetInfo(
+            name = string::from(target_sym.name.as_str()),
+            kind = string::from(target_sym.kind.as_str()),
+            line = target_sym.line,
+            range_start = target_sym.range_start,
+            range_end = target_sym.range_end,
+            range_status = string::from(range_status_str.as_str()),
+            scope = string::from(target_sym.scope.as_str()),
+            detail = string::from(target_sym.detail.as_str())
+        )
+
+        auto detected_block = BlockRange(start = sym_start, end = sym_end)
+        auto requested_block# = Option<BlockRange>::None
+        if range_status_str == "confirmed" {
+            requested_block = Option<BlockRange>::Some(detected_block.clone())
+        }
+
+        auto output_status_str# = string::from("complete")
+        if truncated {
+            output_status_str = string::from("budget_truncated")
+        }
+
+        auto target_vec# = Vec<SymbolTargetInfo>::new()
+        target_vec#.push(target_info)
+
+        return Result<ViewResult, string>::Ok(ViewResult(
+            text = cede out,
+            truncated = truncated,
+            reason = cede trunc_reason,
+            lines_emitted = lines_emitted,
+            bytes_emitted = bytes_emitted,
+            mode = string::from("symbol"),
+            path = string::from(opts.file_path.as_str()),
+            requested_line = Option<usize>::Some(target_sym.line),
+            requested_range = requested_block,
+            detected_block_range = Option<BlockRange>::Some(detected_block),
+            emitted_range = emitted_range,
+            target_included = target_included,
+            content_omitted = content_omitted,
+            complete = !truncated,
+            eof_reached = !truncated && (sym_end == total_file_lines),
+            records = cede records,
+            selection_status = string::from("found"),
+            range_status = Option<string>::Some(cede range_status_str),
+            output_status = cede output_status_str,
+            target_symbol = cede target_vec,
+            candidates = Vec<SymbolCandidateInfo>::new(),
+            candidates_truncated = false,
+            continuation_token = cede continuation_tok
+        ))
     }
 
     if has_max_lines && max_lines_val < 1:usize {
@@ -3268,11 +4055,291 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         output_status = cede output_status_str,
         target_symbol = cede target_vec,
         candidates = Vec<SymbolCandidateInfo>::new(),
-        candidates_truncated = false
+        candidates_truncated = false,
+        continuation_token = Option<string>::None
+    ))
+}
+
+pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string> {
+    auto tok_str# = string::new()
+    match opts.continuation_token {
+        auto Option<string>::Some(&ts) => {
+            tok_str = string::from(ts.as_str())
+        }
+        auto Option<string>::None => {
+            return Result<ViewResult, string>::Err(string::from("Missing continuation token"))
+        }
+    }
+
+    auto dec_res = decode_continuation_token(tok_str.as_str())
+    if dec_res.is_err() {
+        return Result<ViewResult, string>::Err(dec_res.unwrap_err())
+    }
+    auto token = dec_res.unwrap()
+
+    if token.end_line < token.next_line {
+        return Result<ViewResult, string>::Err(string::from("Invalid continuation token: end_line < next_line"))
+    }
+    if token.req_end < token.req_start {
+        return Result<ViewResult, string>::Err(string::from("Invalid continuation token: req_end < req_start"))
+    }
+
+    // 1. Capture file into memory (< 10MB)
+    auto capture = capture_file_bounded(token.path.as_str(), 10485760:usize)
+    if capture.open_err || capture.read_err {
+        return Result<ViewResult, string>::Err(string::from("io_error: Failed to read file"))
+    }
+    if capture.size_exceeded {
+        return Result<ViewResult, string>::Err(string::from("scan_incomplete: file too large, exceeds 10MiB input read limit"))
+    }
+
+    // 2. Anti-torn-read cryptographic verification
+    if capture.sha256_hex != token.sha256_hex {
+        return Result<ViewResult, string>::Err(string::from("file_modified_since_last_read: File content modified since token generation"))
+    }
+
+    auto lines = cede capture.lines
+    auto sha256_hex = cede capture.sha256_hex
+    auto total_file_lines = lines.len()
+
+    // 3. Header formatting
+    auto header# = string::new()
+    header#.push_str("[file: ")
+    header#.push_str(token.path.as_str())
+    match token.symbol {
+        auto Option<string>::Some(&s_name) => {
+            header#.push_str(", symbol: ")
+            header#.push_str(s_name.as_str())
+        }
+        auto Option<string>::None => {}
+    }
+    match token.scope {
+        auto Option<string>::Some(&sc_name) => {
+            header#.push_str(", scope: ")
+            header#.push_str(sc_name.as_str())
+        }
+        auto Option<string>::None => {}
+    }
+    if token.range_status == "confirmed" {
+        header#.push_str(", lines: L")
+        header#.push_str(u64_to_string(token.next_line as u64).as_str())
+        header#.push_str("-L")
+        header#.push_str(u64_to_string(token.end_line as u64).as_str())
+        header#.push_str(" (continuation)]\n")
+    } else {
+        header#.push_str(", preview: L")
+        header#.push_str(u64_to_string(token.next_line as u64).as_str())
+        header#.push_str("-L")
+        header#.push_str(u64_to_string(token.end_line as u64).as_str())
+        header#.push_str(" (unclosed structure continuation)]\n")
+    }
+
+    auto has_max_lines = opts.max_lines.is_some()
+    auto max_lines_val# = 0:usize
+    match opts.max_lines {
+        auto Option<usize>::Some(v) => { max_lines_val = v }
+        auto Option<usize>::None => {}
+    }
+    auto has_max_bytes = opts.max_result_bytes.is_some()
+    auto max_bytes_val# = 0:usize
+    match opts.max_result_bytes {
+        auto Option<usize>::Some(v) => { max_bytes_val = v }
+        auto Option<usize>::None => {}
+    }
+    auto has_max_cols# = false
+    auto max_cols_val# = 0:usize
+    match opts.max_columns {
+        auto Option<usize>::Some(v) => {
+            has_max_cols = true
+            max_cols_val = v
+        }
+        auto Option<usize>::None => {
+            match token.max_columns {
+                auto Option<usize>::Some(tv) => {
+                    has_max_cols = true
+                    max_cols_val = tv
+                }
+                auto Option<usize>::None => {}
+            }
+        }
+    }
+
+    if has_max_lines && max_lines_val < 1:usize {
+        return Result<ViewResult, string>::Err(string::from("target_exceeds_max_lines: Target line cannot fit within max_lines 0"))
+    }
+
+    // 4. Sequential emission from token.next_line to token.end_line
+    auto cur_line# = token.next_line
+    auto lines_emitted# = 0:usize
+    auto bytes_emitted# = header.len()
+    auto truncated# = false
+    auto trunc_reason# = string::from("completed")
+    auto records# = Vec<ViewLineRecord>::new()
+    auto out# = string::new()
+    out#.push_str(header.as_str())
+    auto content_omitted# = false
+
+    loop cur_line <= token.end_line {
+        if has_max_lines && lines_emitted >= max_lines_val {
+            truncated = true
+            trunc_reason = string::from("max_lines")
+            break
+        }
+
+        if cur_line > total_file_lines {
+            break
+        }
+
+        auto raw = lines.borrow(cur_line - 1:usize).as_str()
+        auto clean_l# = raw
+        if raw.len > 0 && raw.byte_at(raw.len - 1) == ('\r' as char) {
+            clean_l = raw.substr(0, raw.len - 1)
+        }
+        auto disp# = clean_l
+        if has_max_cols && max_cols_val > 0 && clean_l.len > max_cols_val {
+            disp = "[omitted]"
+            content_omitted = true
+        }
+
+        auto line_entry# = string::new()
+        line_entry#.push_str(u64_to_string(cur_line as u64).as_str())
+        line_entry#.push_str("-")
+        line_entry#.push_str(disp)
+        line_entry#.push_str("\n")
+
+        if has_max_bytes && bytes_emitted + line_entry.len() > max_bytes_val {
+            truncated = true
+            trunc_reason = string::from("max_result_bytes")
+            break
+        }
+
+        bytes_emitted = bytes_emitted + line_entry.len()
+        out#.push_str(line_entry.as_str())
+        records#.push(ViewLineRecord(
+            line_number = cur_line,
+            kind = string::from("context"),
+            text = string::from(disp)
+        ))
+        lines_emitted = lines_emitted + 1:usize
+        cur_line = cur_line + 1:usize
+    }
+
+    if lines_emitted == 0:usize {
+        auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record exceeds max_result_bytes (")
+        if has_max_bytes {
+            err#.push_str(u64_to_string(max_bytes_val as u64).as_str())
+        }
+        err#.push_str(" bytes)")
+        return Result<ViewResult, string>::Err(cede err)
+    }
+
+    auto next_token# = Option<string>::None
+    if truncated && cur_line <= token.end_line {
+        auto sym_copy# = Option<string>::None
+        match token.symbol {
+            auto Option<string>::Some(&s) => {
+                sym_copy = Option<string>::Some(string::from(s.as_str()))
+            }
+            auto Option<string>::None => {}
+        }
+        auto sc_copy# = Option<string>::None
+        match token.scope {
+            auto Option<string>::Some(&sc) => {
+                sc_copy = Option<string>::Some(string::from(sc.as_str()))
+            }
+            auto Option<string>::None => {}
+        }
+        auto next_tok_data = ContinuationToken(
+            version = token.version,
+            path = string::from(token.path.as_str()),
+            req_start = token.req_start,
+            req_end = token.req_end,
+            next_line = cur_line,
+            end_line = token.end_line,
+            sha256_hex = string::from(token.sha256_hex.as_str()),
+            mode = string::from(token.mode.as_str()),
+            symbol = cede sym_copy,
+            scope = cede sc_copy,
+            range_status = string::from(token.range_status.as_str()),
+            max_columns = token.max_columns
+        )
+        next_token = Option<string>::Some(encode_continuation_token(next_tok_data))
+    }
+
+    auto emitted_range# = Option<BlockRange>::None
+    if lines_emitted > 0:usize {
+        emitted_range = Option<BlockRange>::Some(BlockRange(
+            start = token.next_line,
+            end = cur_line - 1:usize
+        ))
+    }
+
+    auto detected_block = BlockRange(start = token.req_start, end = token.req_end)
+    auto requested_block# = Option<BlockRange>::None
+    if token.range_status == "confirmed" {
+        requested_block = Option<BlockRange>::Some(detected_block.clone())
+    }
+
+    auto output_status_str# = string::from("complete")
+    if truncated {
+        output_status_str = string::from("budget_truncated")
+    }
+
+    auto target_vec# = Vec<SymbolTargetInfo>::new()
+    match token.symbol {
+        auto Option<string>::Some(&s_name) => {
+            auto scope_str# = string::new()
+            match token.scope {
+                auto Option<string>::Some(&sc) => {
+                    scope_str = string::from(sc.as_str())
+                }
+                auto Option<string>::None => {}
+            }
+            target_vec#.push(SymbolTargetInfo(
+                name = string::from(s_name.as_str()),
+                kind = string::from("symbol"),
+                line = token.req_start,
+                range_start = token.req_start,
+                range_end = Option<usize>::Some(token.req_end),
+                range_status = string::from(token.range_status.as_str()),
+                scope = cede scope_str,
+                detail = string::new()
+            ))
+        }
+        auto Option<string>::None => {}
+    }
+
+    return Result<ViewResult, string>::Ok(ViewResult(
+        text = cede out,
+        truncated = truncated,
+        reason = cede trunc_reason,
+        lines_emitted = lines_emitted,
+        bytes_emitted = bytes_emitted,
+        mode = string::from(token.mode.as_str()),
+        path = string::from(token.path.as_str()),
+        requested_line = Option<usize>::None,
+        requested_range = requested_block,
+        detected_block_range = Option<BlockRange>::Some(detected_block),
+        emitted_range = emitted_range,
+        target_included = Option<bool>::Some(false),
+        content_omitted = content_omitted,
+        complete = !truncated && (cur_line > token.end_line),
+        eof_reached = !truncated && (token.end_line == total_file_lines),
+        records = cede records,
+        selection_status = string::from("found"),
+        range_status = Option<string>::Some(string::from(token.range_status.as_str())),
+        output_status = cede output_status_str,
+        target_symbol = cede target_vec,
+        candidates = Vec<SymbolCandidateInfo>::new(),
+        candidates_truncated = false,
+        continuation_token = cede next_token
     ))
 }
 
 pub fn execute_view_operation(opts: ViewOptions) -> Result<ViewResult, string> {
+    if opts.continuation_token.is_some() {
+        return execute_view_continuation(opts)
+    }
     if opts.symbol.is_some() {
         if opts.line.is_some() {
             return Result<ViewResult, string>::Err(string::from("Cannot specify both 'symbol' and target line"))
@@ -3344,6 +4411,8 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
     auto max_bytes_opt# = Option<usize>::None
     auto max_columns_opt# = Option<usize>::None
     auto max_block_lines# = 80:usize
+    auto continuation_flag# = false
+    auto continue_token_opt# = Option<string>::None
 
     auto i# = 2:usize
     loop i < num_args {
@@ -3351,7 +4420,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         auto view = arg.as_str()
 
         if view == "-h" || view == "--help" {
-            println("Usage: trg view <path>:<line> [-C N] [--block] | trg view <path> --lines <start>-<end> | trg view <path> --symbol <SPEC> [--scope <SCOPE>]")
+            println("Usage: trg view <path>:<line> [-C N] [--block] | trg view <path> --lines <start>-<end> | trg view <path> --symbol <SPEC> [--scope <SCOPE>] [--continuation] | trg view --continue <TOKEN>")
             println("")
             println("Options:")
             println("  -C, --context <NUM>       Lines of context around target line (default: 10)")
@@ -3359,11 +4428,38 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
             println("      --lines <M-N>         Extract explicit physical line range M to N")
             println("      --symbol <NAME>       Extract enclosing code range for target symbol (e.g. 'fn_name' or 'Scope::name')")
             println("      --scope <SCOPE>       Optional enclosing scope to disambiguate target symbol")
+            println("      --continuation        Enable sequential range paging and emit continuation token on truncation")
+            println("      --continue <TOKEN>    Resume hydration from previous continuation token")
             println("      --max-lines <NUM>     Maximum lines of output before truncating")
             println("      --max-bytes <SIZE>    Maximum hydrated output bytes (alias: --max-result-bytes; counts formatted view lines; default: unlimited; 0 stops hydration immediately)")
             println("      --max-columns <NUM>   Omit lines exceeding NUM characters with [omitted]")
             println("      --max-block-lines <NUM> Maximum lines per expanded block context or unknown symbol preview (default: 80)")
             return 0
+        }
+
+        if view == "--continuation" {
+            continuation_flag = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--continue" {
+            if i + 1 >= num_args {
+                print_err("Option requires an argument: --continue")
+                return 2
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            continue_token_opt = Option<string>::Some(string::from(val_arg.as_str()))
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--continue=") {
+            auto val_str = view.substr(11:usize, view.len - 11:usize)
+            continue_token_opt = Option<string>::Some(string::from(val_str))
+            i = i + 1
+            continue
         }
 
         if view == "--block" {
@@ -3665,6 +4761,68 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         return 2
     }
 
+    if continue_token_opt.is_some() {
+        if path_opt.is_some() || line_opt.is_some() || lines_range.is_some() || symbol_raw_opt.is_some() || scope_raw_opt.is_some() || block || context_passed || continuation_flag {
+            print_err("Cannot specify target path or query options when using --continue")
+            return 2
+        }
+
+        auto opts = ViewOptions(
+            file_path = string::new(),
+            line = Option<usize>::None,
+            context = 0:usize,
+            block = false,
+            lines_range = Option<BlockRange>::None,
+            symbol = Option<string>::None,
+            symbol_scope = Option<string>::None,
+            max_lines = max_lines_opt,
+            max_result_bytes = max_bytes_opt,
+            max_columns = max_columns_opt,
+            max_block_lines = max_block_lines,
+            continuation = true,
+            continuation_token = cede continue_token_opt
+        )
+
+        auto res = execute_view_operation(opts)
+        if res.is_err() {
+            print_err(res.unwrap_err().as_str())
+            return 2
+        }
+
+        auto view_res = res.unwrap()
+        if view_res.truncated && view_res.reason.len() > 0 {
+            auto has_token# = false
+            auto tok_val# = string::new()
+            match view_res.continuation_token {
+                auto Option<string>::Some(&tok) => {
+                    tok_val = string::from(tok.as_str())
+                    has_token = true
+                }
+                auto Option<string>::None => {}
+            }
+            if has_token {
+                posix_write_stderr("trg: [trg_view: truncated=true, reason=")
+                posix_write_stderr(view_res.reason.as_str())
+                posix_write_stderr(", continuation_token=")
+                posix_write_stderr(tok_val.as_str())
+                posix_write_stderr("]\n")
+
+                posix_write_stderr("trg: hint: continue reading: trg view --continue ")
+                posix_write_stderr(tok_val.as_str())
+                posix_write_stderr("\n")
+            } else {
+                posix_write_stderr("trg: [trg_view: truncated=true, reason=")
+                posix_write_stderr(view_res.reason.as_str())
+                posix_write_stderr("]\n")
+            }
+        }
+        auto write_res = posix_write_stdout(view_res.text.as_str())
+        if write_res == 2 {
+            return 2
+        }
+        return 0
+    }
+
     if path_opt.is_none() {
         print_err("trg view: missing file path")
         return 2
@@ -3781,7 +4939,9 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         max_lines = max_lines_opt,
         max_result_bytes = max_bytes_opt,
         max_columns = max_columns_opt,
-        max_block_lines = max_block_lines
+        max_block_lines = max_block_lines,
+        continuation = continuation_flag,
+        continuation_token = Option<string>::None
     )
 
     auto res = execute_view_operation(opts)
@@ -3806,10 +4966,30 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
     }
 
     if view_res.truncated && view_res.reason.len() > 0 {
-        auto t_msg# = string::from("[trg_view: truncated=true, reason=")
-        t_msg#.push_str(view_res.reason.as_str())
-        t_msg#.push_str("]")
-        print_err(t_msg.as_str())
+        auto has_token# = false
+        auto tok_val# = string::new()
+        match view_res.continuation_token {
+            auto Option<string>::Some(&tok) => {
+                tok_val = string::from(tok.as_str())
+                has_token = true
+            }
+            auto Option<string>::None => {}
+        }
+        if has_token {
+            posix_write_stderr("trg: [trg_view: truncated=true, reason=")
+            posix_write_stderr(view_res.reason.as_str())
+            posix_write_stderr(", continuation_token=")
+            posix_write_stderr(tok_val.as_str())
+            posix_write_stderr("]\n")
+
+            posix_write_stderr("trg: hint: continue reading: trg view --continue ")
+            posix_write_stderr(tok_val.as_str())
+            posix_write_stderr("\n")
+        } else {
+            posix_write_stderr("trg: [trg_view: truncated=true, reason=")
+            posix_write_stderr(view_res.reason.as_str())
+            posix_write_stderr("]\n")
+        }
     }
     auto write_res = posix_write_stdout(view_res.text.as_str())
     if write_res == 2 {

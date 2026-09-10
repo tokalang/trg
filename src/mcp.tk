@@ -116,6 +116,24 @@ fn is_strict_hex_digit(c: char) -> bool {
     return false
 }
 
+fn is_non_null_arg(node_opt: Option<&JsonNode>) -> bool {
+    match node_opt {
+        auto Option<&JsonNode>::Some(&n) => {
+            match n {
+                auto JsonNode::NullNode(_) => {
+                    return false
+                }
+                _ => {
+                    return true
+                }
+            }
+        }
+        auto Option<&JsonNode>::None => {
+            return false
+        }
+    }
+}
+
 fn hex_char_to_val(c: char) -> usize {
     if c >= ('0' as char) && c <= ('9' as char) {
         return (c as usize) - (('0' as char) as usize)
@@ -677,7 +695,7 @@ pub fn run_mcp_server() -> i32 {
                                                             if nxt.is_none() { break }
                                                             auto entry = nxt.unwrap()
                                                             auto k = entry.key().as_str()
-                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" && k != "symbol" && k != "scope" {
+                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" && k != "symbol" && k != "scope" && k != "continuation" && k != "continuation_token" {
                                                                 unexp_opt = Option<string>::Some(entry.key().clone())
                                                                 break
                                                             }
@@ -688,6 +706,42 @@ pub fn run_mcp_server() -> i32 {
                                                             err#.push_str("'")
                                                             send_error(id_str.as_str(), -32602, err.as_str())
                                                             continue
+                                                        }
+
+                                                        auto cont_token_str# = string::new()
+                                                        auto has_cont_token# = false
+                                                        match arg_map.try_borrow(string::from("continuation_token")) {
+                                                            auto Option<&JsonNode>::Some(&ctn) => {
+                                                                match ctn {
+                                                                    auto JsonNode::StrNode(&cts) => {
+                                                                        if cts.len() > 0 {
+                                                                            cont_token_str = cts.clone()
+                                                                            has_cont_token = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {}
+                                                                    _ => {
+                                                                        send_error(id_str.as_str(), -32602, "Invalid params: 'continuation_token' must be a string or null")
+                                                                        continue
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+
+                                                        if has_cont_token {
+                                                            auto conflict = is_non_null_arg(arg_map.try_borrow(string::from("path"))) ||
+                                                                            is_non_null_arg(arg_map.try_borrow(string::from("line"))) ||
+                                                                            is_non_null_arg(arg_map.try_borrow(string::from("lines"))) ||
+                                                                            is_non_null_arg(arg_map.try_borrow(string::from("symbol"))) ||
+                                                                            is_non_null_arg(arg_map.try_borrow(string::from("scope"))) ||
+                                                                            is_non_null_arg(arg_map.try_borrow(string::from("block"))) ||
+                                                                            is_non_null_arg(arg_map.try_borrow(string::from("context"))) ||
+                                                                            is_non_null_arg(arg_map.try_borrow(string::from("continuation")))
+                                                            if conflict {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'continuation_token' cannot be used with path, line, lines, symbol, scope, block, context, or continuation")
+                                                                continue
+                                                            }
                                                         }
 
                                                         auto path_str# = string::new()
@@ -706,18 +760,20 @@ pub fn run_mcp_server() -> i32 {
                                                             }
                                                             _ => {}
                                                         }
-                                                        if !has_path {
-                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'path' is required and must be a non-empty string")
-                                                            continue
-                                                        }
+                                                        if !has_cont_token {
+                                                            if !has_path {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'path' is required and must be a non-empty string")
+                                                                continue
+                                                            }
 
-                                                        if startup_cwd.as_str() == "/" && !path_str.as_str().starts_with("/") {
-                                                            send_error(id_str.as_str(), -32602, "Invalid params: relative path cannot be safely resolved when MCP server working directory is root ('/'); please provide an absolute path")
-                                                            continue
-                                                        }
-                                                        if resolves_to_root(startup_cwd.as_str(), path_str.as_str()) {
-                                                            send_error(id_str.as_str(), -32602, "Invalid params: target path resolves to filesystem root ('/'); viewing root is not allowed in MCP mode")
-                                                            continue
+                                                            if startup_cwd.as_str() == "/" && !path_str.as_str().starts_with("/") {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: relative path cannot be safely resolved when MCP server working directory is root ('/'); please provide an absolute path")
+                                                                continue
+                                                            }
+                                                            if resolves_to_root(startup_cwd.as_str(), path_str.as_str()) {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: target path resolves to filesystem root ('/'); viewing root is not allowed in MCP mode")
+                                                                continue
+                                                            }
                                                         }
 
                                                         auto line_opt# = Option<usize>::None
@@ -789,6 +845,26 @@ pub fn run_mcp_server() -> i32 {
                                                         }
                                                         if block_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'block' must be a boolean")
+                                                            continue
+                                                        }
+
+                                                        auto continuation_val# = false
+                                                        auto continuation_err# = false
+                                                        match arg_map.try_borrow(string::from("continuation")) {
+                                                            auto Option<&JsonNode>::Some(&cn) => {
+                                                                match cn {
+                                                                    auto JsonNode::BoolNode(b) => {
+                                                                        continuation_val = b
+                                                                    }
+                                                                    _ => {
+                                                                        continuation_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if continuation_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'continuation' must be a boolean")
                                                             continue
                                                         }
 
@@ -979,31 +1055,33 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto has_explicit_context = arg_map.try_borrow(string::from("context")).is_some()
 
-                                                        if parsed_symbol.is_some() {
-                                                            if line_opt.is_some() || lines_range_opt.is_some() {
-                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'symbol' is mutually exclusive with 'line' and 'lines'")
-                                                                continue
-                                                            }
-                                                            if block_val {
-                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with 'symbol'")
-                                                                continue
-                                                            }
-                                                            if has_explicit_context {
-                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'context' cannot be used with 'symbol'")
-                                                                continue
-                                                            }
-                                                        } else {
-                                                            if line_opt.is_none() && lines_range_opt.is_none() {
-                                                                send_error(id_str.as_str(), -32602, "Invalid params: viewing requires either 'line', 'lines', or 'symbol'")
-                                                                continue
-                                                            }
-                                                            if line_opt.is_some() && lines_range_opt.is_some() {
-                                                                send_error(id_str.as_str(), -32602, "Invalid params: cannot specify both 'line' and 'lines'")
-                                                                continue
-                                                            }
-                                                            if block_val && lines_range_opt.is_some() {
-                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with explicit 'lines' range")
-                                                                continue
+                                                        if !has_cont_token {
+                                                            if parsed_symbol.is_some() {
+                                                                if line_opt.is_some() || lines_range_opt.is_some() {
+                                                                    send_error(id_str.as_str(), -32602, "Invalid params: 'symbol' is mutually exclusive with 'line' and 'lines'")
+                                                                    continue
+                                                                }
+                                                                if block_val {
+                                                                    send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with 'symbol'")
+                                                                    continue
+                                                                }
+                                                                if has_explicit_context {
+                                                                    send_error(id_str.as_str(), -32602, "Invalid params: 'context' cannot be used with 'symbol'")
+                                                                    continue
+                                                                }
+                                                            } else {
+                                                                if line_opt.is_none() && lines_range_opt.is_none() {
+                                                                    send_error(id_str.as_str(), -32602, "Invalid params: viewing requires either 'line', 'lines', or 'symbol'")
+                                                                    continue
+                                                                }
+                                                                if line_opt.is_some() && lines_range_opt.is_some() {
+                                                                    send_error(id_str.as_str(), -32602, "Invalid params: cannot specify both 'line' and 'lines'")
+                                                                    continue
+                                                                }
+                                                                if block_val && lines_range_opt.is_some() {
+                                                                    send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with explicit 'lines' range")
+                                                                    continue
+                                                                }
                                                             }
                                                         }
 
@@ -1169,17 +1247,24 @@ pub fn run_mcp_server() -> i32 {
                                                             continue
                                                         }
 
-                                                        auto target_res = compute_identity_key(startup_cwd.as_str(), path_str.as_str())
-                                                        if target_res.is_err() {
-                                                            if format_is_json {
-                                                                send_tool_error_json(id_str.as_str(), "Failed to resolve target path")
-                                                            } else {
-                                                                send_tool_error(id_str.as_str(), "Failed to resolve target path")
+                                                        auto target_path# = string::new()
+                                                        if !has_cont_token {
+                                                            auto target_res = compute_identity_key(startup_cwd.as_str(), path_str.as_str())
+                                                            if target_res.is_err() {
+                                                                if format_is_json {
+                                                                    send_tool_error_json(id_str.as_str(), "Failed to resolve target path")
+                                                                } else {
+                                                                    send_tool_error(id_str.as_str(), "Failed to resolve target path")
+                                                                }
+                                                                continue
                                                             }
-                                                            continue
+                                                            target_path = target_res.unwrap()
                                                         }
-                                                        auto target_path = target_res.unwrap()
                                                         auto exec_max_bytes = max_bytes_opt
+                                                        auto cont_token_opt# = Option<string>::None
+                                                        if has_cont_token {
+                                                            cont_token_opt = Option<string>::Some(cont_token_str.clone())
+                                                        }
                                                         auto view_opts = ViewOptions(
                                                             file_path = cede target_path,
                                                             line = line_opt,
@@ -1191,7 +1276,9 @@ pub fn run_mcp_server() -> i32 {
                                                             max_columns = max_columns_opt,
                                                             max_block_lines = max_block_lines_val,
                                                             symbol = cede parsed_symbol,
-                                                            symbol_scope = cede parsed_scope
+                                                            symbol_scope = cede parsed_scope,
+                                                            continuation = continuation_val || has_cont_token,
+                                                            continuation_token = cede cont_token_opt
                                                         )
                                                         auto view_res = execute_view_operation(view_opts)
                                                         if view_res.is_err() {
@@ -1257,6 +1344,17 @@ pub fn run_mcp_server() -> i32 {
                                                             resp#.push_str(u64_to_string(vr.lines_emitted as u64).as_str())
                                                             resp#.push_str(",\"bytes\":")
                                                             resp#.push_str(u64_to_string(vr.bytes_emitted as u64).as_str())
+                                                            resp#.push_str(",\"continuation_token\":")
+                                                            match vr.continuation_token {
+                                                                auto Option<string>::Some(&t) => {
+                                                                    resp#.push_str("\"")
+                                                                    resp#.push_str(json_escape(t.as_str()).as_str())
+                                                                    resp#.push_str("\"")
+                                                                }
+                                                                auto Option<string>::None => {
+                                                                    resp#.push_str("null")
+                                                                }
+                                                            }
                                                             resp#.push_str(",\"summary\":{\"complete\":")
                                                             if vr.truncated {
                                                                 resp#.push_str("false,\"truncated\":true,\"termination_reason\":\"")
@@ -1307,6 +1405,17 @@ pub fn run_mcp_server() -> i32 {
                                                         resp#.push_str(u64_to_string(vr.lines_emitted as u64).as_str())
                                                         resp#.push_str(",\"bytes\":")
                                                         resp#.push_str(u64_to_string(vr.bytes_emitted as u64).as_str())
+                                                        resp#.push_str(",\"continuation_token\":")
+                                                        match vr.continuation_token {
+                                                            auto Option<string>::Some(&t) => {
+                                                                resp#.push_str("\"")
+                                                                resp#.push_str(json_escape(t.as_str()).as_str())
+                                                                resp#.push_str("\"")
+                                                            }
+                                                            auto Option<string>::None => {
+                                                                resp#.push_str("null")
+                                                            }
+                                                        }
                                                         resp#.push_str(",\"summary\":{\"complete\":")
                                                         if vr.truncated {
                                                             resp#.push_str("false,\"truncated\":true,\"termination_reason\":\"")
