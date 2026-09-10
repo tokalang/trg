@@ -61,10 +61,14 @@ def run_bin(bin_path: str, args: list, stdin_data: str = None, stdin_devnull: bo
     if stdin_devnull:
         stdin = subprocess.DEVNULL
     elif stdin_file is not None:
-        f_in = open(stdin_file, "r", encoding="utf-8")
+        f_in = open(stdin_file, "rb")
         stdin = f_in
     elif stdin_data is not None or delayed_pipe is not None:
         stdin = subprocess.PIPE
+
+    stdin_bytes = None
+    if stdin_data is not None:
+        stdin_bytes = stdin_data.encode("utf-8") if isinstance(stdin_data, str) else stdin_data
 
     try:
         p = subprocess.Popen(
@@ -72,20 +76,22 @@ def run_bin(bin_path: str, args: list, stdin_data: str = None, stdin_devnull: bo
             stdin=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             cwd=cwd
         )
         if delayed_pipe is not None:
             delay_sec, data = delayed_pipe
+            data_bytes = data.encode("utf-8") if isinstance(data, str) else data
             time.sleep(delay_sec)
-            stdout, stderr = p.communicate(input=data, timeout=timeout)
+            out_b, err_b = p.communicate(input=data_bytes, timeout=timeout)
         else:
-            stdout, stderr = p.communicate(input=stdin_data, timeout=timeout)
+            out_b, err_b = p.communicate(input=stdin_bytes, timeout=timeout)
+        stdout = out_b.decode("utf-8", errors="replace")
+        stderr = err_b.decode("utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         p.kill()
-        stdout, stderr = p.communicate()
+        out_b, err_b = p.communicate()
+        stdout = out_b.decode("utf-8", errors="replace")
+        stderr = err_b.decode("utf-8", errors="replace")
         raise TimeoutError(f"Command {' '.join([bin_path] + args)} timed out")
     finally:
         if f_in:
