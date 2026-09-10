@@ -8,7 +8,7 @@ on:
       tag:
         description: 'Release tag to verify'
         required: false
-        default: 'v0.16.1'
+        default: 'v0.17.0'
 
 jobs:
   anonymous-audit-linux:
@@ -18,7 +18,7 @@ jobs:
       - name: Download all 6 assets anonymously
         run: |
           set -euo pipefail
-          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.1' }}"
+          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.17.0' }}"
           ver="${tag#v}"
           base_url="https://github.com/tokalang/trg/releases/download/${tag}"
           mkdir -p dist && cd dist
@@ -44,7 +44,7 @@ jobs:
       - name: Run consumer smoke test on linux-x64
         run: |
           set -euo pipefail
-          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.1' }}"
+          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.17.0' }}"
           ver="${tag#v}"
           cd dist
           tar -xzf "trg-${tag}-linux-x64.tar.gz"
@@ -65,7 +65,7 @@ jobs:
       - name: Download assets and run consumer smoke on macos-arm64
         run: |
           set -euo pipefail
-          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.1' }}"
+          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.17.0' }}"
           ver="${tag#v}"
           base_url="https://github.com/tokalang/trg/releases/download/${tag}"
           mkdir -p dist && cd dist
@@ -97,7 +97,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.16.1" }
+          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.17.0" }
           $ver = $tag.TrimStart("v")
           $baseUrl = "https://github.com/tokalang/trg/releases/download/$tag"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
@@ -142,7 +142,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.16.1" }
+          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.17.0" }
           $ver = $tag.TrimStart("v")
           $baseUrl = "https://github.com/tokalang/trg/releases/download/$tag"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
@@ -189,7 +189,7 @@ jobs:
       - name: Generate WinGet manifests
         shell: bash
         run: |
-          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.16.1' }}"
+          tag="${{ github.event.release.tag_name || inputs.tag || 'v0.17.0' }}"
           ver="${tag#v}"
           base_url="https://github.com/tokalang/trg/releases/download/${tag}"
           curl -fsSL -o SHA256SUMS "$base_url/SHA256SUMS"
@@ -210,7 +210,7 @@ jobs:
       - name: Check winget CLI availability and validate manifest
         shell: powershell
         run: |
-          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.16.1" }
+          $tag = if ("${{ github.event.release.tag_name }}") { "${{ github.event.release.tag_name }}" } elseif ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v0.17.0" }
           $ver = $tag.TrimStart("v")
           $manifestDir = "winget\manifests\t\Tokalang\trg\$ver"
           if (Get-Command winget -ErrorAction SilentlyContinue) {

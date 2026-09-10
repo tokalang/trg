@@ -257,6 +257,19 @@ def test_cli_options():
     assert r_max.returncode == 0
     assert "[truncated: reason=max_symbols]" in r_max.stdout
 
+    # --max-bytes and --max-result-bytes alias equivalence
+    r_mb = subprocess.run([TRG_BIN, "symbols", str(syntax_file), "--max-bytes", "120"], capture_output=True, text=True)
+    r_mrb = subprocess.run([TRG_BIN, "symbols", str(syntax_file), "--max-result-bytes", "120"], capture_output=True, text=True)
+    assert r_mb.returncode == 0
+    assert r_mrb.returncode == 0
+    assert r_mb.stdout == r_mrb.stdout
+    assert "[truncated: reason=max_result_bytes]" in r_mb.stdout
+
+    # --max-bytes 0 stops immediately
+    r_mb0 = subprocess.run([TRG_BIN, "symbols", str(syntax_file), "--max-bytes", "0"], capture_output=True, text=True)
+    assert r_mb0.returncode == 0
+    assert "[truncated: reason=max_result_bytes]" in r_mb0.stdout
+
     # -k comma separated
     r_kinds = subprocess.run([TRG_BIN, "symbols", str(syntax_file), "-k", "shape,impl", "--json"], capture_output=True, text=True)
     assert r_kinds.returncode == 0

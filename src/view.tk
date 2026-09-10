@@ -2265,7 +2265,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
             println("      --block               Expand enclosing syntactic block context")
             println("      --lines <M-N>         Extract explicit physical line range M to N")
             println("      --max-lines <NUM>     Maximum lines of output before truncating")
-            println("      --max-bytes <SIZE>    Maximum output bytes before truncating (e.g. 64K, 1M)")
+            println("      --max-bytes <SIZE>    Maximum hydrated output bytes (alias: --max-result-bytes; counts formatted view lines; default: unlimited; 0 stops hydration immediately)")
             println("      --max-columns <NUM>   Omit lines exceeding NUM characters with [omitted]")
             println("      --max-block-lines <NUM> Maximum lines per expanded block context (default: 80)")
             return 0
@@ -2378,7 +2378,9 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
 
         if view == "--max-bytes" || view == "--max-result-bytes" {
             if i + 1 >= num_args {
-                print_err("Option requires an argument: --max-bytes")
+                auto err_req# = string::from("Option requires an argument: ")
+                err_req#.push_str(view)
+                print_err(err_req.as_str())
                 return 2
             }
             i = i + 1

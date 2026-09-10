@@ -4,20 +4,24 @@ Ripgrep Differential Parity Test Suite for trg.
 
 Compares trg against host ripgrep (rg) across:
 1. Piped stdin input behavior (no path -> auto-select stdin).
-2. Pipeline composition (e.g. trg --files | trg PATTERN).
-3. Stdin vs directory isolation (tokens present only in stdin or only in dir).
-4. Fallback rules (e.g. < /dev/null falls back to '.', explicit '-' searches stdin).
-5. Flag subsets: -F, -i, -s, -S, -w, -x, -v, -e, -n, -N, -l, -c, -q, -o, -m, -A, -B, -C.
-6. Exit code equivalence (0 for match, 1 for no match, 2 for error).
+2. Delayed pipe input (slow producer does not fall back to directory).
+3. Regular file redirection (< file.txt).
+4. Pipeline composition (e.g. trg --files | trg PATTERN).
+5. Stdin vs directory isolation (tokens present only in stdin or only in dir).
+6. Fallback rules (e.g. < /dev/null falls back to '.', explicit '-' searches stdin).
+7. Flag subsets: -F, -i, -s, -S, -w, -x, -v, -e, -n, -N, -l, -c, -q, -o, -m, -A, -B, -C.
+8. Independent exit code validation (0 = match, 1 = no match, 2 = error).
 
 In accordance with trg principles:
 - Verification uses multiset Bag<(path, line_number)> comparison rather than
   exact byte/formatting equality.
 - Budget flags (--max-total-matches, --max-result-bytes) are NOT passed.
+- Both trg and rg exit codes are independently verified against expected_exit.
 """
 
 import os
 import sys
+import time
 import argparse
 import hashlib
 import shutil
@@ -50,27 +54,40 @@ def norm_path(p: str) -> str:
     return p
 
 
-def run_bin(bin_path: str, args: list, stdin_data: str = None, stdin_devnull: bool = False, cwd: str = None, timeout: int = 10):
+def run_bin(bin_path: str, args: list, stdin_data: str = None, stdin_devnull: bool = False,
+            stdin_file: str = None, delayed_pipe: tuple = None, cwd: str = None, timeout: int = 10):
     stdin = None
+    f_in = None
     if stdin_devnull:
         stdin = subprocess.DEVNULL
-    elif stdin_data is not None:
+    elif stdin_file is not None:
+        f_in = open(stdin_file, "r", encoding="utf-8")
+        stdin = f_in
+    elif stdin_data is not None or delayed_pipe is not None:
         stdin = subprocess.PIPE
 
-    p = subprocess.Popen(
-        [bin_path] + args,
-        stdin=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd
-    )
     try:
-        stdout, stderr = p.communicate(input=stdin_data, timeout=timeout)
+        p = subprocess.Popen(
+            [bin_path] + args,
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=cwd
+        )
+        if delayed_pipe is not None:
+            delay_sec, data = delayed_pipe
+            time.sleep(delay_sec)
+            stdout, stderr = p.communicate(input=data, timeout=timeout)
+        else:
+            stdout, stderr = p.communicate(input=stdin_data, timeout=timeout)
     except subprocess.TimeoutExpired:
         p.kill()
         stdout, stderr = p.communicate()
         raise TimeoutError(f"Command {' '.join([bin_path] + args)} timed out")
+    finally:
+        if f_in:
+            f_in.close()
 
     return p.returncode, stdout, stderr
 
@@ -134,23 +151,32 @@ class DiffRunner:
         self.failed = 0
 
     def assert_differential(self, name: str, trg_args: list, rg_args: list,
+                            expected_exit: int = 0,
                             stdin_data: str = None, stdin_devnull: bool = False,
+                            stdin_file: str = None, delayed_pipe: tuple = None,
                             cwd: str = None, mode: str = "normal"):
-        trg_code, trg_out, trg_err = run_bin(self.trg, trg_args, stdin_data=stdin_data, stdin_devnull=stdin_devnull, cwd=cwd)
-        rg_code, rg_out, rg_err = run_bin(self.rg, rg_args, stdin_data=stdin_data, stdin_devnull=stdin_devnull, cwd=cwd)
+        trg_code, trg_out, trg_err = run_bin(self.trg, trg_args, stdin_data=stdin_data, stdin_devnull=stdin_devnull,
+                                             stdin_file=stdin_file, delayed_pipe=delayed_pipe, cwd=cwd)
+        rg_code, rg_out, rg_err = run_bin(self.rg, rg_args, stdin_data=stdin_data, stdin_devnull=stdin_devnull,
+                                           stdin_file=stdin_file, delayed_pipe=delayed_pipe, cwd=cwd)
 
-        # 1. Exit code check
-        if trg_code != rg_code:
-            print(f"[FAIL] {name}: Exit code mismatch: trg={trg_code}, rg={rg_code}")
+        # 1. Strict Independent Exit Code Check against expected_exit
+        if trg_code != expected_exit:
+            print(f"[FAIL] {name}: trg exit code {trg_code} != expected {expected_exit}")
             print(f"  trg stdout: {trg_out!r}")
             print(f"  trg stderr: {trg_err!r}")
+            self.failed += 1
+            return False
+
+        if rg_code != expected_exit:
+            print(f"[FAIL] {name}: rg exit code {rg_code} != expected {expected_exit}")
             print(f"  rg  stdout: {rg_out!r}")
             print(f"  rg  stderr: {rg_err!r}")
             self.failed += 1
             return False
 
-        # 2. Multiset match check
-        if trg_code == 0:
+        # 2. Multiset match check when expected_exit == 0
+        if expected_exit == 0:
             trg_bag = parse_output_as_bag(trg_out, mode=mode)
             rg_bag = parse_output_as_bag(rg_out, mode=mode)
             if trg_bag != rg_bag:
@@ -162,7 +188,18 @@ class DiffRunner:
                 self.failed += 1
                 return False
 
-        print(f"[PASS] {name} (exit={trg_code})")
+        # 3. For exit code 2, ensure diagnostics were actually produced on stderr
+        if expected_exit == 2:
+            if not trg_err.strip():
+                print(f"[FAIL] {name}: trg exited with 2 but produced no stderr diagnostic")
+                self.failed += 1
+                return False
+            if not rg_err.strip():
+                print(f"[FAIL] {name}: rg exited with 2 but produced no stderr diagnostic")
+                self.failed += 1
+                return False
+
+        print(f"[PASS] {name} (exit={expected_exit})")
         self.passed += 1
         return True
 
@@ -224,90 +261,99 @@ def main():
     # =========================================================================
     runner.assert_differential("Stdin: simple fixed string match",
                                ["-F", "-n", "banana"], ["-F", "-n", "banana"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: no match exits 1",
                                ["-F", "-n", "blueberry"], ["-F", "-n", "blueberry"],
-                               stdin_data=sample_pipe)
+                               expected_exit=1, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: case insensitive (-i)",
                                ["-F", "-n", "-i", "apple"], ["-F", "-n", "-i", "apple"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: case sensitive override (-i then -s)",
                                ["-F", "-n", "-i", "-s", "Apple"], ["-F", "-n", "-i", "-s", "Apple"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: smart case (-S) lowercase",
                                ["-F", "-n", "-S", "banana"], ["-F", "-n", "-S", "banana"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: smart case (-S) uppercase",
                                ["-F", "-n", "-S", "BANANA"], ["-F", "-n", "-S", "BANANA"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: word boundary (-w)",
                                ["-F", "-n", "-w", "pie"], ["-F", "-n", "-w", "pie"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: line regexp (-x)",
                                ["-F", "-n", "-x", "cherry tart"], ["-F", "-n", "-x", "cherry tart"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: invert match (-v)",
                                ["-F", "-n", "-v", "banana"], ["-F", "-n", "-v", "banana"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: files with matches (-l)",
                                ["-F", "-l", "banana"], ["-F", "-l", "banana"],
-                               stdin_data=sample_pipe, mode="paths")
+                               expected_exit=0, stdin_data=sample_pipe, mode="paths")
 
     runner.assert_differential("Stdin: count (-c)",
                                ["-F", "-c", "banana"], ["-F", "-c", "banana"],
-                               stdin_data=sample_pipe, mode="counts")
+                               expected_exit=0, stdin_data=sample_pipe, mode="counts")
 
     runner.assert_differential("Stdin: quiet (-q) hit",
                                ["-F", "-q", "banana"], ["-F", "-q", "banana"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: quiet (-q) miss",
                                ["-F", "-q", "blueberry"], ["-F", "-q", "blueberry"],
-                               stdin_data=sample_pipe)
+                               expected_exit=1, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: only matching (-o -n)",
                                ["-F", "-o", "-n", "tart"], ["-F", "-o", "-n", "tart"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: only matching (-o -N)",
                                ["-F", "-o", "-N", "tart"], ["-F", "-o", "-N", "tart"],
-                               stdin_data=sample_pipe, mode="raw")
+                               expected_exit=0, stdin_data=sample_pipe, mode="raw")
 
     runner.assert_differential("Stdin: max count (-m 1)",
                                ["-F", "-n", "-m", "1", "-i", "apple"], ["-F", "-n", "-m", "1", "-i", "apple"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Stdin: multi-pattern (-e -e)",
                                ["-F", "-n", "-e", "cherry", "-e", "split"], ["-F", "-n", "-e", "cherry", "-e", "split"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     # =========================================================================
-    # Suite 2: Empty pipe, /dev/null fallback, and explicit '-'
+    # Suite 2: Empty pipe, Delayed pipe, File redirection, /dev/null fallback, and explicit '-'
     # =========================================================================
     # Empty pipe: EOF with 0 bytes -> exit 1, no directory fallback
     runner.assert_differential("Empty pipe: exit 1 on EOF",
                                ["-F", "anything"], ["-F", "anything"],
-                               stdin_data="")
+                               expected_exit=1, stdin_data="")
+
+    # Delayed pipe: producer sleeps 50ms before writing payload
+    runner.assert_differential("Delayed pipe: slow producer waits without falling back to directory",
+                               ["-F", "-n", "delayed_needle"], ["-F", "-n", "delayed_needle"],
+                               expected_exit=0, delayed_pipe=(0.05, "header\ndelayed_needle in pipe\nfooter\n"))
+
+    # Regular file redirection (< package.tk): fstat S_ISREG selects stdin
+    runner.assert_differential("File redirection: < package.tk searches redirected file without path",
+                               ["-F", "-n", "pub const PACKAGE"], ["-F", "-n", "pub const PACKAGE"],
+                               expected_exit=0, stdin_file=str(repo_root / "package.tk"))
 
     # < /dev/null: Character device input -> falls back to directory search '.'
-    # In repo root, 'pub const PACKAGE' exists in package.tk
     runner.assert_differential("/dev/null redirection: falls back to directory search '.'",
                                ["-F", "-n", "pub const PACKAGE"], ["-F", "-n", "pub const PACKAGE"],
-                               stdin_devnull=True, cwd=str(repo_root))
+                               expected_exit=0, stdin_devnull=True, cwd=str(repo_root))
 
     # Explicit '-' with < /dev/null: must search stdin and exit 1 (not search directory)
     runner.assert_differential("Explicit '-' with /dev/null: searches stdin, exits 1",
                                ["-F", "pub const PACKAGE", "-"], ["-F", "pub const PACKAGE", "-"],
-                               stdin_devnull=True, cwd=str(repo_root))
+                               expected_exit=1, stdin_devnull=True, cwd=str(repo_root))
 
     # =========================================================================
     # Suite 3: Stdin vs Directory Isolation
@@ -324,33 +370,32 @@ def main():
         # Piped input without path: matches stdin token on stdin
         runner.assert_differential("Isolation: stdin token matched on stdin",
                                    ["-F", "-n", stdin_token], ["-F", "-n", stdin_token],
-                                   stdin_data=stdin_payload, cwd=tmpdir)
+                                   expected_exit=0, stdin_data=stdin_payload, cwd=tmpdir)
 
         # Piped input without path: directory token not found in stdin -> exit 1
         runner.assert_differential("Isolation: dir token not found in stdin (exit 1)",
                                    ["-F", "-n", dir_token], ["-F", "-n", dir_token],
-                                   stdin_data=stdin_payload, cwd=tmpdir)
+                                   expected_exit=1, stdin_data=stdin_payload, cwd=tmpdir)
 
         # Piped input with explicit path '.': searches directory, finds dir token
         runner.assert_differential("Isolation: explicit path '.' searches dir despite active pipe",
                                    ["-F", "-n", "-H", dir_token, "."], ["-F", "-n", "-H", dir_token, "."],
-                                   stdin_data=stdin_payload, cwd=tmpdir)
+                                   expected_exit=0, stdin_data=stdin_payload, cwd=tmpdir)
 
         # Piped input with explicit path '.': stdin token not in directory -> exit 1
         runner.assert_differential("Isolation: explicit path '.' ignores stdin token (exit 1)",
                                    ["-F", "-n", "-H", stdin_token, "."], ["-F", "-n", "-H", stdin_token, "."],
-                                   stdin_data=stdin_payload, cwd=tmpdir)
+                                   expected_exit=1, stdin_data=stdin_payload, cwd=tmpdir)
 
     # =========================================================================
     # Suite 4: Pipeline composition (trg --files | trg PATTERN vs rg --files | rg PATTERN)
     # =========================================================================
-    # Generate file list from trg and search with both
     code_f, out_f, _ = run_bin(runner.trg, ["--files"], cwd=str(repo_root))
     assert code_f == 0, "trg --files failed"
 
     runner.assert_differential("Pipeline: filter --files output via stdin",
                                ["-F", "-n", "package.tk"], ["-F", "-n", "package.tk"],
-                               stdin_data=out_f)
+                               expected_exit=0, stdin_data=out_f)
 
     # =========================================================================
     # Suite 5: Error handling parity (exit code 2)
@@ -358,43 +403,43 @@ def main():
     # Unknown flag
     runner.assert_differential("Error: unknown flag exit code 2",
                                ["--this-flag-does-not-exist-xyz"], ["--this-flag-does-not-exist-xyz"],
-                               cwd=str(repo_root))
+                               expected_exit=2, cwd=str(repo_root))
 
     # Missing required argument for flag
     runner.assert_differential("Error: missing argument for -m",
                                ["-m"], ["-m"],
-                               cwd=str(repo_root))
+                               expected_exit=2, cwd=str(repo_root))
 
     # =========================================================================
     # Suite 6: Default Regex Semantics & Regex Error Parity
     # =========================================================================
     runner.assert_differential("Default Regex: dot-star wildcard matching",
                                ["-n", "apple.*pie"], ["-n", "apple.*pie"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Default Regex: alternation (cherry|banana)",
                                ["-n", "cherry|banana"], ["-n", "cherry|banana"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Default Regex: character classes [A-Z]+",
                                ["-n", "[A-Z]+"], ["-n", "[A-Z]+"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Default Regex: line anchor ^BANANA",
                                ["-n", "^BANANA"], ["-n", "^BANANA"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Explicit -E: compatibility switch matches rg default",
                                ["-E", "-n", "cherry|banana"], ["-n", "cherry|banana"],
-                               stdin_data=sample_pipe)
+                               expected_exit=0, stdin_data=sample_pipe)
 
     runner.assert_differential("Regex error: unclosed parenthesis exits 2",
                                ["foo("], ["foo("],
-                               stdin_data=sample_pipe)
+                               expected_exit=2, stdin_data=sample_pipe)
 
     runner.assert_differential("Regex error: unclosed bracket exits 2",
                                ["[a-z"], ["[a-z"],
-                               stdin_data=sample_pipe)
+                               expected_exit=2, stdin_data=sample_pipe)
 
     # =========================================================================
     # Summary

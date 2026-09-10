@@ -623,7 +623,7 @@ pub fn execute_symbols_cli(raw_args: Vec<string>) -> i32 {
         println("      --json                 Output symbols in JSON array format")
         println("  -k, --kind <KIND>          Filter symbols by kind (function, method, class, struct, etc.)")
         println("      --max-symbols <N>      Maximum number of symbols to output")
-        println("      --max-bytes <SIZE>     Maximum output bytes (e.g. 64K, 1M)")
+        println("      --max-bytes <SIZE>     Maximum symbol output bytes (alias: --max-result-bytes; counts formatted symbol outline records; default: unlimited; 0 stops outline immediately)")
         return 2
     }
 
@@ -644,7 +644,7 @@ pub fn execute_symbols_cli(raw_args: Vec<string>) -> i32 {
             println("      --json                 Output symbols in JSON array format")
             println("  -k, --kind <KIND>          Filter symbols by kind (function, method, class, struct, etc.)")
             println("      --max-symbols <N>      Maximum number of symbols to output")
-            println("      --max-bytes <SIZE>     Maximum output bytes (e.g. 64K, 1M)")
+            println("      --max-bytes <SIZE>     Maximum symbol output bytes (alias: --max-result-bytes; counts formatted symbol outline records; default: unlimited; 0 stops outline immediately)")
             return 0
         } else if arg == "--json" {
             json_out = true
@@ -680,13 +680,16 @@ pub fn execute_symbols_cli(raw_args: Vec<string>) -> i32 {
                 return 2
             }
             max_syms = Option<usize>::Some(parsed.unwrap())
-        } else if arg == "--max-bytes" {
+        } else if arg == "--max-bytes" || arg == "--max-result-bytes" {
             if i + 1 >= raw_args.len() {
-                print_err("Error: --max-bytes requires a size argument")
+                auto err_req# = string::from("Error: ")
+                err_req#.push_str(arg)
+                err_req#.push_str(" requires a size argument")
+                print_err(err_req.as_str())
                 return 2
             }
             i = i + 1
-            auto parsed = parse_size_bytes_strict(raw_args.borrow(i).as_str(), "--max-bytes")
+            auto parsed = parse_size_bytes_strict(raw_args.borrow(i).as_str(), arg)
             if parsed.is_err() {
                 print_err(parsed.unwrap_err().as_str())
                 return 2
@@ -695,6 +698,14 @@ pub fn execute_symbols_cli(raw_args: Vec<string>) -> i32 {
         } else if arg.starts_with("--max-bytes=") {
             auto v = arg.substr(12:usize, arg.len - 12:usize)
             auto parsed = parse_size_bytes_strict(v, "--max-bytes")
+            if parsed.is_err() {
+                print_err(parsed.unwrap_err().as_str())
+                return 2
+            }
+            max_bytes = Option<usize>::Some(parsed.unwrap())
+        } else if arg.starts_with("--max-result-bytes=") {
+            auto v = arg.substr(19:usize, arg.len - 19:usize)
+            auto parsed = parse_size_bytes_strict(v, "--max-result-bytes")
             if parsed.is_err() {
                 print_err(parsed.unwrap_err().as_str())
                 return 2

@@ -14,7 +14,7 @@ import src/parse::{parse_usize_strict, parse_size_bytes_strict}
 import src/symbol::{is_valid_identifier, generate_symbol_variants}
 
 pub fn print_help() {
-    println("trg 0.16.1 - Fast, agent-friendly code search tool")
+    println("trg 0.17.0 - Fast, agent-friendly code search tool")
     println("Usage:")
     println("  trg [OPTIONS] <PATTERN> [PATH...]")
     println("  trg -e <PATTERN>... [OPTIONS] [PATH...]")
@@ -26,6 +26,12 @@ pub fn print_help() {
     println("  trg view <PATH>:<LINE> [-C N] [--block]")
     println("  trg view <PATH> --lines <M-N>")
     println("  trg symbols <PATH> [--json] [-k <KIND>] [--max-symbols N]")
+    println("")
+    println("Workflow Example (Search -> Symbols -> View):")
+    println("  1. Search:  trg \"UserAuth\" src/ --max-bytes 32K")
+    println("  2. Outline: trg symbols src/auth.tk -k class,struct --max-bytes 16K")
+    println("  3. Hydrate: trg view src/auth.tk:42 --block --max-bytes 8K")
+    println("  Note: Each command enforces its own independent budget; caller must allocate total budget across steps.")
     println("")
     println("Options:")
     println("  -e, --regexp <PATTERN>     Use PATTERN for matching (can be repeated)")
@@ -47,8 +53,8 @@ pub fn print_help() {
     println("  -x, --line-regexp          Match patterns only on complete lines")
     println("  -m, --max-count <NUM>      Stop scanning a file after NUM matching lines")
     println("      --max-columns <NUM>    Omit matching/context lines exceeding NUM bytes (0 = unlimited)")
-    println("      --max-total-matches <N> Stop search after emitting N total matches across files (alias: --max-matches)")
-    println("      --max-result-bytes <SZ> Stop search after emitting canonical bytes (e.g. 64K, 1M, 500000; alias: --max-bytes)")
+    println("      --max-total-matches <N> Stop search after emitting N total matches across files (alias: --max-matches; default: unlimited; 0 stops search immediately)")
+    println("      --max-bytes <SIZE>     Maximum match output bytes (alias: --max-result-bytes; counts canonical match lines and headers; default: unlimited; 0 stops search immediately)")
     println("      --max-files-with-matches <N> Stop search after N files with matches")
     println("      --sort <TYPE>          Sort order: path, none (CLI: none, MCP: path)")
     println("      --sortr <TYPE>         Reverse sort order: path (default: path)")
@@ -86,7 +92,7 @@ pub fn print_help() {
 }
 
 pub fn print_version() {
-    println("trg 0.16.1 (Toka)")
+    println("trg 0.17.0 (Toka)")
 }
 
 fn parse_non_negative_int(s: str, flag_name: str) -> Result<usize, string> {
