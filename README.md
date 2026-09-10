@@ -233,39 +233,39 @@ Run `sh install.sh --help` to see all options, including `--no-modify-path`.
 You can download standalone archives directly from [GitHub Releases](https://github.com/tokalang/trg/releases/latest):
 
 - **macOS (Apple Silicon / arm64)**:
-  - Direct Download: [`trg-v0.19.0-macos-arm64.tar.gz`](https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-macos-arm64.tar.gz)
+  - Direct Download: [`trg-v0.19.1-macos-arm64.tar.gz`](https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-macos-arm64.tar.gz)
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-macos-arm64.tar.gz
-  tar -xzf trg-v0.19.0-macos-arm64.tar.gz
-  ./trg-v0.19.0-macos-arm64/trg --version
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-macos-arm64.tar.gz
+  tar -xzf trg-v0.19.1-macos-arm64.tar.gz
+  ./trg-v0.19.1-macos-arm64/trg --version
   ```
 
 - **Linux (x86_64)**:
-  - Direct Download: [`trg-v0.19.0-linux-x64.tar.gz`](https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-linux-x64.tar.gz)
+  - Direct Download: [`trg-v0.19.1-linux-x64.tar.gz`](https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-linux-x64.tar.gz)
   ```bash
-  curl -fLO https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-linux-x64.tar.gz
-  tar -xzf trg-v0.19.0-linux-x64.tar.gz
-  ./trg-v0.19.0-linux-x64/trg --version
+  curl -fLO https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-linux-x64.tar.gz
+  tar -xzf trg-v0.19.1-linux-x64.tar.gz
+  ./trg-v0.19.1-linux-x64/trg --version
   ```
 
 - **Windows (x64)**:
-  - Direct Download: [`trg-v0.19.0-windows-x64.zip`](https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-windows-x64.zip)
+  - Direct Download: [`trg-v0.19.1-windows-x64.zip`](https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-windows-x64.zip)
   ```powershell
-  curl.exe -fLO https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-windows-x64.zip
-  tar.exe -xf trg-v0.19.0-windows-x64.zip
-  .\trg-v0.19.0-windows-x64\trg.exe --version
+  curl.exe -fLO https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-windows-x64.zip
+  tar.exe -xf trg-v0.19.1-windows-x64.zip
+  .\trg-v0.19.1-windows-x64\trg.exe --version
   ```
 
 - **Windows (ARM64)**:
-  - Direct Download: [`trg-v0.19.0-windows-arm64.zip`](https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-windows-arm64.zip)
+  - Direct Download: [`trg-v0.19.1-windows-arm64.zip`](https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-windows-arm64.zip)
   ```powershell
-  curl.exe -fLO https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-windows-arm64.zip
-  tar.exe -xf trg-v0.19.0-windows-arm64.zip
-  .\trg-v0.19.0-windows-arm64\trg.exe --version
+  curl.exe -fLO https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-windows-arm64.zip
+  tar.exe -xf trg-v0.19.1-windows-arm64.zip
+  .\trg-v0.19.1-windows-arm64\trg.exe --version
   ```
 
 - **Checksums**:
-  - Direct Download: [`SHA256SUMS`](https://github.com/tokalang/trg/releases/download/v0.19.0/SHA256SUMS)
+  - Direct Download: [`SHA256SUMS`](https://github.com/tokalang/trg/releases/download/v0.19.1/SHA256SUMS)
 
 ### 5. Windows Installation
 
@@ -291,7 +291,7 @@ winget install --id Tokalang.trg -e
 
 #### Option C: Direct Download & Portable Run
 
-Click to download [`trg-v0.19.0-windows-x64.zip`](https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-windows-x64.zip) (or [`trg-v0.19.0-windows-arm64.zip`](https://github.com/tokalang/trg/releases/download/v0.19.0/trg-v0.19.0-windows-arm64.zip)), extract `trg.exe`, and drop it into any directory included in your system `PATH`.
+Click to download [`trg-v0.19.1-windows-x64.zip`](https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-windows-x64.zip) (or [`trg-v0.19.1-windows-arm64.zip`](https://github.com/tokalang/trg/releases/download/v0.19.1/trg-v0.19.1-windows-arm64.zip)), extract `trg.exe`, and drop it into any directory included in your system `PATH`.
 
 ### 6. Build from Source (via Toka Package Manager)
 

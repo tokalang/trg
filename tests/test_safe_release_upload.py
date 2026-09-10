@@ -34,8 +34,8 @@ class SafeReleaseUploadMockTest(unittest.TestCase):
         self.dist_dir = self.tmpdir / "dist"
         self.dist_dir.mkdir()
 
-        self.tag = "v0.19.0"
-        self.ver = "0.19.0"
+        self.tag = "v0.19.1"
+        self.ver = "0.19.1"
 
         # Generate six valid mandatory deliverables
         self.bin_linux = self.dist_dir / f"trg-{self.tag}-linux-x64.tar.gz"
