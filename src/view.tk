@@ -1,5 +1,6 @@
 // Stateless point hydration engine (trg view)
 import core/str::{str}
+import std/math::{is_finite, floor}
 
 import std/vec::{Vec}
 import std/io::{println}
@@ -182,7 +183,9 @@ pub shape ViewResult (
     target_symbol: Vec<SymbolTargetInfo>,
     candidates: Vec<SymbolCandidateInfo>,
     candidates_truncated: bool,
-    continuation_token: Option<string>
+    continuation_token: Option<string>,
+    continuation_active: bool,
+    sha256_hex: string
 )
 
 pub fn format_view_line_record_json(line_number: usize, kind: str, text: str) -> string {
@@ -306,15 +309,17 @@ impl ViewResult {
             r_i = r_i + 1:usize
         }
         resp#.push_str("]")
-        resp#.push_str(",\"continuation_token\":")
-        match self.continuation_token {
-            auto Option<string>::Some(&tok) => {
-                resp#.push_str("\"")
-                resp#.push_str(json_escape(tok.as_str()).as_str())
-                resp#.push_str("\"")
-            }
-            auto Option<string>::None => {
-                resp#.push_str("null")
+        if self.continuation_active {
+            resp#.push_str(",\"continuation_token\":")
+            match self.continuation_token {
+                auto Option<string>::Some(&tok) => {
+                    resp#.push_str("\"")
+                    resp#.push_str(json_escape(tok.as_str()).as_str())
+                    resp#.push_str("\"")
+                }
+                auto Option<string>::None => {
+                    resp#.push_str("null")
+                }
             }
         }
         if self.mode == "symbol" {
@@ -532,20 +537,23 @@ impl ViewResult {
         auto l_bytes_emitted = u64_to_string(limit as u64).len()
         auto s_records_open = ",\"records\":["
         auto l_records_open = s_records_open.len
-        auto s_tok_tag = ",\"continuation_token\":"
-        auto l_tok_tag = s_tok_tag.len
-        auto l_tok# = 4:usize // "null"
-        match self.continuation_token {
-            auto Option<string>::Some(&tok) => {
-                l_tok = 2:usize + json_escape(tok.as_str()).len()
+        auto l_records_close# = 1:usize
+        if self.continuation_active {
+            auto s_tok_tag = ",\"continuation_token\":"
+            auto l_tok# = 4:usize // "null"
+            match self.continuation_token {
+                auto Option<string>::Some(&tok) => {
+                    l_tok = 2:usize + json_escape(tok.as_str()).len()
+                }
+                auto Option<string>::None => {}
             }
-            auto Option<string>::None => {}
+            l_records_close = l_records_close + s_tok_tag.len + l_tok
         }
-        auto l_records_close# = 1:usize + l_tok_tag + l_tok + 1:usize
         if self.mode == "symbol" {
             auto sym_suffix = self.format_symbol_suffix_str(is_pruned)
-            l_records_close = 1:usize + l_tok_tag + l_tok + sym_suffix.len() + 1:usize
+            l_records_close = l_records_close + sym_suffix.len()
         }
+        l_records_close = l_records_close + 1:usize
 
         return l_schema + l_mode + l_path_tag + l_path + l_req_line_tag + l_req_line +
                l_req_range_tag + l_req_range + l_det_range_tag + l_det_range +
@@ -625,9 +633,35 @@ impl ViewResult {
         auto w_end# = n_recs - 1:usize
         auto cur_recs_len# = total_recs_len
         auto has_records# = true
-
         auto req_line_opt = self.requested_line
-        if req_line_opt.is_some() {
+
+        if self.continuation_active {
+            // Continuation mode: always sequential range-start paging!
+            // Never drop lines from the start (w_start stays 0), only shrink w_end from the back.
+            loop true {
+                auto num_lines = w_end - w_start + 1:usize
+                auto comma_len# = 0:usize
+                if num_lines > 1:usize {
+                    comma_len = num_lines - 1:usize
+                }
+                auto meta_len = self.compute_candidate_meta_len(w_start, w_end, true, limit)
+                auto cand_total = meta_len + comma_len + cur_recs_len
+                if cand_total <= limit {
+                    break
+                }
+                if w_end > w_start {
+                    cur_recs_len = cur_recs_len - rec_lens.get(w_end)
+                    w_end = w_end - 1:usize
+                } else {
+                    // Even 1 line cannot fit within limit
+                    has_records = false
+                    auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record exceeds max_result_bytes (")
+                    err#.push_str(u64_to_string(limit as u64).as_str())
+                    err#.push_str(" bytes)")
+                    return Result<string, string>::Err(cede err)
+                }
+            }
+        } else if req_line_opt.is_some() {
             auto target_line_num = req_line_opt.unwrap()
             // Point or Block mode: target line must be preserved
             auto target_idx_opt# = Option<usize>::None
@@ -691,12 +725,14 @@ impl ViewResult {
                 eof_reached = self.eof_reached,
                 records = cede single_records,
                 selection_status = string::from(self.selection_status.as_str()),
-                range_status = target_range_status_clone,
+                range_status = cede target_range_status_clone,
                 output_status = string::from("budget_truncated"),
                 target_symbol = cede target_sym_clone,
                 candidates = Vec<SymbolCandidateInfo>::new(),
                 candidates_truncated = false,
-                continuation_token = Option<string>::None
+                continuation_token = Option<string>::None,
+                continuation_active = false,
+                sha256_hex = string::new()
             )
             auto to_conv = target_only_vr#.converge_structured()
             if to_conv.is_err() {
@@ -755,7 +791,7 @@ impl ViewResult {
                 }
             }
         } else {
-            // Range mode: prune from end, or 0 records if needed
+            // Range mode without continuation: prune from end, or 0 records if needed
             loop true {
                 auto num_lines = w_end - w_start + 1:usize
                 auto comma_len# = 0:usize
@@ -811,26 +847,78 @@ impl ViewResult {
                 start = self.records.borrow(0).line_number,
                 end = self.records.borrow(self.records.len() - 1:usize).line_number
             ))
-            match self.continuation_token {
-                auto Option<string>::Some(&old_tok_str) => {
-                    auto dec_res = decode_continuation_token(old_tok_str.as_str())
-                    if dec_res.is_ok() {
-                        auto old_tok = dec_res.unwrap()
-                        auto new_end = self.records.borrow(self.records.len() - 1:usize).line_number
-                        if new_end < old_tok.end_line {
-                            auto updated_tok# = old_tok.clone()
-                            updated_tok.next_line = new_end + 1:usize
-                            self.continuation_token = Option<string>::Some(encode_continuation_token(updated_tok))
-                        } else {
-                            self.continuation_token = Option<string>::None
+            if self.continuation_active {
+                auto last_line = self.records.borrow(self.records.len() - 1:usize).line_number
+                auto total_end# = 0:usize
+                auto total_start# = 1:usize
+                match self.detected_block_range {
+                    auto Option<BlockRange>::Some(dbr) => {
+                        total_start = dbr.start
+                        total_end = dbr.end
+                    }
+                    auto Option<BlockRange>::None => {
+                        match self.requested_range {
+                            auto Option<BlockRange>::Some(rr) => {
+                                total_start = rr.start
+                                total_end = rr.end
+                            }
+                            auto Option<BlockRange>::None => {}
                         }
                     }
                 }
-                auto Option<string>::None => {}
+
+                if last_line < total_end {
+                    auto sym_name_opt# = Option<string>::None
+                    auto sym_scope_opt# = Option<string>::None
+                    if self.target_symbol.len() > 0:usize {
+                        auto &ts = self.target_symbol.borrow(0)
+                        sym_name_opt = Option<string>::Some(string::from(ts.name.as_str()))
+                        if ts.scope.len() > 0:usize {
+                            sym_scope_opt = Option<string>::Some(string::from(ts.scope.as_str()))
+                        }
+                    }
+                    auto r_stat# = string::from("confirmed")
+                    match self.range_status {
+                        auto Option<string>::Some(&rs) => {
+                            r_stat = string::from(rs.as_str())
+                        }
+                        auto Option<string>::None => {}
+                    }
+                    auto max_cols_tok# = Option<usize>::None
+                    match self.continuation_token {
+                        auto Option<string>::Some(&ts) => {
+                            auto dec = decode_continuation_token(ts.as_str())
+                            if dec.is_ok() {
+                                max_cols_tok = dec.unwrap().max_columns
+                            }
+                        }
+                        auto Option<string>::None => {}
+                    }
+                    auto updated_tok = ContinuationToken(
+                        version = 1:usize,
+                        path = string::from(self.path.as_str()),
+                        req_start = total_start,
+                        req_end = total_end,
+                        next_line = last_line + 1:usize,
+                        end_line = total_end,
+                        sha256_hex = string::from(self.sha256_hex.as_str()),
+                        mode = string::from(self.mode.as_str()),
+                        symbol = cede sym_name_opt,
+                        scope = cede sym_scope_opt,
+                        range_status = cede r_stat,
+                        max_columns = max_cols_tok
+                    )
+                    self.continuation_token = encode_continuation_token(updated_tok)
+                } else {
+                    self.continuation_token = Option<string>::None
+                }
+            } else {
+                self.continuation_token = Option<string>::None
             }
         } else {
             self.emitted_range = Option<BlockRange>::None
-            if self.continuation_token.is_some() {
+            self.continuation_token = Option<string>::None
+            if self.continuation_active {
                 auto err = string::from("target_exceeds_max_result_bytes: Budget too small to emit even a single line with continuation token")
                 return Result<string, string>::Err(cede err)
             }
@@ -870,7 +958,7 @@ impl ViewOptions {
     }
 }
 
-pub fn encode_continuation_token(token: ContinuationToken) -> string {
+pub fn encode_continuation_token(token: ContinuationToken) -> Option<string> {
     auto json# = string::from("{\"version\":1,\"path\":\"")
     json#.push_str(json_escape(token.path.as_str()).as_str())
     json#.push_str("\",\"req_start\":")
@@ -922,7 +1010,10 @@ pub fn encode_continuation_token(token: ContinuationToken) -> string {
     auto b64 = encode_url_safe_b64(json.as_str())
     auto out# = string::from("trg-cont-v1.")
     out#.push_str(b64.as_str())
-    return cede out
+    if out.len() > 4096:usize {
+        return Option<string>::None
+    }
+    return Option<string>::Some(cede out)
 }
 
 fn base64_url_char(val: u8) -> u8 {
@@ -968,6 +1059,34 @@ fn is_hex_char(c: char) -> bool {
         return true
     }
     return false
+}
+
+fn parse_token_positive_int(node: JsonNode) -> Option<usize> {
+    match node {
+        auto JsonNode::NumNode(n) => {
+            if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
+                return Option<usize>::Some(n as usize)
+            }
+            return Option<usize>::None
+        }
+        _ => {
+            return Option<usize>::None
+        }
+    }
+}
+
+fn parse_token_non_neg_int(node: JsonNode) -> Option<usize> {
+    match node {
+        auto JsonNode::NumNode(n) => {
+            if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
+                return Option<usize>::Some(n as usize)
+            }
+            return Option<usize>::None
+        }
+        _ => {
+            return Option<usize>::None
+        }
+    }
 }
 
 pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, string> {
@@ -1088,15 +1207,15 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
             }
             match rs_opt {
                 auto Option<&JsonNode>::Some(&n_node) => {
-                    match n_node {
-                        auto JsonNode::NumNode(n) => {
-                            if n >= 1.0 { rs_val = n as usize }
-                            else { return Result<ContinuationToken, string>::Err(string::from("Invalid req_start in continuation token")) }
-                        }
-                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid req_start in continuation token")) }
+                    auto parsed = parse_token_positive_int(n_node)
+                    if parsed.is_none() {
+                        return Result<ContinuationToken, string>::Err(string::from("Invalid req_start in continuation token: must be positive integer"))
                     }
+                    rs_val = parsed.unwrap()
                 }
-                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing req_start in continuation token")) }
+                auto Option<&JsonNode>::None => {
+                    return Result<ContinuationToken, string>::Err(string::from("Missing req_start in continuation token"))
+                }
             }
 
             // req_end
@@ -1107,18 +1226,15 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
             }
             match re_opt {
                 auto Option<&JsonNode>::Some(&n_node) => {
-                    match n_node {
-                        auto JsonNode::NumNode(n) => {
-                            if n >= 1.0 { re_val = n as usize }
-                            else { return Result<ContinuationToken, string>::Err(string::from("Invalid req_end in continuation token")) }
-                        }
-                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid req_end in continuation token")) }
+                    auto parsed = parse_token_positive_int(n_node)
+                    if parsed.is_none() {
+                        return Result<ContinuationToken, string>::Err(string::from("Invalid req_end in continuation token: must be positive integer"))
                     }
+                    re_val = parsed.unwrap()
                 }
-                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing req_end in continuation token")) }
-            }
-            if re_val < rs_val {
-                return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: req_end < req_start"))
+                auto Option<&JsonNode>::None => {
+                    return Result<ContinuationToken, string>::Err(string::from("Missing req_end in continuation token"))
+                }
             }
 
             // next_line
@@ -1129,15 +1245,15 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
             }
             match nl_opt {
                 auto Option<&JsonNode>::Some(&n_node) => {
-                    match n_node {
-                        auto JsonNode::NumNode(n) => {
-                            if n >= 1.0 { nl_val = n as usize }
-                            else { return Result<ContinuationToken, string>::Err(string::from("Invalid next_line in continuation token")) }
-                        }
-                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid next_line in continuation token")) }
+                    auto parsed = parse_token_positive_int(n_node)
+                    if parsed.is_none() {
+                        return Result<ContinuationToken, string>::Err(string::from("Invalid next_line in continuation token: must be positive integer"))
                     }
+                    nl_val = parsed.unwrap()
                 }
-                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing next_line in continuation token")) }
+                auto Option<&JsonNode>::None => {
+                    return Result<ContinuationToken, string>::Err(string::from("Missing next_line in continuation token"))
+                }
             }
 
             // end_line
@@ -1148,18 +1264,28 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
             }
             match el_opt {
                 auto Option<&JsonNode>::Some(&n_node) => {
-                    match n_node {
-                        auto JsonNode::NumNode(n) => {
-                            if n >= 1.0 { el_val = n as usize }
-                            else { return Result<ContinuationToken, string>::Err(string::from("Invalid end_line in continuation token")) }
-                        }
-                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid end_line in continuation token")) }
+                    auto parsed = parse_token_positive_int(n_node)
+                    if parsed.is_none() {
+                        return Result<ContinuationToken, string>::Err(string::from("Invalid end_line in continuation token: must be positive integer"))
                     }
+                    el_val = parsed.unwrap()
                 }
-                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing end_line in continuation token")) }
+                auto Option<&JsonNode>::None => {
+                    return Result<ContinuationToken, string>::Err(string::from("Missing end_line in continuation token"))
+                }
+            }
+
+            if re_val < rs_val {
+                return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: req_end < req_start"))
+            }
+            if nl_val < rs_val {
+                return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: next_line < req_start"))
             }
             if el_val < nl_val {
                 return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: end_line < next_line"))
+            }
+            if el_val > re_val {
+                return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: end_line > req_end"))
             }
 
             // sha256 hex
@@ -1227,10 +1353,14 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
                             }
                             st_val = s.clone()
                         }
-                        _ => {}
+                        _ => {
+                            return Result<ContinuationToken, string>::Err(string::from("Invalid range_status in continuation token: must be string"))
+                        }
                     }
                 }
-                auto Option<&JsonNode>::None => {}
+                auto Option<&JsonNode>::None => {
+                    return Result<ContinuationToken, string>::Err(string::from("Missing range_status in continuation token"))
+                }
             }
 
             // symbol
@@ -1243,7 +1373,9 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
                 auto Option<&JsonNode>::Some(&s_node) => {
                     match s_node {
                         auto JsonNode::StrNode(&s) => { s_val = Option<string>::Some(s.clone()) }
-                        _ => {}
+                        _ => {
+                            return Result<ContinuationToken, string>::Err(string::from("Invalid symbol in continuation token: must be string"))
+                        }
                     }
                 }
                 auto Option<&JsonNode>::None => {}
@@ -1259,7 +1391,9 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
                 auto Option<&JsonNode>::Some(&c_node) => {
                     match c_node {
                         auto JsonNode::StrNode(&c) => { c_val = Option<string>::Some(c.clone()) }
-                        _ => {}
+                        _ => {
+                            return Result<ContinuationToken, string>::Err(string::from("Invalid scope in continuation token: must be string"))
+                        }
                     }
                 }
                 auto Option<&JsonNode>::None => {}
@@ -1273,12 +1407,11 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
             }
             match mc_opt {
                 auto Option<&JsonNode>::Some(&mc_node) => {
-                    match mc_node {
-                        auto JsonNode::NumNode(n) => {
-                            if n >= 0.0 { mc_val = Option<usize>::Some(n as usize) }
-                        }
-                        _ => {}
+                    auto parsed_mc = parse_token_non_neg_int(mc_node)
+                    if parsed_mc.is_none() {
+                        return Result<ContinuationToken, string>::Err(string::from("Invalid max_columns in continuation token: must be non-negative integer"))
                     }
+                    mc_val = parsed_mc
                 }
                 auto Option<&JsonNode>::None => {}
             }
@@ -1565,11 +1698,221 @@ fn find_last_colon(s: str) -> Option<usize> {
     return Option<usize>::None
 }
 
+fn execute_view_continuation_lines(
+    opts: ViewOptions,
+    start_req: usize,
+    end_req: usize
+) -> Result<ViewResult, string> {
+    auto max_lines_val# = 0:usize
+    auto has_max_lines# = false
+    match opts.max_lines {
+        auto Option<usize>::Some(v) => {
+            max_lines_val = v
+            has_max_lines = true
+        }
+        _ => {}
+    }
+
+    auto max_bytes_val# = 0:usize
+    auto has_max_bytes# = false
+    match opts.max_result_bytes {
+        auto Option<usize>::Some(v) => {
+            max_bytes_val = v
+            has_max_bytes = true
+        }
+        _ => {}
+    }
+
+    auto max_cols_val# = 0:usize
+    auto has_max_cols# = false
+    match opts.max_columns {
+        auto Option<usize>::Some(v) => {
+            max_cols_val = v
+            has_max_cols = true
+        }
+        _ => {}
+    }
+
+    if has_max_lines && max_lines_val < 1:usize {
+        return Result<ViewResult, string>::Err(string::from("target_exceeds_max_lines: Target line cannot fit within max_lines 0"))
+    }
+
+    auto capture = capture_file_bounded(opts.file_path.as_str(), 10485760:usize)
+    if capture.open_err || capture.read_err {
+        auto err# = string::from("Error reading file '")
+        err#.push_str(opts.file_path.as_str())
+        err#.push_str("'")
+        return Result<ViewResult, string>::Err(cede err)
+    }
+
+    if capture.size_exceeded {
+        return Result<ViewResult, string>::Err(string::from("scan_incomplete: file too large, exceeds 10MiB input read limit"))
+    }
+
+    auto lines = cede capture.lines
+    auto sha256_hex = cede capture.sha256_hex
+    auto total_lines = lines.len()
+
+    if total_lines == 0:usize {
+        return Result<ViewResult, string>::Err(string::from("File is empty"))
+    }
+    if start_req > total_lines {
+        auto err# = string::from("Line range start out of bounds: file has ")
+        err#.push_str(u64_to_string(total_lines as u64).as_str())
+        err#.push_str(" lines, requested start ")
+        err#.push_str(u64_to_string(start_req as u64).as_str())
+        return Result<ViewResult, string>::Err(cede err)
+    }
+
+    auto end_actual# = end_req
+    if end_actual > total_lines {
+        end_actual = total_lines
+    }
+
+    auto header# = string::new()
+    if opts.continuation {
+        header#.push_str("[file: ")
+        header#.push_str(opts.file_path.as_str())
+        header#.push_str(", lines: L")
+        header#.push_str(u64_to_string(start_req as u64).as_str())
+        header#.push_str("-L")
+        header#.push_str(u64_to_string(end_actual as u64).as_str())
+        header#.push_str("]\n")
+    }
+
+    auto cur_line# = start_req
+    auto lines_emitted# = 0:usize
+    auto bytes_emitted# = header.len()
+    auto truncated# = false
+    auto trunc_reason# = string::from("completed")
+    auto records# = Vec<ViewLineRecord>::new()
+    auto out# = string::new()
+    out#.push_str(header.as_str())
+    auto content_omitted# = false
+
+    loop cur_line <= end_actual {
+        if has_max_lines && lines_emitted >= max_lines_val {
+            truncated = true
+            trunc_reason = string::from("max_lines")
+            break
+        }
+
+        auto raw = lines.borrow(cur_line - 1:usize).as_str()
+        auto clean_l# = raw
+        if raw.len > 0 && raw.byte_at(raw.len - 1) == ('\r' as char) {
+            clean_l = raw.substr(0, raw.len - 1)
+        }
+        auto disp# = clean_l
+        if has_max_cols && max_cols_val > 0 && clean_l.len > max_cols_val {
+            disp = "[omitted]"
+            content_omitted = true
+        }
+
+        auto line_entry# = string::new()
+        line_entry#.push_str(u64_to_string(cur_line as u64).as_str())
+        line_entry#.push_str(":")
+        line_entry#.push_str(disp)
+        line_entry#.push_str("\n")
+
+        if has_max_bytes && bytes_emitted + line_entry.len() > max_bytes_val {
+            truncated = true
+            trunc_reason = string::from("max_result_bytes")
+            break
+        }
+
+        bytes_emitted = bytes_emitted + line_entry.len()
+        out#.push_str(line_entry.as_str())
+        records#.push(ViewLineRecord(
+            line_number = cur_line,
+            kind = string::from("context"),
+            text = string::from(disp)
+        ))
+        lines_emitted = lines_emitted + 1:usize
+        cur_line = cur_line + 1:usize
+    }
+
+    if lines_emitted == 0:usize {
+        auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record exceeds max_result_bytes (")
+        if has_max_bytes {
+            err#.push_str(u64_to_string(max_bytes_val as u64).as_str())
+        }
+        err#.push_str(" bytes)")
+        return Result<ViewResult, string>::Err(cede err)
+    }
+
+    auto continuation_tok# = Option<string>::None
+    if truncated && cur_line <= end_actual {
+        auto ct = ContinuationToken(
+            version = 1:usize,
+            path = string::from(opts.file_path.as_str()),
+            req_start = start_req,
+            req_end = end_actual,
+            next_line = cur_line,
+            end_line = end_actual,
+            sha256_hex = string::from(sha256_hex.as_str()),
+            mode = string::from("lines"),
+            symbol = Option<string>::None,
+            scope = Option<string>::None,
+            range_status = string::from("confirmed"),
+            max_columns = opts.max_columns
+        )
+        continuation_tok = encode_continuation_token(ct)
+    }
+
+    auto emitted_range# = Option<BlockRange>::None
+    if lines_emitted > 0:usize {
+        emitted_range = Option<BlockRange>::Some(BlockRange(
+            start = start_req,
+            end = cur_line - 1:usize
+        ))
+    }
+
+    auto term_reason# = string::from("completed")
+    if truncated {
+        term_reason = trunc_reason.clone()
+    }
+    auto out_stat# = string::from("complete")
+    if truncated {
+        out_stat = string::from("budget_truncated")
+    }
+
+    return Result<ViewResult, string>::Ok(ViewResult(
+        text = cede out,
+        truncated = truncated,
+        reason = cede term_reason,
+        lines_emitted = lines_emitted,
+        bytes_emitted = bytes_emitted,
+        mode = string::from("lines"),
+        path = string::from(opts.file_path.as_str()),
+        requested_line = Option<usize>::None,
+        requested_range = Option<BlockRange>::Some(BlockRange(start = start_req, end = end_actual)),
+        detected_block_range = Option<BlockRange>::Some(BlockRange(start = start_req, end = end_actual)),
+        emitted_range = emitted_range,
+        target_included = Option<bool>::Some(false),
+        content_omitted = content_omitted,
+        complete = !truncated && (cur_line > end_actual),
+        eof_reached = !truncated && (end_actual == total_lines),
+        records = cede records,
+        selection_status = string::from("found"),
+        range_status = Option<string>::Some(string::from("confirmed")),
+        output_status = cede out_stat,
+        target_symbol = Vec<SymbolTargetInfo>::new(),
+        candidates = Vec<SymbolCandidateInfo>::new(),
+        candidates_truncated = false,
+        continuation_token = cede continuation_tok,
+        continuation_active = true,
+        sha256_hex = string::from(sha256_hex.as_str())
+    ))
+}
+
 fn execute_view_stream_lines(
     opts: ViewOptions,
     start_req: usize,
     end_req: usize
 ) -> Result<ViewResult, string> {
+    if opts.continuation {
+        return execute_view_continuation_lines(opts, start_req, end_req)
+    }
     auto path_str = string::from(opts.file_path.as_str())
     auto mode_buf# = [0:char; 4]
     mode_buf[0] = 'r' as char
@@ -1848,7 +2191,9 @@ fn execute_view_stream_lines(
         target_symbol = Vec<SymbolTargetInfo>::new(),
         candidates = Vec<SymbolCandidateInfo>::new(),
         candidates_truncated = false,
-        continuation_token = Option<string>::None
+        continuation_token = Option<string>::None,
+        continuation_active = false,
+        sha256_hex = string::new()
     ))
 }
 
@@ -2227,7 +2572,9 @@ fn execute_view_stream_point(
         target_symbol = Vec<SymbolTargetInfo>::new(),
         candidates = Vec<SymbolCandidateInfo>::new(),
         candidates_truncated = false,
-        continuation_token = Option<string>::None
+        continuation_token = Option<string>::None,
+        continuation_active = false,
+        sha256_hex = string::new()
     ))
 }
 
@@ -2306,10 +2653,558 @@ fn snap_block_start_decorators(
     return cur_snap
 }
 
+shape BlockDetectionResult (
+    block_start: usize,
+    block_end: usize,
+    block_closed: bool
+)
+
+fn snap_block_start_decorators_lines(
+    initial_start: usize,
+    lines: Vec<string>
+) -> usize {
+    auto cur_snap# = initial_start
+    loop cur_snap > 1:usize {
+        auto check_line_no = cur_snap - 1:usize
+        auto idx = check_line_no - 1:usize
+        if idx >= lines.len() {
+            break
+        }
+        auto &raw_line = lines.borrow(idx)
+        auto trimmed = raw_line.as_str().trim()
+        if trimmed.len == 0 {
+            break
+        }
+        if trimmed.starts_with("@") || trimmed.starts_with("#[") {
+            cur_snap = check_line_no
+            continue
+        }
+        if trimmed.ends_with(")") || trimmed.ends_with("]") {
+            auto p_depth# = 0:i32
+            auto found_opener# = false
+            auto scan_up# = check_line_no
+            loop scan_up >= 1:usize {
+                auto up_idx = scan_up - 1:usize
+                if up_idx >= lines.len() {
+                    break
+                }
+                auto &up_line = lines.borrow(up_idx)
+                auto up_trimmed = up_line.as_str().trim()
+                if up_trimmed.len == 0 {
+                    break
+                }
+                auto c_i# = up_trimmed.len
+                loop c_i > 0 {
+                    c_i = c_i - 1
+                    auto ch = up_trimmed.byte_at(c_i)
+                    if ch == (')' as char) || ch == (']' as char) {
+                        p_depth = p_depth + 1
+                    } else if ch == ('(' as char) || ch == ('[' as char) {
+                        p_depth = p_depth - 1
+                        if p_depth <= 0 {
+                            if up_trimmed.starts_with("@") || up_trimmed.starts_with("#[") {
+                                found_opener = true
+                            }
+                            break
+                        }
+                    }
+                }
+                if found_opener {
+                    cur_snap = scan_up
+                    break
+                }
+                if p_depth <= 0 {
+                    break
+                }
+                if scan_up <= 1:usize {
+                    break
+                }
+                scan_up = scan_up - 1:usize
+            }
+            if found_opener {
+                continue
+            }
+        }
+        break
+    }
+    return cur_snap
+}
+
+fn detect_block_range_for_lines(
+    lines: Vec<string>,
+    target_line: usize,
+    family: SyntaxFamily,
+    dialect: LexicalDialect
+) -> BlockDetectionResult {
+    auto total_lines = lines.len()
+    if total_lines == 0:usize || target_line < 1:usize || target_line > total_lines {
+        return BlockDetectionResult(block_start = target_line, block_end = target_line, block_closed = false)
+    }
+
+    auto block_start# = target_line
+    auto block_end# = target_line
+    auto block_closed# = false
+    auto target_depth# = 0:usize
+    auto target_indent# = 0:usize
+    auto delim# = BlockDelimiter::Brace
+
+    auto depths# = DelimiterDepths::new()
+
+    auto block_stack# = Vec<BlockStackFrame>::new()
+    auto indent_stack# = Vec<IndentStackFrame>::new()
+
+    auto cur_line# = 1:usize
+    loop cur_line <= total_lines {
+        auto raw_l = lines.borrow(cur_line - 1:usize).as_str()
+        auto clean_l# = raw_l
+        if raw_l.len > 0 && raw_l.byte_at(raw_l.len - 1) == ('\r' as char) {
+            clean_l = raw_l.substr(0, raw_l.len - 1)
+        }
+
+        auto lex = scan_line_lexical(clean_l, depths#, dialect)
+
+        if cur_line < target_line {
+            match family {
+                auto SyntaxFamily::Brace => {
+                    if lex.starts_block || lex.depth_after_brace > lex.depth_before_brace || lex.depth_after_paren > lex.depth_before_paren {
+                        auto d_type = lex.delimiter
+                        auto depth_val# = lex.depth_before_paren
+                        if d_type == BlockDelimiter::Brace {
+                            depth_val = lex.depth_before_brace
+                        }
+                        block_stack#.push(BlockStackFrame(
+                            line_number = cur_line,
+                            delimiter = d_type,
+                            depth = depth_val
+                        ))
+                    }
+
+                    loop block_stack.len() > 0:usize {
+                        auto top_idx = block_stack.len() - 1:usize
+                        auto should_pop# = false
+                        {
+                            auto &top_f = block_stack.borrow(top_idx)
+                            if top_f.delimiter == BlockDelimiter::Brace && lex.depth_after_brace <= top_f.depth {
+                                should_pop = true
+                            } else if top_f.delimiter == BlockDelimiter::Paren && lex.depth_after_paren <= top_f.depth {
+                                should_pop = true
+                            }
+                        }
+                        if should_pop {
+                            block_stack#.pop()
+                        } else {
+                            break
+                        }
+                    }
+                }
+                auto SyntaxFamily::Indent => {
+                    if lex.participates_in_indent {
+                        auto is_header = lex.code_text.as_str().trim().ends_with(":") || lex.starts_block
+                        if is_header {
+                            auto indent = lex.statement_indent
+                            loop indent_stack.len() > 0:usize {
+                                auto top_idx = indent_stack.len() - 1:usize
+                                if indent_stack.borrow(top_idx).indent >= indent {
+                                    indent_stack#.pop()
+                                } else {
+                                    break
+                                }
+                            }
+                            indent_stack#.push(IndentStackFrame(line_number = cur_line, indent = indent))
+                        } else {
+                            loop indent_stack.len() > 0:usize {
+                                auto top_idx = indent_stack.len() - 1:usize
+                                if indent_stack.borrow(top_idx).indent >= lex.statement_indent {
+                                    indent_stack#.pop()
+                                } else {
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if cur_line == target_line {
+            match family {
+                auto SyntaxFamily::Brace => {
+                    if lex.starts_block {
+                        block_start = target_line
+                        delim = lex.delimiter
+                        if delim == BlockDelimiter::Brace {
+                            target_depth = lex.depth_before_brace
+                        } else {
+                            target_depth = lex.depth_before_paren
+                        }
+                    } else if block_stack.len() > 0:usize {
+                        auto top_idx = block_stack.len() - 1:usize
+                        auto &top_f = block_stack.borrow(top_idx)
+                        block_start = top_f.line_number
+                        delim = top_f.delimiter
+                        target_depth = top_f.depth
+                    } else {
+                        block_start = target_line
+                        delim = BlockDelimiter::Brace
+                        target_depth = 0:usize
+                    }
+
+                    if block_start == target_line && check_is_self_closed_structured(delim, lex.depth_after_brace, lex.depth_after_paren, target_depth, lex.has_code_brace_closer, lex.has_code_paren_closer) {
+                        block_end = target_line
+                        block_closed = true
+                    } else if block_start < target_line {
+                        if delim == BlockDelimiter::Brace && lex.depth_before_brace > target_depth && lex.depth_after_brace <= target_depth && lex.has_code_brace_closer {
+                            block_end = target_line
+                            block_closed = true
+                        } else if delim == BlockDelimiter::Paren && lex.depth_before_paren > target_depth && lex.depth_after_paren <= target_depth && lex.has_code_paren_closer {
+                            block_end = target_line
+                            block_closed = true
+                        }
+                    }
+                }
+                auto SyntaxFamily::Indent => {
+                    auto is_header = lex.participates_in_indent && (lex.code_text.as_str().trim().ends_with(":") || lex.starts_block)
+                    if is_header {
+                        target_indent = lex.statement_indent
+                        block_start = target_line
+                    } else if lex.participates_in_indent {
+                        loop indent_stack.len() > 0:usize {
+                            auto top_idx = indent_stack.len() - 1:usize
+                            if indent_stack.borrow(top_idx).indent >= lex.statement_indent {
+                                indent_stack#.pop()
+                            } else {
+                                break
+                            }
+                        }
+                        if indent_stack.len() > 0:usize {
+                            auto top_idx = indent_stack.len() - 1:usize
+                            auto &top_f = indent_stack.borrow(top_idx)
+                            block_start = top_f.line_number
+                            target_indent = top_f.indent
+                        } else {
+                            target_indent = lex.statement_indent
+                            block_start = target_line
+                        }
+                    } else {
+                        if indent_stack.len() > 0:usize {
+                            auto top_idx = indent_stack.len() - 1:usize
+                            auto &top_f = indent_stack.borrow(top_idx)
+                            block_start = top_f.line_number
+                            target_indent = top_f.indent
+                        } else {
+                            target_indent = 0:usize
+                            block_start = target_line
+                        }
+                    }
+                }
+            }
+            block_start = snap_block_start_decorators_lines(block_start, lines)
+            if block_closed {
+                break
+            }
+        } else {
+            // cur_line > target_line
+            match family {
+                auto SyntaxFamily::Brace => {
+                    if check_is_runaway_definition_structured(lex.is_scope_decl, lex.depth_before_brace, delim, target_depth) {
+                        break
+                    }
+                    match delim {
+                        auto BlockDelimiter::Paren => {
+                            if lex.depth_before_paren > target_depth && lex.depth_after_paren <= target_depth && lex.has_code_paren_closer {
+                                block_end = cur_line
+                                block_closed = true
+                                break
+                            }
+                        }
+                        auto BlockDelimiter::Brace => {
+                            if lex.depth_before_brace > target_depth && lex.depth_after_brace <= target_depth && lex.has_code_brace_closer {
+                                block_end = cur_line
+                                block_closed = true
+                                break
+                            }
+                        }
+                    }
+                }
+                auto SyntaxFamily::Indent => {
+                    if lex.participates_in_indent && lex.statement_indent <= target_indent {
+                        block_end = cur_line - 1:usize
+                        block_closed = true
+                        break
+                    }
+                }
+            }
+        }
+        cur_line = cur_line + 1:usize
+    }
+
+    if !block_closed && family == SyntaxFamily::Indent {
+        block_end = total_lines
+        block_closed = true
+    }
+
+    if block_end < target_line {
+        block_end = target_line
+    }
+
+    return BlockDetectionResult(
+        block_start = block_start,
+        block_end = block_end,
+        block_closed = block_closed
+    )
+}
+
+fn execute_view_continuation_block(
+    opts: ViewOptions,
+    target_line: usize
+) -> Result<ViewResult, string> {
+    auto max_lines_val# = 0:usize
+    auto has_max_lines# = false
+    match opts.max_lines {
+        auto Option<usize>::Some(v) => {
+            max_lines_val = v
+            has_max_lines = true
+        }
+        _ => {}
+    }
+
+    auto max_bytes_val# = 0:usize
+    auto has_max_bytes# = false
+    match opts.max_result_bytes {
+        auto Option<usize>::Some(v) => {
+            max_bytes_val = v
+            has_max_bytes = true
+        }
+        _ => {}
+    }
+
+    auto max_cols_val# = 0:usize
+    auto has_max_cols# = false
+    match opts.max_columns {
+        auto Option<usize>::Some(v) => {
+            max_cols_val = v
+            has_max_cols = true
+        }
+        _ => {}
+    }
+
+    if has_max_lines && max_lines_val < 1:usize {
+        return Result<ViewResult, string>::Err(string::from("target_exceeds_max_lines: Target line cannot fit within max_lines 0"))
+    }
+
+    auto capture = capture_file_bounded(opts.file_path.as_str(), 10485760:usize)
+    if capture.open_err || capture.read_err {
+        auto err# = string::from("Error reading file '")
+        err#.push_str(opts.file_path.as_str())
+        err#.push_str("'")
+        return Result<ViewResult, string>::Err(cede err)
+    }
+
+    if capture.size_exceeded {
+        return Result<ViewResult, string>::Err(string::from("scan_incomplete: file too large, exceeds 10MiB input read limit"))
+    }
+
+    auto lines = cede capture.lines
+    auto sha256_hex = cede capture.sha256_hex
+    auto total_lines = lines.len()
+
+    if total_lines == 0:usize {
+        return Result<ViewResult, string>::Err(string::from("File is empty"))
+    }
+    if target_line > total_lines {
+        auto err# = string::from("Line out of bounds: file has ")
+        err#.push_str(u64_to_string(total_lines as u64).as_str())
+        err#.push_str(" lines, requested line ")
+        err#.push_str(u64_to_string(target_line as u64).as_str())
+        return Result<ViewResult, string>::Err(cede err)
+    }
+
+    auto family = detect_syntax_family(opts.file_path.as_str())
+    auto dialect = detect_lexical_dialect(opts.file_path.as_str())
+
+    auto det = detect_block_range_for_lines(lines, target_line, family, dialect)
+
+    auto range_status# = string::from("confirmed")
+    auto block_start = det.block_start
+    auto block_end# = det.block_end
+    if !det.block_closed {
+        range_status = string::from("unknown")
+        block_end = block_start + 40:usize
+        if block_end > total_lines {
+            block_end = total_lines
+        }
+    }
+
+    auto header# = string::new()
+    if opts.continuation {
+        header#.push_str("[file: ")
+        header#.push_str(opts.file_path.as_str())
+        if range_status == "confirmed" {
+            header#.push_str(", lines: L")
+            header#.push_str(u64_to_string(block_start as u64).as_str())
+            header#.push_str("-L")
+            header#.push_str(u64_to_string(block_end as u64).as_str())
+            header#.push_str("]\n")
+        } else {
+            header#.push_str(", preview: L")
+            header#.push_str(u64_to_string(block_start as u64).as_str())
+            header#.push_str("-L")
+            header#.push_str(u64_to_string(block_end as u64).as_str())
+            header#.push_str(" (unclosed structure)]\n")
+        }
+    }
+
+    auto cur_line# = block_start
+    auto lines_emitted# = 0:usize
+    auto bytes_emitted# = header.len()
+    auto truncated# = false
+    auto trunc_reason# = string::from("completed")
+    auto records# = Vec<ViewLineRecord>::new()
+    auto out# = string::new()
+    out#.push_str(header.as_str())
+    auto content_omitted# = false
+    auto target_seen# = false
+
+    loop cur_line <= block_end {
+        if has_max_lines && lines_emitted >= max_lines_val {
+            truncated = true
+            trunc_reason = string::from("max_lines")
+            break
+        }
+
+        auto raw = lines.borrow(cur_line - 1:usize).as_str()
+        auto clean_l# = raw
+        if raw.len > 0 && raw.byte_at(raw.len - 1) == ('\r' as char) {
+            clean_l = raw.substr(0, raw.len - 1)
+        }
+        auto disp# = clean_l
+        if has_max_cols && max_cols_val > 0 && clean_l.len > max_cols_val {
+            disp = "[omitted]"
+            content_omitted = true
+        }
+
+        auto is_target = (cur_line == target_line)
+        if is_target {
+            target_seen = true
+        }
+
+        auto line_entry# = string::new()
+        line_entry#.push_str(u64_to_string(cur_line as u64).as_str())
+        if is_target {
+            line_entry#.push_str(":")
+        } else {
+            line_entry#.push_str("-")
+        }
+        line_entry#.push_str(disp)
+        line_entry#.push_str("\n")
+
+        if has_max_bytes && bytes_emitted + line_entry.len() > max_bytes_val {
+            truncated = true
+            trunc_reason = string::from("max_result_bytes")
+            break
+        }
+
+        auto rec_kind# = string::from("context")
+        if is_target {
+            rec_kind = string::from("target")
+        }
+
+        bytes_emitted = bytes_emitted + line_entry.len()
+        out#.push_str(line_entry.as_str())
+        records#.push(ViewLineRecord(
+            line_number = cur_line,
+            kind = cede rec_kind,
+            text = string::from(disp)
+        ))
+        lines_emitted = lines_emitted + 1:usize
+        cur_line = cur_line + 1:usize
+    }
+
+    if lines_emitted == 0:usize {
+        auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record exceeds max_result_bytes (")
+        if has_max_bytes {
+            err#.push_str(u64_to_string(max_bytes_val as u64).as_str())
+        }
+        err#.push_str(" bytes)")
+        return Result<ViewResult, string>::Err(cede err)
+    }
+
+    auto continuation_tok# = Option<string>::None
+    if truncated && cur_line <= block_end {
+        auto ct = ContinuationToken(
+            version = 1:usize,
+            path = string::from(opts.file_path.as_str()),
+            req_start = block_start,
+            req_end = block_end,
+            next_line = cur_line,
+            end_line = block_end,
+            sha256_hex = string::from(sha256_hex.as_str()),
+            mode = string::from("block"),
+            symbol = Option<string>::None,
+            scope = Option<string>::None,
+            range_status = string::from(range_status.as_str()),
+            max_columns = opts.max_columns
+        )
+        continuation_tok = encode_continuation_token(ct)
+    }
+
+    auto emitted_range# = Option<BlockRange>::None
+    if lines_emitted > 0:usize {
+        emitted_range = Option<BlockRange>::Some(BlockRange(
+            start = block_start,
+            end = cur_line - 1:usize
+        ))
+    }
+
+    auto detected_block = BlockRange(start = block_start, end = block_end)
+    auto requested_block# = Option<BlockRange>::None
+    if range_status == "confirmed" {
+        requested_block = Option<BlockRange>::Some(detected_block.clone())
+    }
+
+    auto term_reason# = string::from("completed")
+    if truncated {
+        term_reason = trunc_reason.clone()
+    }
+    auto out_stat# = string::from("complete")
+    if truncated {
+        out_stat = string::from("budget_truncated")
+    }
+
+    return Result<ViewResult, string>::Ok(ViewResult(
+        text = cede out,
+        truncated = truncated,
+        reason = cede term_reason,
+        lines_emitted = lines_emitted,
+        bytes_emitted = bytes_emitted,
+        mode = string::from("block"),
+        path = string::from(opts.file_path.as_str()),
+        requested_line = Option<usize>::Some(target_line),
+        requested_range = requested_block,
+        detected_block_range = Option<BlockRange>::Some(detected_block),
+        emitted_range = emitted_range,
+        target_included = Option<bool>::Some(target_seen),
+        content_omitted = content_omitted,
+        complete = !truncated && (cur_line > block_end),
+        eof_reached = !truncated && (block_end == total_lines),
+        records = cede records,
+        selection_status = string::from("found"),
+        range_status = Option<string>::Some(cede range_status),
+        output_status = cede out_stat,
+        target_symbol = Vec<SymbolTargetInfo>::new(),
+        candidates = Vec<SymbolCandidateInfo>::new(),
+        candidates_truncated = false,
+        continuation_token = cede continuation_tok,
+        continuation_active = true,
+        sha256_hex = string::from(sha256_hex.as_str())
+    ))
+}
+
 fn execute_view_stream_block(
     opts: ViewOptions,
     target_line: usize
 ) -> Result<ViewResult, string> {
+    if opts.continuation {
+        return execute_view_continuation_block(opts, target_line)
+    }
     auto path_str = string::from(opts.file_path.as_str())
     auto mode_buf# = [0:char; 4]
     mode_buf[0] = 'r' as char
@@ -3087,7 +3982,9 @@ fn execute_view_stream_block(
         target_symbol = Vec<SymbolTargetInfo>::new(),
         candidates = Vec<SymbolCandidateInfo>::new(),
         candidates_truncated = false,
-        continuation_token = Option<string>::None
+        continuation_token = Option<string>::None,
+        continuation_active = false,
+        sha256_hex = string::new()
     ))
 }
 
@@ -3137,7 +4034,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
             candidates_truncated = false,
-            continuation_token = Option<string>::None
+            continuation_token = Option<string>::None,
+            continuation_active = false,
+            sha256_hex = string::new()
         ))
     }
 
@@ -3170,7 +4069,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
             candidates_truncated = false,
-            continuation_token = Option<string>::None
+            continuation_token = Option<string>::None,
+            continuation_active = false,
+            sha256_hex = string::new()
         ))
     }
 
@@ -3201,7 +4102,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
             candidates_truncated = false,
-            continuation_token = Option<string>::None
+            continuation_token = Option<string>::None,
+            continuation_active = false,
+            sha256_hex = string::new()
         ))
     }
 
@@ -3237,7 +4140,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
             candidates_truncated = false,
-            continuation_token = Option<string>::None
+            continuation_token = Option<string>::None,
+            continuation_active = false,
+            sha256_hex = string::new()
         ))
     }
 
@@ -3269,7 +4174,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
             candidates_truncated = false,
-            continuation_token = Option<string>::None
+            continuation_token = Option<string>::None,
+            continuation_active = false,
+            sha256_hex = string::new()
         ))
     }
 
@@ -3325,7 +4232,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = Vec<SymbolCandidateInfo>::new(),
             candidates_truncated = false,
-            continuation_token = Option<string>::None
+            continuation_token = Option<string>::None,
+            continuation_active = false,
+            sha256_hex = string::new()
         ))
     }
 
@@ -3532,7 +4441,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             target_symbol = Vec<SymbolTargetInfo>::new(),
             candidates = cede final_cands,
             candidates_truncated = is_cands_truncated,
-            continuation_token = Option<string>::None
+            continuation_token = Option<string>::None,
+            continuation_active = false,
+            sha256_hex = string::new()
         ))
     }
 
@@ -3725,7 +4636,7 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
                 range_status = string::from(range_status_str.as_str()),
                 max_columns = opts.max_columns
             )
-            continuation_tok = Option<string>::Some(encode_continuation_token(ct))
+            continuation_tok = encode_continuation_token(ct)
         }
 
         auto emitted_range = Option<BlockRange>::Some(BlockRange(
@@ -3782,7 +4693,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             target_symbol = cede target_vec,
             candidates = Vec<SymbolCandidateInfo>::new(),
             candidates_truncated = false,
-            continuation_token = cede continuation_tok
+            continuation_token = cede continuation_tok,
+            continuation_active = true,
+            sha256_hex = string::from(sha256_hex.as_str())
         ))
     }
 
@@ -4056,7 +4969,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         target_symbol = cede target_vec,
         candidates = Vec<SymbolCandidateInfo>::new(),
         candidates_truncated = false,
-        continuation_token = Option<string>::None
+        continuation_token = Option<string>::None,
+        continuation_active = false,
+        sha256_hex = string::new()
     ))
 }
 
@@ -4203,7 +5118,11 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
 
         auto line_entry# = string::new()
         line_entry#.push_str(u64_to_string(cur_line as u64).as_str())
-        line_entry#.push_str("-")
+        if token.mode == "lines" {
+            line_entry#.push_str(":")
+        } else {
+            line_entry#.push_str("-")
+        }
         line_entry#.push_str(disp)
         line_entry#.push_str("\n")
 
@@ -4213,11 +5132,16 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
             break
         }
 
+        auto rec_kind# = string::from("context")
+        if token.mode == "lines" {
+            rec_kind = string::from("target")
+        }
+
         bytes_emitted = bytes_emitted + line_entry.len()
         out#.push_str(line_entry.as_str())
         records#.push(ViewLineRecord(
             line_number = cur_line,
-            kind = string::from("context"),
+            kind = cede rec_kind,
             text = string::from(disp)
         ))
         lines_emitted = lines_emitted + 1:usize
@@ -4263,7 +5187,7 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
             range_status = string::from(token.range_status.as_str()),
             max_columns = token.max_columns
         )
-        next_token = Option<string>::Some(encode_continuation_token(next_tok_data))
+        next_token = encode_continuation_token(next_tok_data)
     }
 
     auto emitted_range# = Option<BlockRange>::None
@@ -4332,7 +5256,9 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
         target_symbol = cede target_vec,
         candidates = Vec<SymbolCandidateInfo>::new(),
         candidates_truncated = false,
-        continuation_token = cede next_token
+        continuation_token = cede next_token,
+        continuation_active = true,
+        sha256_hex = string::from(token.sha256_hex.as_str())
     ))
 }
 

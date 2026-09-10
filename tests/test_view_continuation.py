@@ -449,7 +449,352 @@ def test_backward_compatibility_when_continuation_disabled():
                 "max_lines": 5
             }
         }, 2)
-        assert res_mcp["result"]["_meta"]["continuation_token"] is None
+        assert "continuation_token" not in res_mcp["result"]["_meta"]
+
+        proc.terminate()
+
+
+def test_p0_mcp_json_budget_pruning_and_session_liveness():
+    """
+    [P0] MCP JSON budget pruning on a decorated function must not crash (SIGABRT).
+    It should either fail-closed or cleanly paginate, and subsequent requests must succeed.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        fixture_py = tmp / "fixture.py"
+        lines = [
+            "@decorator",
+            "def foo(x):",
+            "    a = 1",
+            "    b = 2",
+            "    c = 3",
+            "    d = 4",
+            "    e = 5",
+            "    f = 6",
+            "    g = 7",
+            "    h = 8",
+            "    i = 9",
+            "    return a + b + c + d + e + f + g + h + i",
+        ]
+        fixture_py.write_text("\n".join(lines) + "\n")
+        fixture_path = str(fixture_py.resolve())
+
+        proc = subprocess.Popen(
+            [TRG_BIN, "--mcp"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+
+        def send_req(method, params, req_id):
+            msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            if not line:
+                stderr_out = proc.stderr.read()
+                proc_poll = proc.poll()
+                raise RuntimeError(f"MCP server died (exit {proc_poll}): {stderr_out}")
+            return json.loads(line)
+
+        send_req("initialize", {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "test_audit", "version": "1.0"}
+        }, 1)
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+
+        req_counter = 2
+        for budget in [800, 1000, 1200, 1400]:
+            req_args = {
+                "path": fixture_path,
+                "symbol": "foo",
+                "continuation": True,
+                "format": "json",
+                "max_result_bytes": budget,
+            }
+            resp = send_req("tools/call", {"name": "trg_view", "arguments": req_args}, req_counter)
+            req_counter += 1
+
+            assert proc.poll() is None, f"MCP server crashed during budget={budget}"
+            assert "result" in resp, f"Expected 'result' in response for budget={budget}, got: {resp}"
+            res = resp["result"]
+
+            if res.get("isError"):
+                err_text = res["content"][0]["text"]
+                assert "target_exceeds_max_result_bytes" in err_text
+            else:
+                struct_c = res.get("structuredContent")
+                assert struct_c is not None
+                raw_bytes_len = len(json.dumps(struct_c).encode("utf-8"))
+                assert raw_bytes_len <= budget, f"JSON payload {raw_bytes_len} bytes exceeds budget {budget}"
+
+                meta = res.get("_meta", {})
+                tok = meta.get("continuation_token") or struct_c.get("continuation_token")
+                if meta.get("truncated"):
+                    assert tok is not None and tok.startswith("trg-cont-v1.")
+                    payload_b64 = tok[len("trg-cont-v1."):]
+                    padding = "=" * ((4 - len(payload_b64) % 4) % 4)
+                    tok_data = json.loads(base64.urlsafe_b64decode(payload_b64 + padding).decode("utf-8"))
+                    assert tok_data["mode"] == "symbol"
+                    retained_lines = struct_c["lines"]
+                    assert len(retained_lines) > 0
+                    last_retained_line = retained_lines[-1]["line"]
+                    assert tok_data["next_line"] == last_retained_line + 1, (
+                        f"Expected next_line {last_retained_line + 1}, got {tok_data['next_line']}"
+                    )
+
+            # Test session liveness after pruning
+            followup = send_req("ping", {}, req_counter)
+            req_counter += 1
+            assert "result" in followup, f"Session died or failed ping after budget={budget}: {followup}"
+
+        proc.terminate()
+
+
+def test_cli_lines_and_block_continuation():
+    """
+    [P1] trg view <path> --lines <start>-<end> --continuation and
+         trg view <path>:<line> --block --continuation
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        fixture_py = tmp / "fixture.py"
+        lines = [
+            "@decorator",
+            "def foo(x):",
+            "    a = 1",
+            "    b = 2",
+            "    c = 3",
+            "    d = 4",
+            "    e = 5",
+            "    f = 6",
+            "    g = 7",
+            "    h = 8",
+            "    i = 9",
+            "    return a + b + c + d + e + f + g + h + i",
+        ]
+        fixture_py.write_text("\n".join(lines) + "\n")
+        fixture_path = str(fixture_py.resolve())
+
+        # --- A. Lines Continuation ---
+        # 1. First batch: lines 1-12 with max-lines 3
+        r_l1 = subprocess.run(
+            [TRG_BIN, "view", fixture_path, "--lines", "1-12", "--continuation", "--max-lines", "3"],
+            capture_output=True, text=True
+        )
+        assert r_l1.returncode == 0, f"r_l1 failed: {r_l1.stderr}"
+        assert f"[file: {fixture_path}, lines: L1-L12]" in r_l1.stdout
+        assert "1:@decorator" in r_l1.stdout
+        assert "2:def foo(x):" in r_l1.stdout
+        assert "3:    a = 1" in r_l1.stdout
+        assert "4:    b = 2" not in r_l1.stdout
+        tok_l1 = parse_token_from_stderr(r_l1.stderr)
+        assert tok_l1.startswith("trg-cont-v1."), f"Expected continuation token in stderr, got: {r_l1.stderr}"
+        assert "hint: continue reading: trg view --continue " in r_l1.stderr
+
+        p_b64 = tok_l1[len("trg-cont-v1."):]
+        tok_data = json.loads(base64.urlsafe_b64decode(p_b64 + "=" * ((4 - len(p_b64) % 4) % 4)).decode("utf-8"))
+        assert tok_data["mode"] == "lines"
+        assert tok_data["req_start"] == 1
+        assert tok_data["req_end"] == 12
+        assert tok_data["next_line"] == 4
+        assert tok_data["end_line"] == 12
+
+        # 2. Resume lines continuation with max-lines 4
+        r_l2 = subprocess.run(
+            [TRG_BIN, "view", "--continue", tok_l1, "--max-lines", "4"],
+            capture_output=True, text=True
+        )
+        assert r_l2.returncode == 0, f"r_l2 failed: {r_l2.stderr}"
+        assert f"[file: {fixture_path}, lines: L4-L12 (continuation)]" in r_l2.stdout
+        assert "4:    b = 2" in r_l2.stdout
+        assert "5:    c = 3" in r_l2.stdout
+        assert "6:    d = 4" in r_l2.stdout
+        assert "7:    e = 5" in r_l2.stdout
+        assert "8:    f = 6" not in r_l2.stdout
+        tok_l2 = parse_token_from_stderr(r_l2.stderr)
+        assert tok_l2.startswith("trg-cont-v1.")
+
+        # 3. Resume lines continuation to completion
+        r_l3 = subprocess.run(
+            [TRG_BIN, "view", "--continue", tok_l2, "--max-lines", "10"],
+            capture_output=True, text=True
+        )
+        assert r_l3.returncode == 0, f"r_l3 failed: {r_l3.stderr}"
+        assert f"[file: {fixture_path}, lines: L8-L12 (continuation)]" in r_l3.stdout
+        assert "8:    f = 6" in r_l3.stdout
+        assert "12:    return a + b + c + d + e + f + g + h + i" in r_l3.stdout
+        assert parse_token_from_stderr(r_l3.stderr) == ""
+
+        # --- B. Block Continuation ---
+        # Target line 3: "a = 1". Snaps upward to decorator at L1, block spans L1-L12.
+        r_b1 = subprocess.run(
+            [TRG_BIN, "view", f"{fixture_path}:3", "--block", "--continuation", "--max-lines", "3"],
+            capture_output=True, text=True
+        )
+        assert r_b1.returncode == 0, f"r_b1 failed: {r_b1.stderr}"
+        assert f"[file: {fixture_path}, lines: L1-L12]" in r_b1.stdout
+        assert "1-@decorator" in r_b1.stdout
+        assert "2-def foo(x):" in r_b1.stdout
+        assert "3:    a = 1" in r_b1.stdout
+        assert "4-    b = 2" not in r_b1.stdout
+        tok_b1 = parse_token_from_stderr(r_b1.stderr)
+        assert tok_b1.startswith("trg-cont-v1."), f"Expected continuation token for block view, got: {r_b1.stderr}"
+        assert "hint: continue reading: trg view --continue " in r_b1.stderr
+
+        p_b64 = tok_b1[len("trg-cont-v1."):]
+        tok_data = json.loads(base64.urlsafe_b64decode(p_b64 + "=" * ((4 - len(p_b64) % 4) % 4)).decode("utf-8"))
+        assert tok_data["mode"] == "block"
+        assert tok_data["req_start"] == 1
+        assert tok_data["req_end"] == 12
+        assert tok_data["next_line"] == 4
+        assert tok_data["end_line"] == 12
+
+        # Resume block continuation to completion
+        r_b2 = subprocess.run(
+            [TRG_BIN, "view", "--continue", tok_b1, "--max-lines", "20"],
+            capture_output=True, text=True
+        )
+        assert r_b2.returncode == 0, f"r_b2 failed: {r_b2.stderr}"
+        assert f"[file: {fixture_path}, lines: L4-L12 (continuation)]" in r_b2.stdout
+        assert "4-    b = 2" in r_b2.stdout
+        assert "12-    return a + b + c + d + e + f + g + h + i" in r_b2.stdout
+        assert parse_token_from_stderr(r_b2.stderr) == ""
+
+
+def test_strict_token_validation_edge_cases():
+    """
+    [P1] Strict validation of token numericals, bounds consistency, and field types.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        py_file = tmp / "strict.py"
+        create_sample_file(py_file, 30)
+
+        r_base = subprocess.run(
+            [TRG_BIN, "view", str(py_file), "--symbol", "long_computation", "--continuation", "--max-lines", "5"],
+            capture_output=True, text=True
+        )
+        assert r_base.returncode == 0
+        valid_token = parse_token_from_stderr(r_base.stderr)
+        assert valid_token.startswith("trg-cont-v1.")
+        p_b64 = valid_token[len("trg-cont-v1."):]
+        base_payload = json.loads(base64.urlsafe_b64decode(p_b64 + "=" * ((4 - len(p_b64) % 4) % 4)).decode("utf-8"))
+
+        def make_token(modifications):
+            d = base_payload.copy()
+            d.update(modifications)
+            raw = json.dumps(d).encode("utf-8")
+            return "trg-cont-v1." + base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+
+        def assert_token_rejected(token, expected_err_substr):
+            r = subprocess.run([TRG_BIN, "view", "--continue", token], capture_output=True, text=True)
+            assert r.returncode == 2, f"Expected exit code 2 for token, got {r.returncode}, stderr: {r.stderr}"
+            assert expected_err_substr in r.stderr, f"Expected '{expected_err_substr}' in stderr, got: {r.stderr}"
+
+        # 1. Non-integer / float numbers
+        assert_token_rejected(make_token({"next_line": 4.9}), "must be positive integer")
+        assert_token_rejected(make_token({"req_start": 1.5}), "must be positive integer")
+        assert_token_rejected(make_token({"req_end": 30.1}), "must be positive integer")
+        assert_token_rejected(make_token({"end_line": 20.001}), "must be positive integer")
+
+        # 2. Zero or negative numbers
+        assert_token_rejected(make_token({"next_line": 0}), "must be positive integer")
+        assert_token_rejected(make_token({"next_line": -3}), "must be positive integer")
+        assert_token_rejected(make_token({"req_start": 0}), "must be positive integer")
+        assert_token_rejected(make_token({"req_start": -1}), "must be positive integer")
+        assert_token_rejected(make_token({"end_line": 0}), "must be positive integer")
+
+        # 3. Range bounds consistency
+        assert_token_rejected(make_token({"req_start": 15, "req_end": 10}), "req_end < req_start")
+        assert_token_rejected(make_token({"req_start": 10, "next_line": 5}), "next_line < req_start")
+        assert_token_rejected(make_token({"next_line": 15, "end_line": 10}), "end_line < next_line")
+        assert_token_rejected(make_token({"end_line": 35, "req_end": 30}), "end_line > req_end")
+
+        # 4. Strict field types & range_status
+        assert_token_rejected(make_token({"range_status": None}), "range_status")
+        assert_token_rejected(make_token({"range_status": 123}), "range_status")
+        assert_token_rejected(make_token({"range_status": "unsupported"}), "range_status")
+        assert_token_rejected(make_token({"symbol": 456}), "must be string")
+        assert_token_rejected(make_token({"scope": ["not", "a", "string"]}), "must be string")
+        assert_token_rejected(make_token({"max_columns": -5}), "max_columns")
+        assert_token_rejected(make_token({"max_columns": 3.14}), "max_columns")
+
+
+def test_non_continuation_json_isolation_and_schema_parity():
+    """
+    [P1] Non-continuation JSON output must omit continuation_token completely.
+    MCP schema must not include continuation_token in required.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        py_file = tmp / "iso.py"
+        create_sample_file(py_file, 20)
+        py_path = str(py_file.resolve())
+
+        # 1. CLI default calls without --continuation: lines, block, and symbol
+        r_lines = subprocess.run([TRG_BIN, "view", py_path, "--lines", "1-10", "--max-lines", "3"], capture_output=True, text=True)
+        assert r_lines.returncode == 0
+        assert "continuation_token" not in r_lines.stderr
+        assert "hint: continue reading:" not in r_lines.stderr
+
+        r_block = subprocess.run([TRG_BIN, "view", f"{py_path}:3", "--block", "--max-lines", "3"], capture_output=True, text=True)
+        assert r_block.returncode == 0
+        assert "continuation_token" not in r_block.stderr
+        assert "hint: continue reading:" not in r_block.stderr
+
+        r_sym = subprocess.run([TRG_BIN, "view", py_path, "--symbol", "long_computation", "--max-lines", "3"], capture_output=True, text=True)
+        assert r_sym.returncode == 0
+        assert "continuation_token" not in r_sym.stderr
+        assert "hint: continue reading:" not in r_sym.stderr
+
+        # 2. MCP calls with format: "json" and continuation omitted (or False)
+        proc = subprocess.Popen([TRG_BIN, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def send_req(method, params, req_id):
+            msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            return json.loads(line)
+
+        send_req("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}}, 1)
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+
+        # Symbol view in MCP with format: "json", continuation omitted
+        r_mcp_sym = send_req("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": py_path, "symbol": "long_computation", "format": "json", "max_lines": 5}
+        }, 2)
+        assert "continuation_token" not in r_mcp_sym["result"]["_meta"]
+        assert "continuation_token" not in r_mcp_sym["result"]["structuredContent"]
+
+        # Lines view in MCP with format: "json", continuation: False
+        r_mcp_lines = send_req("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": py_path, "lines": [1, 10], "continuation": False, "format": "json", "max_lines": 5}
+        }, 3)
+        assert "continuation_token" not in r_mcp_lines["result"]["_meta"]
+        assert "continuation_token" not in r_mcp_lines["result"]["structuredContent"]
+
+        # Block view in MCP with format: "json", continuation omitted
+        r_mcp_blk = send_req("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": py_path, "line": 3, "block": True, "format": "json", "max_lines": 5}
+        }, 4)
+        assert "continuation_token" not in r_mcp_blk["result"]["_meta"]
+        assert "continuation_token" not in r_mcp_blk["result"]["structuredContent"]
+
+        # 3. MCP tools/list outputSchema check: continuation_token must NOT be in required
+        tools_list = send_req("tools/list", {}, 5)
+        tools = tools_list["result"]["tools"]
+        trg_view_tool = next(t for t in tools if t["name"] == "trg_view")
+        out_schema = trg_view_tool["outputSchema"]
+        assert "continuation_token" in out_schema["properties"]
+        assert "continuation_token" not in out_schema.get("required", []), (
+            f"continuation_token should NOT be in required array: {out_schema.get('required')}"
+        )
 
         proc.terminate()
 
@@ -464,4 +809,9 @@ if __name__ == "__main__":
     test_budget_feedback_loop_and_fail_closed()
     test_unknown_preview_continuation()
     test_backward_compatibility_when_continuation_disabled()
+    test_p0_mcp_json_budget_pruning_and_session_liveness()
+    test_cli_lines_and_block_continuation()
+    test_strict_token_validation_edge_cases()
+    test_non_continuation_json_isolation_and_schema_parity()
     print("ALL test_view_continuation.py tests PASSED successfully!")
+

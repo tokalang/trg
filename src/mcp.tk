@@ -629,7 +629,7 @@ pub fn run_mcp_server() -> i32 {
                     resp#.push_str(id_str.as_str())
                     resp#.push_str(",\"result\":{\"protocolVersion\":\"")
                     resp#.push_str(negotiated.as_str())
-                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.18.0\"}}}\n")
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.19.0\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
@@ -1344,15 +1344,17 @@ pub fn run_mcp_server() -> i32 {
                                                             resp#.push_str(u64_to_string(vr.lines_emitted as u64).as_str())
                                                             resp#.push_str(",\"bytes\":")
                                                             resp#.push_str(u64_to_string(vr.bytes_emitted as u64).as_str())
-                                                            resp#.push_str(",\"continuation_token\":")
-                                                            match vr.continuation_token {
-                                                                auto Option<string>::Some(&t) => {
-                                                                    resp#.push_str("\"")
-                                                                    resp#.push_str(json_escape(t.as_str()).as_str())
-                                                                    resp#.push_str("\"")
-                                                                }
-                                                                auto Option<string>::None => {
-                                                                    resp#.push_str("null")
+                                                            if vr.continuation_active {
+                                                                resp#.push_str(",\"continuation_token\":")
+                                                                match vr.continuation_token {
+                                                                    auto Option<string>::Some(&t) => {
+                                                                        resp#.push_str("\"")
+                                                                        resp#.push_str(json_escape(t.as_str()).as_str())
+                                                                        resp#.push_str("\"")
+                                                                    }
+                                                                    auto Option<string>::None => {
+                                                                        resp#.push_str("null")
+                                                                    }
                                                                 }
                                                             }
                                                             resp#.push_str(",\"summary\":{\"complete\":")
@@ -1405,15 +1407,17 @@ pub fn run_mcp_server() -> i32 {
                                                         resp#.push_str(u64_to_string(vr.lines_emitted as u64).as_str())
                                                         resp#.push_str(",\"bytes\":")
                                                         resp#.push_str(u64_to_string(vr.bytes_emitted as u64).as_str())
-                                                        resp#.push_str(",\"continuation_token\":")
-                                                        match vr.continuation_token {
-                                                            auto Option<string>::Some(&t) => {
-                                                                resp#.push_str("\"")
-                                                                resp#.push_str(json_escape(t.as_str()).as_str())
-                                                                resp#.push_str("\"")
-                                                            }
-                                                            auto Option<string>::None => {
-                                                                resp#.push_str("null")
+                                                        if vr.continuation_active {
+                                                            resp#.push_str(",\"continuation_token\":")
+                                                            match vr.continuation_token {
+                                                                auto Option<string>::Some(&t) => {
+                                                                    resp#.push_str("\"")
+                                                                    resp#.push_str(json_escape(t.as_str()).as_str())
+                                                                    resp#.push_str("\"")
+                                                                }
+                                                                auto Option<string>::None => {
+                                                                    resp#.push_str("null")
+                                                                }
                                                             }
                                                         }
                                                         resp#.push_str(",\"summary\":{\"complete\":")

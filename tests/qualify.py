@@ -173,7 +173,7 @@ def extract_mcp_records(sc):
 
 def main():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    log(f"Starting trg v0.18.0 rigorous qualification suite in: {repo_root}")
+    log(f"Starting trg v0.19.0 rigorous qualification suite in: {repo_root}")
 
     tokac_bin = find_tokac(repo_root)
     std_lib = find_lib(repo_root)
@@ -197,7 +197,7 @@ def main():
     r_build = run_cmd([toka_bin, "build"], cwd=str(repo_root), env={"TOKA_LIB": std_lib})
     assert r_build.returncode == 0, f"toka build failed: {r_build.stderr}"
     build_combined = r_build.stdout + r_build.stderr
-    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined or "trg v0.12.0" in build_combined or "trg v0.13.0" in build_combined or "trg v0.13.1" in build_combined or "trg v0.14.0" in build_combined or "trg v0.14.1" in build_combined or "trg v0.15.0" in build_combined or "trg v0.16.0" in build_combined or "trg v0.16.1" in build_combined or "trg v0.17.0" in build_combined or "trg v0.18.0" in build_combined, f"toka build did not report trg: {build_combined}"
+    assert "trg v0.3.1" in build_combined or "Finished" in build_combined or "trg v0.9.2" in build_combined or "trg v0.10.0" in build_combined or "trg v0.11.0" in build_combined or "trg v0.11.1" in build_combined or "trg v0.12.0" in build_combined or "trg v0.13.0" in build_combined or "trg v0.13.1" in build_combined or "trg v0.14.0" in build_combined or "trg v0.14.1" in build_combined or "trg v0.15.0" in build_combined or "trg v0.16.0" in build_combined or "trg v0.16.1" in build_combined or "trg v0.17.0" in build_combined or "trg v0.18.0" in build_combined or "trg v0.19.0" in build_combined, f"toka build did not report trg: {build_combined}"
     log("Package manifest check and package build succeeded.")
 
     pkg_bin_path = repo_root / "target" / "debug" / "trg"
@@ -225,30 +225,30 @@ def main():
     assert direct_bin_path.exists(), "Direct tokac binary was not created"
     log("Direct compilation successful.")
 
-    # Validate exact 0.18.0 identity on both binaries
+    # Validate exact 0.19.0 identity on both binaries
     r_pkg_ver = run_cmd([str(pkg_bin_path), "-V"])
-    assert r_pkg_ver.stdout.strip() == "trg 0.18.0 (Toka)", f"Expected 'trg 0.18.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
+    assert r_pkg_ver.stdout.strip() == "trg 0.19.0 (Toka)", f"Expected 'trg 0.19.0 (Toka)', got '{r_pkg_ver.stdout.strip()}'"
 
     r_dir_ver = run_cmd([str(direct_bin_path), "-V"])
-    assert r_dir_ver.stdout.strip() == "trg 0.18.0 (Toka)", f"Expected 'trg 0.18.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
+    assert r_dir_ver.stdout.strip() == "trg 0.19.0 (Toka)", f"Expected 'trg 0.19.0 (Toka)', got '{r_dir_ver.stdout.strip()}'"
 
     # Use package build artifact as the primary qualification subject
     trg = str(pkg_bin_path)
     fixtures_dir = repo_root / "tests" / "fixtures"
 
-    # Test 1: Help & Version exact 0.18.0 & Bare invocation exit 0
-    log("Test 1: Help & Version flags (exact 0.18.0 release identity) & Bare invocation")
+    # Test 1: Help & Version exact 0.19.0 & Bare invocation exit 0
+    log("Test 1: Help & Version flags (exact 0.19.0 release identity) & Bare invocation")
     r_bare = run_cmd([trg])
     assert r_bare.returncode == 0, f"Expected bare trg to exit 0, got {r_bare.returncode}"
-    assert "trg 0.18.0 - Fast, agent-friendly code search tool" in r_bare.stdout, f"Unexpected bare help: {r_bare.stdout}"
+    assert "trg 0.19.0 - Fast, agent-friendly code search tool" in r_bare.stdout, f"Unexpected bare help: {r_bare.stdout}"
 
     r = run_cmd([trg, "--help"])
     assert r.returncode == 0
-    assert "trg 0.18.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
+    assert "trg 0.19.0 - Fast, agent-friendly code search tool" in r.stdout, f"Unexpected help: {r.stdout}"
 
     r = run_cmd([trg, "--version"])
     assert r.returncode == 0
-    assert r.stdout.strip() == "trg 0.18.0 (Toka)", f"Unexpected version: {r.stdout}"
+    assert r.stdout.strip() == "trg 0.19.0 (Toka)", f"Unexpected version: {r.stdout}"
 
     # Syntax error with options but missing pattern must still exit with code 2
     r_syntax_err = run_cmd([trg, "-n"], check=False)
@@ -801,7 +801,7 @@ def main():
     log("Test 44: Regex with context lines -E -C 2")
     r_re_ctx = run_cmd([trg, "-E", "-C", "2", "trg\\s+[0-9.]+", str(repo_root / "src" / "cli.tk")])
     assert r_re_ctx.returncode == 0
-    assert "trg 0.18.0" in r_re_ctx.stdout
+    assert "trg 0.19.0" in r_re_ctx.stdout
 
     # Test 45: Regex JSONL schema and submatch extraction
     log("Test 45: Regex JSONL schema and submatch extraction (trg-json-v2)")
@@ -2074,7 +2074,7 @@ def main():
         resp1 = json.loads(r_init.stdout.strip())
         assert resp1["id"] == 1
         assert resp1["result"]["serverInfo"]["name"] == "trg"
-        assert resp1["result"]["serverInfo"]["version"] == "0.18.0"
+        assert resp1["result"]["serverInfo"]["version"] == "0.19.0"
 
         # 2. ping & tools/list
         ping_req = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}) + "\n"
@@ -4571,7 +4571,7 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         lines = [json.loads(l) for l in s_out.strip().split("\n") if l.strip()]
         assert len(lines) == 3
         # 1. initialize
-        assert lines[0]["result"]["serverInfo"]["version"] == "0.18.0"
+        assert lines[0]["result"]["serverInfo"]["version"] == "0.19.0"
         # 2. tools/list schema contains group_by_scope, symbol_variants, snippet, snippet_chars
         tool_schema = lines[1]["result"]["tools"][0]["inputSchema"]["properties"]
         assert "group_by_scope" in tool_schema
@@ -4855,7 +4855,7 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
         assert len(resps) == 6
 
         # 1. initialize
-        assert resps[0]["result"]["serverInfo"]["version"] == "0.18.0"
+        assert resps[0]["result"]["serverInfo"]["version"] == "0.19.0"
 
         # 2. tools/list
         tool_names = [t["name"] for t in resps[1]["result"]["tools"]]
@@ -6605,8 +6605,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_sym.returncode == 0, f"Symbol view test suite failed (exit {r_v_sym.returncode}):\n{r_v_sym.stderr}\n{r_v_sym.stdout}"
     log("Test 177 passed: Single-file symbol view, semantic range reliability, disambiguation, and MCP parity verified.")
 
+    # Test 178: View Continuation & Paging Reliability
+    log("Test 178: View Continuation & Paging Reliability (trg view --continuation / --continue & trg_view)")
+    view_cont_script = repo_root / "tests" / "test_view_continuation.py"
+    assert view_cont_script.exists(), f"Continuation test script not found at {view_cont_script}"
+    env_v_cont = dict(os.environ)
+    env_v_cont["TRG_BIN"] = str(pkg_bin_path)
+    r_v_cont = subprocess.run([
+        sys.executable,
+        str(view_cont_script)
+    ], cwd=str(repo_root), env=env_v_cont, capture_output=True, text=True)
+    assert r_v_cont.returncode == 0, f"Continuation test suite failed (exit {r_v_cont.returncode}):\n{r_v_cont.stderr}\n{r_v_cont.stdout}"
+    log("Test 178 passed: View continuation, sequential range-start paging, anti-torn-read, and strict token validation verified.")
+
     log("=" * 60)
-    log("ALL 177 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.18.0)!")
+    log("ALL 178 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.0)!")
     log("=" * 60)
 
 if __name__ == "__main__":
