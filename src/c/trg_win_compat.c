@@ -430,6 +430,19 @@ int close(int fd) {
     return _close(fd);
 }
 
+int trg_win_is_readable_stdin(void) {
+    HANDLE h = GetStdHandle(STD_INPUT_HANDLE);
+    if (h == NULL || h == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    DWORD file_type = GetFileType(h);
+    DWORD base_type = file_type & ~FILE_TYPE_REMOTE;
+    if (base_type == FILE_TYPE_PIPE || base_type == FILE_TYPE_DISK) {
+        return 1;
+    }
+    return 0;
+}
+
 #else // !_WIN32
 
 void trg_win_init_platform(void) {}
@@ -443,5 +456,9 @@ int trg_win_classify_reparse(const char* path) {
     (void)path;
     return 0;
 }
+int trg_win_is_readable_stdin(void) {
+    return 0;
+}
 
 #endif // _WIN32
+

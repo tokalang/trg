@@ -6537,8 +6537,20 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_symbols.returncode == 0, f"Symbols test suite failed (exit {r_symbols.returncode}):\n{r_symbols.stderr}\n{r_symbols.stdout}"
     log("Test 174 passed: Instant symbol outline and semantic alignment verified.")
 
+    # Test 175: Ripgrep Differential Parity Suite
+    log("Test 175: Ripgrep Differential Parity Suite (tests/test_rg_differential.py)")
+    rg_diff_script = repo_root / "tests" / "test_rg_differential.py"
+    assert rg_diff_script.exists(), f"RG differential script not found at {rg_diff_script}"
+    r_rg_diff = subprocess.run([
+        sys.executable,
+        str(rg_diff_script),
+        "--trg", str(pkg_bin_path)
+    ], cwd=str(repo_root), capture_output=True, text=True)
+    assert r_rg_diff.returncode == 0, f"RG differential suite failed (exit {r_rg_diff.returncode}):\n{r_rg_diff.stderr}\n{r_rg_diff.stdout}"
+    log("Test 175 passed: Ripgrep differential parity suite verified.")
+
     log("=" * 60)
-    log("ALL 174 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.16.1)!")
+    log("ALL 175 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.16.1)!")
     log("=" * 60)
 
 if __name__ == "__main__":

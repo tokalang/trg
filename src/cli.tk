@@ -9,7 +9,7 @@ import std/io::{println}
 import src/types::{CliOptions, GlobRule, CaseMode, SortMode, BudgetLimits, PathStyle, TextLayout}
 import src/glob::{parse_glob_rule, validate_and_parse_glob_rule, GlobDialect}
 import src/file_types::{lookup_type_extensions}
-import src/posix::{posix_ferror}
+import src/posix::{posix_ferror, posix_is_readable_stdin}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
 import src/symbol::{is_valid_identifier, generate_symbol_variants}
 
@@ -1500,9 +1500,13 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         context_block = false
     }
 
-    // If no paths specified, default to current directory "."
+    // If no paths specified, default to stdin if readable pipe/file, else current directory "."
     if paths.len() == 0 {
-        paths#.push(string::from("."))
+        if !mcp_mode && !files_mode && posix_is_readable_stdin() {
+            paths#.push(string::from("-"))
+        } else {
+            paths#.push(string::from("."))
+        }
     }
 
     auto deduplicate_targets# = false

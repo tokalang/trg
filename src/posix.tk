@@ -20,6 +20,8 @@ extern fn realpath(*path: char, *resolved_path: char) -> Addr
 extern fn ferror(*stream: void) -> i32
 extern fn trg_win_clear_last_error() -> void
 extern fn trg_win_classify_reparse(*path: char) -> i32
+extern fn trg_win_is_readable_stdin() -> i32
+
 
 pub fn posix_close(fd: i32) -> i32 {
     unsafe {
@@ -226,6 +228,38 @@ pub fn posix_isatty(fd: i32) -> bool {
         return isatty(fd) != 0
     }
 }
+
+pub fn posix_is_readable_stdin() -> bool {
+    if is_windows_target() {
+        unsafe {
+            return trg_win_is_readable_stdin() != 0
+        }
+    }
+    // POSIX path:
+    // If it's a TTY, it is an interactive keyboard session, not a data pipe/redirected file.
+    if posix_isatty(0:i32) {
+        return false
+    }
+    // Query stdin (fd 0) stat via /dev/fd/0 (macOS/BSD) or /proc/self/fd/0 (Linux).
+    // This allows distinguishing FIFO/pipe and regular files from character devices (e.g. /dev/null).
+    auto p# = string::from("/dev/fd/0")
+    auto *cp1 = p.c_str()
+    auto stat_ptr# = sys_fs::stat_impl(*cp1 as Addr)
+    if stat_ptr == ADDR0 {
+        p = string::from("/proc/self/fd/0")
+        auto *cp2 = p.c_str()
+        stat_ptr = sys_fs::stat_impl(*cp2 as Addr)
+    }
+    if stat_ptr == ADDR0 {
+        return false
+    }
+    auto mode = sys_fs::stat_get_mode_impl(stat_ptr)
+    sys_fs::stat_free_impl(stat_ptr)
+    auto is_fifo = (mode & 61440:u32) == 4096:u32   // S_IFIFO
+    auto is_reg = (mode & 61440:u32) == 32768:u32  // S_IFREG
+    return is_fifo || is_reg
+}
+
 
 // Returns: 0 = OK, 1 = BrokenPipe (EPIPE), 2 = WriteError
 pub fn posix_write_stdout(s: str) -> i32 {

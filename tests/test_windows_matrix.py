@@ -503,6 +503,102 @@ def test_path_resolution_failure_injection(trg_bin):
 
     print("  [PASS] Path resolution failure strictly verified: resolution branch reached, dual MCP protocol verified, 0 fake locations emitted.")
 
+def test_windows_stdin_matrix(trg_bin):
+    print("Testing Windows stdin detection, pipeline, NUL fallback, and isolation...")
+    bin_run = msys_adapt(trg_bin)
+
+    # 1. Piped input without path hits stdin
+    p_pipe = subprocess.run(
+        [bin_run, "-F", "-n", "banana"],
+        input="apple\nbanana\ncherry\n",
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    assert p_pipe.returncode == 0, f"Piped stdin search failed: {p_pipe.stderr}"
+    assert "2:banana" in p_pipe.stdout or "banana" in p_pipe.stdout
+
+    # 2. Piped input no match exits 1
+    p_miss = subprocess.run(
+        [bin_run, "-F", "-n", "blueberry"],
+        input="apple\nbanana\ncherry\n",
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    assert p_miss.returncode == 1, f"Expected exit code 1 on pipe no-match, got {p_miss.returncode}"
+
+    # 3. Empty pipe exits 1 (EOF, no fallback to directory)
+    p_empty = subprocess.run(
+        [bin_run, "-F", "Alpha header"],
+        input="",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=msys_adapt(CLEAN_DATA)
+    )
+    assert p_empty.returncode == 1, f"Expected exit code 1 on empty pipe, got {p_empty.returncode}"
+
+    # 4. NUL (DEVNULL) character device fallback to directory search
+    p_nul = subprocess.run(
+        [bin_run, "-F", "-n", "Alpha header"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=msys_adapt(CLEAN_DATA)
+    )
+    assert p_nul.returncode == 0, f"Expected NUL redirect to fallback to directory search, got {p_nul.returncode}"
+    assert "Alpha header" in p_nul.stdout
+
+    # 5. Explicit '-' with NUL must search stdin and exit 1
+    p_exp_nul = subprocess.run(
+        [bin_run, "-F", "Alpha header", "-"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=msys_adapt(CLEAN_DATA)
+    )
+    assert p_exp_nul.returncode == 1, f"Expected explicit '-' with NUL to exit 1, got {p_exp_nul.returncode}"
+
+    # 6. Stdin vs Directory Isolation
+    stdin_token = "WIN_STDIN_ISOLATION_TOKEN_999"
+    # Pipe has stdin_token, directory has "Alpha header"
+    p_iso_stdin = subprocess.run(
+        [bin_run, "-F", "-n", stdin_token],
+        input=f"line 1\n{stdin_token}\n",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=msys_adapt(CLEAN_DATA)
+    )
+    assert p_iso_stdin.returncode == 0, "Failed to match stdin token in pipe"
+    assert stdin_token in p_iso_stdin.stdout
+
+    p_iso_dir_miss = subprocess.run(
+        [bin_run, "-F", "-n", "Alpha header"],
+        input=f"line 1\n{stdin_token}\n",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=msys_adapt(CLEAN_DATA)
+    )
+    assert p_iso_dir_miss.returncode == 1, f"Dir token should not match stdin without path: {p_iso_dir_miss.stdout}"
+
+    p_iso_dir_hit = subprocess.run(
+        [bin_run, "-F", "-n", "Alpha header", "."],
+        input=f"line 1\n{stdin_token}\n",
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=msys_adapt(CLEAN_DATA)
+    )
+    assert p_iso_dir_hit.returncode == 0, "Explicit '.' path should search directory despite pipe"
+    assert "Alpha header" in p_iso_dir_hit.stdout
+
+    print("  [PASS] Windows stdin detection, pipeline, NUL fallback, and isolation verified.")
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Windows Matrix Verification for trg")
@@ -546,6 +642,7 @@ def main():
         test_mcp_lifecycle(bin_path)
         test_broken_pipe_counter_examples(bin_path, explicit_c_test=c_test_abs, explicit_arch=args.arch)
         test_path_resolution_failure_injection(bin_path)
+        test_windows_stdin_matrix(bin_path)
         print()
 
     print("=" * 70)
