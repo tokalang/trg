@@ -41,8 +41,8 @@ pub fn print_help() {
     println("      --include-zero         Include zero counts in --count output")
     println("  -q, --quiet                Do not print search results; exit 0 if match found, 1 otherwise")
     println("  -o, --only-matching        Print only the matched parts of a line")
-    println("  -F, --fixed-strings        Interpret patterns as literal strings (default)")
-    println("  -E, --extended-regexp      Interpret patterns as regular expressions")
+    println("  -F, --fixed-strings        Interpret patterns as fixed literal strings")
+    println("  -E, --extended-regexp      Interpret patterns as regular expressions (default)")
     println("  -w, --word-regexp          Match patterns only at whole word boundaries")
     println("  -x, --line-regexp          Match patterns only on complete lines")
     println("  -m, --max-count <NUM>      Stop scanning a file after NUM matching lines")
@@ -265,8 +265,8 @@ pub fn parse_cli_args() -> Result<CliOptions, string> {
 pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> {
     auto num_args = args.len()
 
-    auto fixed_strings# = false
-    auto regexp# = false
+    auto explicit_fixed_strings# = false
+    auto explicit_regexp# = false
     auto word_regexp# = false
     auto line_regexp# = false
     auto no_prefilter# = false
@@ -358,13 +358,13 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         }
 
         if view == "-F" || view == "--fixed-strings" {
-            fixed_strings = true
+            explicit_fixed_strings = true
             i = i + 1
             continue
         }
 
         if view == "-E" || view == "--extended-regexp" || view == "--regex-mode" {
-            regexp = true
+            explicit_regexp = true
             i = i + 1
             continue
         }
@@ -1313,8 +1313,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             auto j# = 1:usize
             loop j < view.len {
                 auto ch = view.byte_at(j)
-                if ch == ('F' as char) { fixed_strings = true }
-                else if ch == ('E' as char) { regexp = true }
+                if ch == ('F' as char) { explicit_fixed_strings = true }
+                else if ch == ('E' as char) { explicit_regexp = true }
                 else if ch == ('w' as char) { word_regexp = true }
                 else if ch == ('x' as char) { line_regexp = true }
                 else if ch == ('n' as char) { line_number = true }
@@ -1463,12 +1463,12 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     }
 
     // Mutual exclusion: -E and -F cannot be combined
-    if fixed_strings && regexp {
+    if explicit_fixed_strings && explicit_regexp {
         return Result<CliOptions, string>::Err(string::from("Flag -E (--extended-regexp) cannot be combined with -F (--fixed-strings)"))
     }
 
     if symbol_variants {
-        if regexp {
+        if explicit_regexp {
             return Result<CliOptions, string>::Err(string::from("Flag --symbol-variants cannot be combined with -E (--extended-regexp)"))
         }
         if patterns.len() != 1 || !is_valid_identifier(patterns.borrow(0).as_str()) {
@@ -1477,6 +1477,12 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         auto ignore_case = (case_mode == CaseMode::Insensitive)
         patterns = generate_symbol_variants(patterns.borrow(0).as_str(), ignore_case)
     }
+
+    // Effective pattern matching mode:
+    // Default is regex (aligning with ripgrep).
+    // If -F is given, or if --symbol-variants generated literal variants, use fixed strings.
+    auto effective_fixed_strings# = explicit_fixed_strings || symbol_variants
+    auto effective_regexp# = !effective_fixed_strings
 
     // Flag conflict validation: --json cannot be combined with -l, -c, or --files
     if json_mode && (files_with_matches || count || files_mode) {
@@ -1527,8 +1533,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         patterns = cede patterns,
         paths = cede paths,
         pattern_source_given = pattern_source_given,
-        fixed_strings = fixed_strings,
-        regexp = regexp,
+        fixed_strings = effective_fixed_strings,
+        regexp = effective_regexp,
         word_regexp = word_regexp,
         line_regexp = line_regexp,
         no_prefilter = no_prefilter,

@@ -828,11 +828,11 @@ def main():
     try:
         t47_fixture.write_text("prefix ([a-z suffix\nanother line\n", encoding="utf-8")
 
-        # 1. Default mode: literal search hits the pattern, does not error
-        r_def = run_cmd([trg, "([a-z", str(t47_fixture)])
-        assert r_def.returncode == 0, f"Expected exit 0 for literal match in default mode, got {r_def.returncode}"
-        assert "prefix ([a-z suffix" in r_def.stdout
-        assert "INVALID_REGEX" not in r_def.stderr
+        # 1. Default mode: default regex compilation fails fast on invalid regex before search
+        r_def = run_cmd([trg, "([a-z", str(t47_fixture)], check=False)
+        assert r_def.returncode == 2, f"Expected exit 2 for invalid regex in default mode, got {r_def.returncode}"
+        assert "INVALID_REGEX: missing closing ']'" in r_def.stderr
+        assert "hint: fix the regex syntax; if literal text was intended, use -F (--fixed-strings)" in r_def.stderr
 
         # 2. -F mode: explicit literal search hits the pattern, does not error
         r_f = run_cmd([trg, "-F", "([a-z", str(t47_fixture)])
@@ -845,7 +845,7 @@ def main():
         assert r_err.returncode == 2, f"Expected exit 2 for invalid regex, got {r_err.returncode}"
         assert r_err.stdout == "", f"Expected empty stdout on error, got: {r_err.stdout}"
         assert "INVALID_REGEX: missing closing ']'" in r_err.stderr
-        assert "hint: fix the regex syntax; if literal text was intended, replace -E with -F" in r_err.stderr
+        assert "hint: fix the regex syntax; if literal text was intended, use -F (--fixed-strings)" in r_err.stderr
 
         # 4. CLI JSON mode (--json): preserves legacy stderr projection and exits 2
         r_json_err = run_cmd([trg, "--json", "-E", "([a-z", str(t47_fixture)], check=False)

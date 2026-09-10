@@ -366,6 +366,37 @@ def main():
                                cwd=str(repo_root))
 
     # =========================================================================
+    # Suite 6: Default Regex Semantics & Regex Error Parity
+    # =========================================================================
+    runner.assert_differential("Default Regex: dot-star wildcard matching",
+                               ["-n", "apple.*pie"], ["-n", "apple.*pie"],
+                               stdin_data=sample_pipe)
+
+    runner.assert_differential("Default Regex: alternation (cherry|banana)",
+                               ["-n", "cherry|banana"], ["-n", "cherry|banana"],
+                               stdin_data=sample_pipe)
+
+    runner.assert_differential("Default Regex: character classes [A-Z]+",
+                               ["-n", "[A-Z]+"], ["-n", "[A-Z]+"],
+                               stdin_data=sample_pipe)
+
+    runner.assert_differential("Default Regex: line anchor ^BANANA",
+                               ["-n", "^BANANA"], ["-n", "^BANANA"],
+                               stdin_data=sample_pipe)
+
+    runner.assert_differential("Explicit -E: compatibility switch matches rg default",
+                               ["-E", "-n", "cherry|banana"], ["-n", "cherry|banana"],
+                               stdin_data=sample_pipe)
+
+    runner.assert_differential("Regex error: unclosed parenthesis exits 2",
+                               ["foo("], ["foo("],
+                               stdin_data=sample_pipe)
+
+    runner.assert_differential("Regex error: unclosed bracket exits 2",
+                               ["[a-z"], ["[a-z"],
+                               stdin_data=sample_pipe)
+
+    # =========================================================================
     # Summary
     # =========================================================================
     print("=" * 70)

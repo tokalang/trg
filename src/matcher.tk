@@ -428,7 +428,7 @@ impl SearchPlan {
                     err.message(),
                     Option<i32>::None,
                     Option<string>::Some(string::from("INVALID_REGEX")),
-                    Option<string>::Some(string::from("fix the regex syntax; if literal text was intended, replace -E with -F"))
+                    Option<string>::Some(string::from("fix the regex syntax; if literal text was intended, use -F (--fixed-strings)"))
                 ))
             }
             auto compiled = compile_res.unwrap()

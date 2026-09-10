@@ -431,7 +431,7 @@ def run_core_regression_gate(trg: str, fixtures_dir: pathlib.Path, repo_root: pa
                 "Case -S: Smart case with uppercase present acts sensitive", "case mismatch rejected")
 
     # 1.4 Multi-pattern precedence (-e) and Regex alternation (-E, cite Test 40)
-    r = run_trg_cmd(trg, ["-e", "[INFO]", "-e", "8080", str(fixtures_dir / "service.log")])
+    r = run_trg_cmd(trg, ["-F", "-e", "[INFO]", "-e", "8080", str(fixtures_dir / "service.log")])
     lines = [l for l in r.stdout.strip().split("\n") if l.strip()]
     assert_test(r.returncode == 0 and len(lines) == 4 and "1:2026-09-07T08:00:01.123Z [INFO] Service started on port 8080" in lines[0],
                 "Multi-pattern -e: Multiple matches on same line emitted once", "line 1 deduplicated cleanly")
