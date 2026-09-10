@@ -525,7 +525,7 @@ def test_p0_mcp_json_budget_pruning_and_session_liveness():
             else:
                 struct_c = res.get("structuredContent")
                 assert struct_c is not None
-                raw_bytes_len = len(json.dumps(struct_c).encode("utf-8"))
+                raw_bytes_len = len(json.dumps(struct_c, separators=(",", ":")).encode("utf-8"))
                 assert raw_bytes_len <= budget, f"JSON payload {raw_bytes_len} bytes exceeds budget {budget}"
 
                 meta = res.get("_meta", {})
@@ -536,9 +536,9 @@ def test_p0_mcp_json_budget_pruning_and_session_liveness():
                     padding = "=" * ((4 - len(payload_b64) % 4) % 4)
                     tok_data = json.loads(base64.urlsafe_b64decode(payload_b64 + padding).decode("utf-8"))
                     assert tok_data["mode"] == "symbol"
-                    retained_lines = struct_c["lines"]
-                    assert len(retained_lines) > 0
-                    last_retained_line = retained_lines[-1]["line"]
+                    retained_records = struct_c.get("records", [])
+                    assert len(retained_records) > 0
+                    last_retained_line = retained_records[-1]["line_number"]
                     assert tok_data["next_line"] == last_retained_line + 1, (
                         f"Expected next_line {last_retained_line + 1}, got {tok_data['next_line']}"
                     )
@@ -594,7 +594,7 @@ def test_cli_lines_and_block_continuation():
 
         p_b64 = tok_l1[len("trg-cont-v1."):]
         tok_data = json.loads(base64.urlsafe_b64decode(p_b64 + "=" * ((4 - len(p_b64) % 4) % 4)).decode("utf-8"))
-        assert tok_data["mode"] == "lines"
+        assert tok_data["mode"] == "range"
         assert tok_data["req_start"] == 1
         assert tok_data["req_end"] == 12
         assert tok_data["next_line"] == 4
@@ -799,6 +799,334 @@ def test_non_continuation_json_isolation_and_schema_parity():
         proc.terminate()
 
 
+def validate_schema(instance, schema, path="root"):
+    """
+    Strict recursive validator for JSON Schema subset emitted by trg tools/list.
+    Checks type, const, enum, minimum, maximum, minItems, maxItems, items, required,
+    and additionalProperties: false.
+    """
+    if "type" in schema:
+        t = schema["type"]
+        types = [t] if isinstance(t, str) else t
+        matched = False
+        for expected in types:
+            if expected == "string" and isinstance(instance, str):
+                matched = True
+            elif expected == "integer" and isinstance(instance, int) and not isinstance(instance, bool):
+                matched = True
+            elif expected == "number" and (isinstance(instance, (int, float)) and not isinstance(instance, bool)):
+                matched = True
+            elif expected == "boolean" and isinstance(instance, bool):
+                matched = True
+            elif expected == "array" and isinstance(instance, list):
+                matched = True
+            elif expected == "object" and isinstance(instance, dict):
+                matched = True
+            elif expected == "null" and instance is None:
+                matched = True
+        assert matched, f"{path}: value {instance!r} does not match expected type(s) {types}"
+
+    if "const" in schema:
+        assert instance == schema["const"], f"{path}: expected const {schema['const']!r}, got {instance!r}"
+
+    if "enum" in schema:
+        assert instance in schema["enum"], f"{path}: value {instance!r} not in enum {schema['enum']}"
+
+    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
+        if "minimum" in schema:
+            assert instance >= schema["minimum"], f"{path}: value {instance} < minimum {schema['minimum']}"
+        if "maximum" in schema:
+            assert instance <= schema["maximum"], f"{path}: value {instance} > maximum {schema['maximum']}"
+
+    if isinstance(instance, list):
+        if "minItems" in schema:
+            assert len(instance) >= schema["minItems"], f"{path}: list len {len(instance)} < minItems {schema['minItems']}"
+        if "maxItems" in schema:
+            assert len(instance) <= schema["maxItems"], f"{path}: list len {len(instance)} > maxItems {schema['maxItems']}"
+        if "items" in schema:
+            for idx, item in enumerate(instance):
+                validate_schema(item, schema["items"], f"{path}[{idx}]")
+
+    if isinstance(instance, dict):
+        if "required" in schema:
+            for req_key in schema["required"]:
+                assert req_key in instance, f"{path}: missing required key {req_key!r}"
+        if schema.get("additionalProperties") is False and "properties" in schema:
+            for k in instance:
+                assert k in schema["properties"], f"{path}: unexpected property {k!r} not declared in schema properties"
+        if "properties" in schema:
+            for k, sub_schema in schema["properties"].items():
+                if k in instance:
+                    validate_schema(instance[k], sub_schema, f"{path}.{k}")
+
+
+def test_json_auto_pruning_budget_convergence():
+    """
+    [P1] Factor continuation token overhead into the window selection / convergence loop.
+    Ensure max_result_bytes auto-pruning converges smoothly and never rejects manageable payloads.
+    Only fails closed (target_exceeds_max_result_bytes) when 1 record + metadata + token cannot fit.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        py_file = tmp / "func12.py"
+        py_file.write_text(
+            "@decorator\n"
+            "def foo(x):\n"
+            "    a = 1\n"
+            "    b = 2\n"
+            "    c = 3\n"
+            "    d = 4\n"
+            "    e = 5\n"
+            "    f = 6\n"
+            "    g = 7\n"
+            "    h = 8\n"
+            "    i = 9\n"
+            "    return a + b + c + d + e + f + g + h + i\n"
+        )
+        file_path = str(py_file.resolve())
+
+        proc = subprocess.Popen([TRG_BIN, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def call_mcp(method, params, req_id):
+            msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            return json.loads(line)
+
+        call_mcp("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}}, 1)
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+
+        # 1. Symbol mode: 12-line function with max_result_bytes=1200, NO max_lines
+        # In previously buggy code, this erroneously failed with budget error.
+        res_sym = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "symbol": "foo", "format": "json", "continuation": True, "max_result_bytes": 1200}
+        }, 2)
+        assert "error" not in res_sym, f"Unexpected RPC error: {res_sym}"
+        res_obj = res_sym["result"]
+        assert not res_obj.get("isError", False), f"Expected success, got tool error: {res_obj}"
+        sc_sym = res_obj["structuredContent"]
+        wire_len = len(json.dumps(sc_sym, separators=(",", ":")).encode("utf-8"))
+        assert wire_len <= 1200, f"Wire JSON {wire_len} bytes exceeds budget 1200"
+        assert sc_sym["truncated"] is True
+        assert sc_sym["termination_reason"] == "max_result_bytes"
+        assert sc_sym["continuation_token"] is not None
+        assert sc_sym["continuation_token"].startswith("trg-cont-v1.")
+
+        # Paging symbol view to completion under max_result_bytes=1200
+        cur_tok = sc_sym["continuation_token"]
+        all_sym_lines = [r["line_number"] for r in sc_sym["records"]]
+        req_id = 3
+        while cur_tok:
+            res_next = call_mcp("tools/call", {
+                "name": "trg_view",
+                "arguments": {"continuation_token": cur_tok, "format": "json", "max_result_bytes": 1200}
+            }, req_id)
+            req_id += 1
+            sc_next = res_next["result"]["structuredContent"]
+            w_len = len(json.dumps(sc_next, separators=(",", ":")).encode("utf-8"))
+            assert w_len <= 1200, f"Paging wire JSON {w_len} bytes exceeds budget 1200"
+            all_sym_lines.extend(r["line_number"] for r in sc_next["records"])
+            cur_tok = sc_next.get("continuation_token")
+            if sc_next["complete"]:
+                break
+        assert all_sym_lines == list(range(1, 13)), f"Expected lines 1-12, got {all_sym_lines}"
+
+        # 2. Lines mode: explicit range [1, 12] with max_result_bytes=1000, NO max_lines
+        res_lines = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "lines": [1, 12], "format": "json", "continuation": True, "max_result_bytes": 1000}
+        }, req_id)
+        req_id += 1
+        assert not res_lines["result"].get("isError", False)
+        sc_lines = res_lines["result"]["structuredContent"]
+        w_lines = len(json.dumps(sc_lines, separators=(",", ":")).encode("utf-8"))
+        assert w_lines <= 1000
+        assert sc_lines["mode"] == "range"
+        assert sc_lines["truncated"] is True
+        assert sc_lines["continuation_token"] is not None
+
+        # 3. Block mode: line 3 with max_result_bytes=1000, NO max_lines
+        res_blk = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "line": 3, "block": True, "format": "json", "continuation": True, "max_result_bytes": 1000}
+        }, req_id)
+        req_id += 1
+        assert not res_blk["result"].get("isError", False)
+        sc_blk = res_blk["result"]["structuredContent"]
+        w_blk = len(json.dumps(sc_blk, separators=(",", ":")).encode("utf-8"))
+        assert w_blk <= 1000
+        assert sc_blk["mode"] == "block"
+        assert sc_blk["truncated"] is True
+        assert sc_blk["continuation_token"] is not None
+
+        # 4. Fail-closed: absurdly tiny budget (e.g. 50 bytes) where even 1 line + metadata + token cannot fit
+        res_fail = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "symbol": "foo", "format": "json", "continuation": True, "max_result_bytes": 50}
+        }, req_id)
+        req_id += 1
+        assert res_fail["result"].get("isError") is True
+        err_msg = res_fail["result"]["content"][0]["text"]
+        assert "target_exceeds_max_result_bytes" in err_msg
+
+        proc.terminate()
+
+
+def test_mcp_output_schema_tools_list_full_validation():
+    """
+    [P1] Fetch outputSchema from tools/list and validate all return payloads against it.
+    Confirms 'mode' conforms strictly to outputSchema.mode (point / range / block / symbol),
+    especially lines view which must emit canonical mode='range'.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        py_file = tmp / "schema_test.py"
+        create_sample_file(py_file, 25)
+        file_path = str(py_file.resolve())
+
+        proc = subprocess.Popen([TRG_BIN, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def call_mcp(method, params, req_id):
+            msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            return json.loads(line)
+
+        call_mcp("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}}, 1)
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+
+        # 1. Fetch outputSchema from tools/list
+        tools_list = call_mcp("tools/list", {}, 2)
+        tools = tools_list["result"]["tools"]
+        view_tool = next(t for t in tools if t["name"] == "trg_view")
+        output_schema = view_tool["outputSchema"]
+
+        # Validate schema definition properties
+        allowed_modes = output_schema["properties"]["mode"]["enum"]
+        assert set(allowed_modes) == {"point", "range", "block", "symbol"}
+
+        # 2. Test lines mode (continuation: True): MUST emit mode='range' matching schema
+        r_lines = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "lines": [1, 15], "format": "json", "continuation": True, "max_lines": 5}
+        }, 3)
+        sc_lines = r_lines["result"]["structuredContent"]
+        assert sc_lines["mode"] == "range", f"Expected mode 'range', got {sc_lines['mode']}"
+        validate_schema(sc_lines, output_schema, "lines_view")
+
+        # 3. Test lines continuation resume: MUST emit mode='range' matching schema
+        tok_lines = sc_lines["continuation_token"]
+        r_lines_cont = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"continuation_token": tok_lines, "format": "json", "max_lines": 5}
+        }, 4)
+        sc_lines_cont = r_lines_cont["result"]["structuredContent"]
+        assert sc_lines_cont["mode"] == "range"
+        validate_schema(sc_lines_cont, output_schema, "lines_view_continuation")
+
+        # 4. Test block mode (continuation: True)
+        r_blk = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "line": 5, "block": True, "format": "json", "continuation": True, "max_lines": 5}
+        }, 5)
+        sc_blk = r_blk["result"]["structuredContent"]
+        assert sc_blk["mode"] == "block"
+        validate_schema(sc_blk, output_schema, "block_view")
+
+        # 5. Test symbol mode (continuation: True)
+        r_sym = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "symbol": "long_computation", "format": "json", "continuation": True, "max_lines": 5}
+        }, 6)
+        sc_sym = r_sym["result"]["structuredContent"]
+        assert sc_sym["mode"] == "symbol"
+        validate_schema(sc_sym, output_schema, "symbol_view")
+
+        # 6. Test point mode (continuation: False)
+        r_pt = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "line": 5, "format": "json", "max_lines": 5}
+        }, 7)
+        sc_pt = r_pt["result"]["structuredContent"]
+        assert sc_pt["mode"] == "point"
+        assert sc_pt.get("continuation_token") is None
+        validate_schema(sc_pt, output_schema, "point_view")
+
+        proc.terminate()
+
+
+def test_token_overflow_fail_closed_without_code_emission():
+    """
+    [P1] When continuation token length exceeds 4096 bytes, fail explicitly.
+    Must never emit partial code without token.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        py_file = tmp / "overflow.py"
+        # Create a function with an extremely long identifier (3500+ chars)
+        huge_name = "func_" + "a" * 3500
+        py_file.write_text(f"def {huge_name}():\n    x = 1\n    return x\n")
+        file_path = str(py_file.resolve())
+
+        # 1. CLI view on symbol that causes token overflow on continuation
+        r_cli = subprocess.run(
+            [TRG_BIN, "view", file_path, "--symbol", huge_name, "--continuation", "--max-lines", "1"],
+            capture_output=True, text=True
+        )
+        assert r_cli.returncode == 2, f"Expected returncode 2, got {r_cli.returncode}"
+        assert "continuation_token_overflow" in r_cli.stderr, f"Expected token overflow error in stderr: {r_cli.stderr}"
+        assert r_cli.stdout == "", f"Expected ZERO code bytes emitted to stdout, got: {r_cli.stdout!r}"
+
+        # 2. CLI view resume with token exceeding 4096 bytes
+        huge_token = "trg-cont-v1." + "A" * 4100
+        r_resume = subprocess.run(
+            [TRG_BIN, "view", "--continue", huge_token],
+            capture_output=True, text=True
+        )
+        assert r_resume.returncode == 2
+        assert "token exceeds maximum length limit" in r_resume.stderr
+        assert r_resume.stdout == ""
+
+        # 3. MCP view on symbol that causes token overflow
+        proc = subprocess.Popen([TRG_BIN, "--mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def call_mcp(method, params, req_id):
+            msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            return json.loads(line)
+
+        call_mcp("initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "test", "version": "1.0"}}, 1)
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+
+        res_mcp = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"path": file_path, "symbol": huge_name, "format": "json", "continuation": True, "max_lines": 1}
+        }, 2)
+        assert res_mcp["result"].get("isError") is True
+        text_content = res_mcp["result"]["content"][0]["text"]
+        assert "continuation_token_overflow" in text_content
+        # Ensure no partial structured content with code leaked
+        assert "structuredContent" not in res_mcp["result"] or res_mcp["result"]["structuredContent"] is None
+
+        # 4. MCP view resume with token exceeding 4096 bytes
+        res_mcp_resume = call_mcp("tools/call", {
+            "name": "trg_view",
+            "arguments": {"continuation_token": huge_token}
+        }, 3)
+        assert res_mcp_resume["result"].get("isError") is True
+        assert "token exceeds maximum length limit" in res_mcp_resume["result"]["content"][0]["text"]
+
+        proc.terminate()
+
+
 if __name__ == "__main__":
     print(f"Running view continuation qualification suite using binary: {TRG_BIN}")
     test_cli_sequential_range_start_paging()
@@ -813,5 +1141,9 @@ if __name__ == "__main__":
     test_cli_lines_and_block_continuation()
     test_strict_token_validation_edge_cases()
     test_non_continuation_json_isolation_and_schema_parity()
+    test_json_auto_pruning_budget_convergence()
+    test_mcp_output_schema_tools_list_full_validation()
+    test_token_overflow_fail_closed_without_code_emission()
     print("ALL test_view_continuation.py tests PASSED successfully!")
+
 

@@ -200,7 +200,7 @@ pub fn format_view_line_record_json(line_number: usize, kind: str, text: str) ->
 }
 
 impl ViewResult {
-    pub fn format_structured(self) -> string {
+    pub fn format_structured(self#) -> string {
         auto resp# = string::from("{\"schema\":\"trg-mcp-view-result-v1\",\"mode\":\"")
         resp#.push_str(self.mode.as_str())
         resp#.push_str("\",\"path\":\"")
@@ -323,14 +323,14 @@ impl ViewResult {
             }
         }
         if self.mode == "symbol" {
-            auto sym_suffix = self.format_symbol_suffix_str(self.truncated)
+            auto sym_suffix = self#.format_symbol_suffix_str(self.truncated)
             resp#.push_str(sym_suffix.as_str())
         }
         resp#.push_str("}")
         return cede resp
     }
 
-    pub fn format_symbol_suffix_str(self, is_pruned: bool) -> string {
+    pub fn format_symbol_suffix_str(self#, is_pruned: bool) -> string {
         auto resp# = string::from(",\"selection_status\":\"")
         resp#.push_str(self.selection_status.as_str())
         resp#.push_str("\",\"range_status\":")
@@ -422,10 +422,65 @@ impl ViewResult {
         return cede resp
     }
 
+    pub fn build_continuation_token(self#, next_line: usize, end_line: usize, req_start: usize, req_end: usize) -> Result<Option<string>, string> {
+        if next_line > end_line {
+            return Result<Option<string>, string>::Ok(Option<string>::None)
+        }
+        auto sym_name_opt# = Option<string>::None
+        auto sym_scope_opt# = Option<string>::None
+        if self.target_symbol.len() > 0:usize {
+            auto &ts = self.target_symbol.borrow(0:usize)
+            sym_name_opt = Option<string>::Some(string::from(ts.name.as_str()))
+            if ts.scope.len() > 0:usize {
+                sym_scope_opt = Option<string>::Some(string::from(ts.scope.as_str()))
+            }
+        }
+        auto r_stat# = string::from("confirmed")
+        match self.range_status {
+            auto Option<string>::Some(&rs) => {
+                r_stat = string::from(rs.as_str())
+            }
+            auto Option<string>::None => {}
+        }
+        auto max_cols_tok# = Option<usize>::None
+        match self.continuation_token {
+            auto Option<string>::Some(&ts) => {
+                auto dec = decode_continuation_token(ts.as_str())
+                if dec.is_ok() {
+                    max_cols_tok = dec.unwrap().max_columns
+                }
+            }
+            auto Option<string>::None => {}
+        }
+        auto m_str# = string::from(self.mode.as_str())
+        if m_str == "lines" {
+            m_str = string::from("range")
+        }
+        auto ct = ContinuationToken(
+            version = 1:usize,
+            path = string::from(self.path.as_str()),
+            req_start = req_start,
+            req_end = req_end,
+            next_line = next_line,
+            end_line = end_line,
+            sha256_hex = string::from(self.sha256_hex.as_str()),
+            mode = cede m_str,
+            symbol = cede sym_name_opt,
+            scope = cede sym_scope_opt,
+            range_status = cede r_stat,
+            max_columns = max_cols_tok
+        )
+        auto enc_opt = encode_continuation_token(ct)
+        if enc_opt.is_none() {
+            return Result<Option<string>, string>::Err(string::from("continuation_token_overflow: Continuation token exceeds maximum length limit (4096 bytes)"))
+        }
+        return Result<Option<string>, string>::Ok(Option<string>::Some(enc_opt.unwrap()))
+    }
+
     // Computes metadata length upper-bound using limit digit count as a conservative
     // bound, followed by final exact convergence in converge_structured.
     pub fn compute_candidate_meta_len(
-        self,
+        self#,
         start_idx: usize,
         end_idx: usize,
         is_pruned: bool,
@@ -550,7 +605,7 @@ impl ViewResult {
             l_records_close = l_records_close + s_tok_tag.len + l_tok
         }
         if self.mode == "symbol" {
-            auto sym_suffix = self.format_symbol_suffix_str(is_pruned)
+            auto sym_suffix = self#.format_symbol_suffix_str(is_pruned)
             l_records_close = l_records_close + sym_suffix.len()
         }
         l_records_close = l_records_close + 1:usize
@@ -566,11 +621,11 @@ impl ViewResult {
 
     pub fn converge_structured(self#) -> Result<string, string> {
         self.bytes_emitted = 0:usize
-        auto cur_s# = self.format_structured()
+        auto cur_s# = self#.format_structured()
         self.bytes_emitted = cur_s.len()
         auto iter# = 0:usize
         loop iter < 10:usize {
-            cur_s = self.format_structured()
+            cur_s = self#.format_structured()
             if cur_s.len() == self.bytes_emitted {
                 return Result<string, string>::Ok(cede cur_s)
             }
@@ -585,7 +640,7 @@ impl ViewResult {
         if n_recs == 0:usize {
             if self.candidates.len() > 1:usize {
                 loop self.candidates.len() > 1:usize {
-                    auto cur_meta_len = self.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
+                    auto cur_meta_len = self#.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
                     if cur_meta_len <= limit {
                         break
                     }
@@ -593,7 +648,7 @@ impl ViewResult {
                     self.candidates_truncated = true
                 }
             }
-            auto meta_len = self.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
+            auto meta_len = self#.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
             if meta_len > limit {
                 auto err# = string::from("target_exceeds_max_result_bytes: View result metadata (")
                 err#.push_str(u64_to_string(meta_len as u64).as_str())
@@ -605,14 +660,16 @@ impl ViewResult {
             return self#.converge_structured()
         }
 
-        // 1. Check if unpruned result already converges within limit
-        auto init_conv = self#.converge_structured()
-        if init_conv.is_err() {
-            return init_conv
-        }
-        auto init_json = init_conv.unwrap()
-        if init_json.len() <= limit {
-            return Result<string, string>::Ok(cede init_json)
+        // 1. Check if unpruned non-continuation result already converges within limit
+        if !self.continuation_active {
+            auto init_conv = self#.converge_structured()
+            if init_conv.is_err() {
+                return init_conv
+            }
+            auto init_json = init_conv.unwrap()
+            if init_json.len() <= limit {
+                return Result<string, string>::Ok(cede init_json)
+            }
         }
 
         // 2. Precompute exact record JSON lengths: O(B)
@@ -638,29 +695,86 @@ impl ViewResult {
         if self.continuation_active {
             // Continuation mode: always sequential range-start paging!
             // Never drop lines from the start (w_start stays 0), only shrink w_end from the back.
-            loop true {
-                auto num_lines = w_end - w_start + 1:usize
-                auto comma_len# = 0:usize
-                if num_lines > 1:usize {
-                    comma_len = num_lines - 1:usize
+            // Token overhead is strictly budgeted inside the candidate convergence loop.
+            auto total_end# = 0:usize
+            auto total_start# = 1:usize
+            match self.detected_block_range {
+                auto Option<BlockRange>::Some(dbr) => {
+                    total_start = dbr.start
+                    total_end = dbr.end
                 }
-                auto meta_len = self.compute_candidate_meta_len(w_start, w_end, true, limit)
-                auto cand_total = meta_len + comma_len + cur_recs_len
-                if cand_total <= limit {
-                    break
-                }
-                if w_end > w_start {
-                    cur_recs_len = cur_recs_len - rec_lens.get(w_end)
-                    w_end = w_end - 1:usize
-                } else {
-                    // Even 1 line cannot fit within limit
-                    has_records = false
-                    auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record exceeds max_result_bytes (")
-                    err#.push_str(u64_to_string(limit as u64).as_str())
-                    err#.push_str(" bytes)")
-                    return Result<string, string>::Err(cede err)
+                auto Option<BlockRange>::None => {
+                    match self.requested_range {
+                        auto Option<BlockRange>::Some(rr) => {
+                            total_start = rr.start
+                            total_end = rr.end
+                        }
+                        auto Option<BlockRange>::None => {}
+                    }
                 }
             }
+
+            auto chosen_k# = Option<usize>::None
+            auto cur_k# = n_recs
+            loop cur_k >= 1:usize {
+                auto last_line = self.records.borrow(cur_k - 1:usize).line_number
+                auto cand_tok_res = self#.build_continuation_token(last_line + 1:usize, total_end, total_start, total_end)
+                if cand_tok_res.is_err() {
+                    return Result<string, string>::Err(cand_tok_res.unwrap_err())
+                }
+                self.continuation_token = cand_tok_res.unwrap()
+
+                auto comma_len# = 0:usize
+                if cur_k > 1:usize {
+                    comma_len = cur_k - 1:usize
+                }
+
+                auto meta_len = self#.compute_candidate_meta_len(0:usize, cur_k - 1:usize, cur_k < n_recs || self.continuation_token.is_some(), limit)
+                auto cand_total = meta_len + comma_len + cur_recs_len
+
+                if cand_total <= limit {
+                    chosen_k = Option<usize>::Some(cur_k)
+                    break
+                }
+
+                cur_recs_len = cur_recs_len - rec_lens.get(cur_k - 1:usize)
+                cur_k = cur_k - 1:usize
+            }
+
+            if chosen_k.is_none() {
+                self.continuation_token = Option<string>::None
+                auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record exceeds max_result_bytes (")
+                err#.push_str(u64_to_string(limit as u64).as_str())
+                err#.push_str(" bytes)")
+                return Result<string, string>::Err(cede err)
+            }
+
+            auto final_k = chosen_k.unwrap()
+            auto new_records# = Vec<ViewLineRecord>::new()
+            auto ki# = 0:usize
+            loop ki < final_k {
+                auto &r = self.records.borrow(ki)
+                new_records#.push(ViewLineRecord(
+                    line_number = r.line_number,
+                    kind = r.kind.clone(),
+                    text = r.text.clone()
+                ))
+                ki = ki + 1:usize
+            }
+            self.records = cede new_records
+            if final_k < n_recs || self.continuation_token.is_some() {
+                self.truncated = true
+                self.reason = string::from("max_result_bytes")
+                self.output_status = string::from("budget_truncated")
+                self.complete = false
+            }
+            self.lines_emitted = final_k
+            self.emitted_range = Option<BlockRange>::Some(BlockRange(
+                start = self.records.borrow(0:usize).line_number,
+                end = self.records.borrow(final_k - 1:usize).line_number
+            ))
+
+            return self#.converge_structured()
         } else if req_line_opt.is_some() {
             auto target_line_num = req_line_opt.unwrap()
             // Point or Block mode: target line must be preserved
@@ -755,7 +869,7 @@ impl ViewResult {
                 if num_lines > 1:usize {
                     comma_len = num_lines - 1:usize
                 }
-                auto meta_len = self.compute_candidate_meta_len(w_start, w_end, true, limit)
+                auto meta_len = self#.compute_candidate_meta_len(w_start, w_end, true, limit)
                 auto cand_total = meta_len + comma_len + cur_recs_len
                 if cand_total <= limit {
                     break
@@ -798,7 +912,7 @@ impl ViewResult {
                 if num_lines > 1:usize {
                     comma_len = num_lines - 1:usize
                 }
-                auto meta_len = self.compute_candidate_meta_len(w_start, w_end, true, limit)
+                auto meta_len = self#.compute_candidate_meta_len(w_start, w_end, true, limit)
                 auto cand_total = meta_len + comma_len + cur_recs_len
                 if cand_total <= limit {
                     break
@@ -809,7 +923,7 @@ impl ViewResult {
                 } else {
                     // Even 1 line cannot fit, check if 0 records can fit
                     has_records = false
-                    auto zero_meta = self.compute_candidate_meta_len(1:usize, 0:usize, true, limit)
+                    auto zero_meta = self#.compute_candidate_meta_len(1:usize, 0:usize, true, limit)
                     if zero_meta > limit {
                         auto err# = string::from("target_exceeds_max_result_bytes: View result metadata (")
                         err#.push_str(u64_to_string(zero_meta as u64).as_str())
@@ -844,84 +958,13 @@ impl ViewResult {
         self.lines_emitted = self.records.len()
         if self.lines_emitted > 0:usize {
             self.emitted_range = Option<BlockRange>::Some(BlockRange(
-                start = self.records.borrow(0).line_number,
+                start = self.records.borrow(0:usize).line_number,
                 end = self.records.borrow(self.records.len() - 1:usize).line_number
             ))
-            if self.continuation_active {
-                auto last_line = self.records.borrow(self.records.len() - 1:usize).line_number
-                auto total_end# = 0:usize
-                auto total_start# = 1:usize
-                match self.detected_block_range {
-                    auto Option<BlockRange>::Some(dbr) => {
-                        total_start = dbr.start
-                        total_end = dbr.end
-                    }
-                    auto Option<BlockRange>::None => {
-                        match self.requested_range {
-                            auto Option<BlockRange>::Some(rr) => {
-                                total_start = rr.start
-                                total_end = rr.end
-                            }
-                            auto Option<BlockRange>::None => {}
-                        }
-                    }
-                }
-
-                if last_line < total_end {
-                    auto sym_name_opt# = Option<string>::None
-                    auto sym_scope_opt# = Option<string>::None
-                    if self.target_symbol.len() > 0:usize {
-                        auto &ts = self.target_symbol.borrow(0)
-                        sym_name_opt = Option<string>::Some(string::from(ts.name.as_str()))
-                        if ts.scope.len() > 0:usize {
-                            sym_scope_opt = Option<string>::Some(string::from(ts.scope.as_str()))
-                        }
-                    }
-                    auto r_stat# = string::from("confirmed")
-                    match self.range_status {
-                        auto Option<string>::Some(&rs) => {
-                            r_stat = string::from(rs.as_str())
-                        }
-                        auto Option<string>::None => {}
-                    }
-                    auto max_cols_tok# = Option<usize>::None
-                    match self.continuation_token {
-                        auto Option<string>::Some(&ts) => {
-                            auto dec = decode_continuation_token(ts.as_str())
-                            if dec.is_ok() {
-                                max_cols_tok = dec.unwrap().max_columns
-                            }
-                        }
-                        auto Option<string>::None => {}
-                    }
-                    auto updated_tok = ContinuationToken(
-                        version = 1:usize,
-                        path = string::from(self.path.as_str()),
-                        req_start = total_start,
-                        req_end = total_end,
-                        next_line = last_line + 1:usize,
-                        end_line = total_end,
-                        sha256_hex = string::from(self.sha256_hex.as_str()),
-                        mode = string::from(self.mode.as_str()),
-                        symbol = cede sym_name_opt,
-                        scope = cede sym_scope_opt,
-                        range_status = cede r_stat,
-                        max_columns = max_cols_tok
-                    )
-                    self.continuation_token = encode_continuation_token(updated_tok)
-                } else {
-                    self.continuation_token = Option<string>::None
-                }
-            } else {
-                self.continuation_token = Option<string>::None
-            }
+            self.continuation_token = Option<string>::None
         } else {
             self.emitted_range = Option<BlockRange>::None
             self.continuation_token = Option<string>::None
-            if self.continuation_active {
-                auto err = string::from("target_exceeds_max_result_bytes: Budget too small to emit even a single line with continuation token")
-                return Result<string, string>::Err(cede err)
-            }
         }
 
         // 5. Converge byte count and final assertion
@@ -1330,7 +1373,11 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
                             if s.as_str() != "symbol" && s.as_str() != "lines" && s.as_str() != "block" && s.as_str() != "point" && s.as_str() != "range" {
                                 return Result<ContinuationToken, string>::Err(string::from("Invalid mode in continuation token"))
                             }
-                            m_val = s.clone()
+                            if s.as_str() == "lines" {
+                                m_val = string::from("range")
+                            } else {
+                                m_val = s.clone()
+                            }
                         }
                         _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid mode in continuation token")) }
                     }
@@ -1850,13 +1897,16 @@ fn execute_view_continuation_lines(
             next_line = cur_line,
             end_line = end_actual,
             sha256_hex = string::from(sha256_hex.as_str()),
-            mode = string::from("lines"),
+            mode = string::from("range"),
             symbol = Option<string>::None,
             scope = Option<string>::None,
             range_status = string::from("confirmed"),
             max_columns = opts.max_columns
         )
         continuation_tok = encode_continuation_token(ct)
+        if continuation_tok.is_none() {
+            return Result<ViewResult, string>::Err(string::from("continuation_token_overflow: Continuation token exceeds maximum length limit (4096 bytes)"))
+        }
     }
 
     auto emitted_range# = Option<BlockRange>::None
@@ -1882,7 +1932,7 @@ fn execute_view_continuation_lines(
         reason = cede term_reason,
         lines_emitted = lines_emitted,
         bytes_emitted = bytes_emitted,
-        mode = string::from("lines"),
+        mode = string::from("range"),
         path = string::from(opts.file_path.as_str()),
         requested_line = Option<usize>::None,
         requested_range = Option<BlockRange>::Some(BlockRange(start = start_req, end = end_actual)),
@@ -3144,6 +3194,9 @@ fn execute_view_continuation_block(
             max_columns = opts.max_columns
         )
         continuation_tok = encode_continuation_token(ct)
+        if continuation_tok.is_none() {
+            return Result<ViewResult, string>::Err(string::from("continuation_token_overflow: Continuation token exceeds maximum length limit (4096 bytes)"))
+        }
     }
 
     auto emitted_range# = Option<BlockRange>::None
@@ -4637,6 +4690,9 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
                 max_columns = opts.max_columns
             )
             continuation_tok = encode_continuation_token(ct)
+            if continuation_tok.is_none() {
+                return Result<ViewResult, string>::Err(string::from("continuation_token_overflow: Continuation token exceeds maximum length limit (4096 bytes)"))
+            }
         }
 
         auto emitted_range = Option<BlockRange>::Some(BlockRange(
@@ -5118,7 +5174,7 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
 
         auto line_entry# = string::new()
         line_entry#.push_str(u64_to_string(cur_line as u64).as_str())
-        if token.mode == "lines" {
+        if token.mode == "lines" || token.mode == "range" {
             line_entry#.push_str(":")
         } else {
             line_entry#.push_str("-")
@@ -5133,7 +5189,7 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
         }
 
         auto rec_kind# = string::from("context")
-        if token.mode == "lines" {
+        if token.mode == "lines" || token.mode == "range" {
             rec_kind = string::from("target")
         }
 
@@ -5173,6 +5229,10 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
             }
             auto Option<string>::None => {}
         }
+        auto tok_mode# = string::from(token.mode.as_str())
+        if tok_mode == "lines" {
+            tok_mode = string::from("range")
+        }
         auto next_tok_data = ContinuationToken(
             version = token.version,
             path = string::from(token.path.as_str()),
@@ -5181,13 +5241,16 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
             next_line = cur_line,
             end_line = token.end_line,
             sha256_hex = string::from(token.sha256_hex.as_str()),
-            mode = string::from(token.mode.as_str()),
+            mode = cede tok_mode,
             symbol = cede sym_copy,
             scope = cede sc_copy,
             range_status = string::from(token.range_status.as_str()),
             max_columns = token.max_columns
         )
         next_token = encode_continuation_token(next_tok_data)
+        if next_token.is_none() {
+            return Result<ViewResult, string>::Err(string::from("continuation_token_overflow: Continuation token exceeds maximum length limit (4096 bytes)"))
+        }
     }
 
     auto emitted_range# = Option<BlockRange>::None
@@ -5233,13 +5296,18 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
         auto Option<string>::None => {}
     }
 
+    auto vr_mode# = string::from(token.mode.as_str())
+    if vr_mode == "lines" {
+        vr_mode = string::from("range")
+    }
+
     return Result<ViewResult, string>::Ok(ViewResult(
         text = cede out,
         truncated = truncated,
         reason = cede trunc_reason,
         lines_emitted = lines_emitted,
         bytes_emitted = bytes_emitted,
-        mode = string::from(token.mode.as_str()),
+        mode = cede vr_mode,
         path = string::from(token.path.as_str()),
         requested_line = Option<usize>::None,
         requested_range = requested_block,

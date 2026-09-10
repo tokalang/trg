@@ -1388,7 +1388,7 @@ pub fn run_mcp_server() -> i32 {
 
                                                         if server_state.negotiated_version.as_str() == "2025-11-25" {
                                                             resp#.push_str(",\"structuredContent\":")
-                                                            resp#.push_str(vr.format_structured().as_str())
+                                                            resp#.push_str(vr#.format_structured().as_str())
                                                         }
 
                                                         resp#.push_str(",\"_meta\":{\"truncated\":")
