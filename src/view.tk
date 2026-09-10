@@ -9,6 +9,7 @@ import src/types::{BlockRange, SyntaxFamily, BlockDelimiter, LexicalDialect, Lin
 import src/syntax::{
     detect_syntax_family,
     detect_lexical_dialect,
+    is_symbol_view_supported,
     compute_line_indent,
     update_delimiter_depths,
     scan_line_lexical,
@@ -19,6 +20,7 @@ import src/syntax::{
     check_is_self_closed_line,
     check_is_self_closed_structured
 }
+import src/symbols::{outline_symbols_lines, SymbolRecord}
 import src/printer::{u64_to_string, json_escape}
 import src/parse::{parse_size_bytes_strict}
 import std/env as env
@@ -30,12 +32,66 @@ pub shape ViewLineRecord (
     text: string
 )
 
+pub shape SymbolTargetInfo (
+    name: string,
+    kind: string,
+    line: usize,
+    range_start: usize,
+    range_end: Option<usize>,
+    range_status: string,
+    scope: string,
+    detail: string
+)
+
+impl SymbolTargetInfo {
+    pub fn clone(self) -> SymbolTargetInfo {
+        return SymbolTargetInfo(
+            name = string::from(self.name.as_str()),
+            kind = string::from(self.kind.as_str()),
+            line = self.line,
+            range_start = self.range_start,
+            range_end = self.range_end,
+            range_status = string::from(self.range_status.as_str()),
+            scope = string::from(self.scope.as_str()),
+            detail = string::from(self.detail.as_str())
+        )
+    }
+}
+
+pub shape SymbolCandidateInfo (
+    name: string,
+    kind: string,
+    line: usize,
+    range_start: usize,
+    range_end: Option<usize>,
+    range_status: string,
+    scope: string,
+    detail: string
+)
+
+impl SymbolCandidateInfo {
+    pub fn clone(self) -> SymbolCandidateInfo {
+        return SymbolCandidateInfo(
+            name = string::from(self.name.as_str()),
+            kind = string::from(self.kind.as_str()),
+            line = self.line,
+            range_start = self.range_start,
+            range_end = self.range_end,
+            range_status = string::from(self.range_status.as_str()),
+            scope = string::from(self.scope.as_str()),
+            detail = string::from(self.detail.as_str())
+        )
+    }
+}
+
 pub shape ViewOptions (
     file_path: string,
     line: Option<usize>,
     context: usize,
     block: bool,
     lines_range: Option<BlockRange>,
+    symbol: Option<string>,
+    symbol_scope: Option<string>,
     max_lines: Option<usize>,
     max_result_bytes: Option<usize>,
     max_columns: Option<usize>,
@@ -58,7 +114,13 @@ pub shape ViewResult (
     content_omitted: bool,
     complete: bool,
     eof_reached: bool,
-    records: Vec<ViewLineRecord>
+    records: Vec<ViewLineRecord>,
+    selection_status: string,
+    range_status: Option<string>,
+    output_status: string,
+    target_symbol: Vec<SymbolTargetInfo>,
+    candidates: Vec<SymbolCandidateInfo>,
+    candidates_truncated: bool
 )
 
 pub fn format_view_line_record_json(line_number: usize, kind: str, text: str) -> string {
@@ -181,7 +243,104 @@ impl ViewResult {
             resp#.push_str(r_json.as_str())
             r_i = r_i + 1:usize
         }
-        resp#.push_str("]}")
+        resp#.push_str("]")
+        if self.mode == "symbol" {
+            auto sym_suffix = self.format_symbol_suffix_str(self.truncated)
+            resp#.push_str(sym_suffix.as_str())
+        }
+        resp#.push_str("}")
+        return cede resp
+    }
+
+    pub fn format_symbol_suffix_str(self, is_pruned: bool) -> string {
+        auto resp# = string::from(",\"selection_status\":\"")
+        resp#.push_str(self.selection_status.as_str())
+        resp#.push_str("\",\"range_status\":")
+        match self.range_status {
+            auto Option<string>::Some(&rs) => {
+                resp#.push_str("\"")
+                resp#.push_str(rs.as_str())
+                resp#.push_str("\"")
+            }
+            auto Option<string>::None => {
+                resp#.push_str("null")
+            }
+        }
+        resp#.push_str(",\"output_status\":\"")
+        if is_pruned {
+            resp#.push_str("budget_truncated")
+        } else {
+            resp#.push_str(self.output_status.as_str())
+        }
+        resp#.push_str("\",\"symbol\":")
+        if self.target_symbol.len() > 0:usize {
+            auto &sym = self.target_symbol.borrow(0)
+            resp#.push_str("{\"name\":\"")
+            resp#.push_str(json_escape(sym.name.as_str()).as_str())
+            resp#.push_str("\",\"kind\":\"")
+            resp#.push_str(sym.kind.as_str())
+            resp#.push_str("\",\"line\":")
+            resp#.push_str(u64_to_string(sym.line as u64).as_str())
+            resp#.push_str(",\"range_start\":")
+            resp#.push_str(u64_to_string(sym.range_start as u64).as_str())
+            resp#.push_str(",\"range_end\":")
+            match sym.range_end {
+                auto Option<usize>::Some(re) => {
+                    resp#.push_str(u64_to_string(re as u64).as_str())
+                }
+                auto Option<usize>::None => {
+                    resp#.push_str("null")
+                }
+            }
+            resp#.push_str(",\"range_status\":\"")
+            resp#.push_str(sym.range_status.as_str())
+            resp#.push_str("\",\"scope\":\"")
+            resp#.push_str(json_escape(sym.scope.as_str()).as_str())
+            resp#.push_str("\",\"detail\":\"")
+            resp#.push_str(json_escape(sym.detail.as_str()).as_str())
+            resp#.push_str("\"}")
+        } else {
+            resp#.push_str("null")
+        }
+        resp#.push_str(",\"candidates\":[")
+        auto ci# = 0:usize
+        loop ci < self.candidates.len() {
+            if ci > 0:usize {
+                resp#.push_str(",")
+            }
+            auto &c = self.candidates.borrow(ci)
+            resp#.push_str("{\"name\":\"")
+            resp#.push_str(json_escape(c.name.as_str()).as_str())
+            resp#.push_str("\",\"kind\":\"")
+            resp#.push_str(c.kind.as_str())
+            resp#.push_str("\",\"line\":")
+            resp#.push_str(u64_to_string(c.line as u64).as_str())
+            resp#.push_str(",\"range_start\":")
+            resp#.push_str(u64_to_string(c.range_start as u64).as_str())
+            resp#.push_str(",\"range_end\":")
+            match c.range_end {
+                auto Option<usize>::Some(re) => {
+                    resp#.push_str(u64_to_string(re as u64).as_str())
+                }
+                auto Option<usize>::None => {
+                    resp#.push_str("null")
+                }
+            }
+            resp#.push_str(",\"range_status\":\"")
+            resp#.push_str(c.range_status.as_str())
+            resp#.push_str("\",\"scope\":\"")
+            resp#.push_str(json_escape(c.scope.as_str()).as_str())
+            resp#.push_str("\",\"detail\":\"")
+            resp#.push_str(json_escape(c.detail.as_str()).as_str())
+            resp#.push_str("\"}")
+            ci = ci + 1:usize
+        }
+        resp#.push_str("],\"candidates_truncated\":")
+        if self.candidates_truncated {
+            resp#.push_str("true")
+        } else {
+            resp#.push_str("false")
+        }
         return cede resp
     }
 
@@ -301,7 +460,11 @@ impl ViewResult {
         auto s_records_open = ",\"records\":["
         auto l_records_open = s_records_open.len
         auto s_records_close = "]}"
-        auto l_records_close = s_records_close.len
+        auto l_records_close# = s_records_close.len
+        if self.mode == "symbol" {
+            auto sym_suffix = self.format_symbol_suffix_str(is_pruned)
+            l_records_close = 2:usize + sym_suffix.len()
+        }
 
         return l_schema + l_mode + l_path_tag + l_path + l_req_line_tag + l_req_line +
                l_req_range_tag + l_req_range + l_det_range_tag + l_det_range +
@@ -331,6 +494,16 @@ impl ViewResult {
     pub fn prune_to_json_budget(self#, limit: usize) -> Result<string, string> {
         auto n_recs = self.records.len()
         if n_recs == 0:usize {
+            if self.candidates.len() > 1:usize {
+                loop self.candidates.len() > 1:usize {
+                    auto cur_meta_len = self.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
+                    if cur_meta_len <= limit {
+                        break
+                    }
+                    auto _ = self.candidates#.pop()
+                    self.candidates_truncated = true
+                }
+            }
             auto meta_len = self.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
             if meta_len > limit {
                 auto err# = string::from("target_exceeds_max_result_bytes: View result metadata (")
@@ -395,17 +568,38 @@ impl ViewResult {
             auto single_records# = Vec<ViewLineRecord>::new()
             single_records#.push(ViewLineRecord(
                 line_number = self.records.borrow(target_idx).line_number,
-                kind = self.records.borrow(target_idx).kind.clone(),
-                text = self.records.borrow(target_idx).text.clone()
+                kind = string::from(self.records.borrow(target_idx).kind.as_str()),
+                text = string::from(self.records.borrow(target_idx).text.as_str())
             ))
+            auto target_sym_clone# = Vec<SymbolTargetInfo>::new()
+            if self.target_symbol.len() > 0:usize {
+                auto &ts = self.target_symbol.borrow(0)
+                target_sym_clone#.push(SymbolTargetInfo(
+                    name = string::from(ts.name.as_str()),
+                    kind = string::from(ts.kind.as_str()),
+                    line = ts.line,
+                    range_start = ts.range_start,
+                    range_end = ts.range_end,
+                    range_status = string::from(ts.range_status.as_str()),
+                    scope = string::from(ts.scope.as_str()),
+                    detail = string::from(ts.detail.as_str())
+                ))
+            }
+            auto target_range_status_clone# = Option<string>::None
+            match self.range_status {
+                auto Option<string>::Some(&rs) => {
+                    target_range_status_clone = Option<string>::Some(string::from(rs.as_str()))
+                }
+                auto Option<string>::None => {}
+            }
             auto target_only_vr# = ViewResult(
                 text = string::new(),
                 truncated = true,
                 reason = string::from("max_result_bytes"),
                 lines_emitted = 1:usize,
                 bytes_emitted = 0:usize,
-                mode = self.mode.clone(),
-                path = self.path.clone(),
+                mode = string::from(self.mode.as_str()),
+                path = string::from(self.path.as_str()),
                 requested_line = self.requested_line,
                 requested_range = self.requested_range,
                 detected_block_range = self.detected_block_range,
@@ -414,7 +608,13 @@ impl ViewResult {
                 content_omitted = self.content_omitted,
                 complete = false,
                 eof_reached = self.eof_reached,
-                records = cede single_records
+                records = cede single_records,
+                selection_status = string::from(self.selection_status.as_str()),
+                range_status = target_range_status_clone,
+                output_status = string::from("budget_truncated"),
+                target_symbol = cede target_sym_clone,
+                candidates = Vec<SymbolCandidateInfo>::new(),
+                candidates_truncated = false
             )
             auto to_conv = target_only_vr#.converge_structured()
             if to_conv.is_err() {
@@ -521,6 +721,7 @@ impl ViewResult {
         self.records = cede new_records
         self.truncated = true
         self.reason = string::from("max_result_bytes")
+        self.output_status = string::from("budget_truncated")
         self.complete = false
         self.lines_emitted = self.records.len()
         if self.lines_emitted > 0:usize {
@@ -554,6 +755,8 @@ impl ViewOptions {
             context = 10:usize,
             block = false,
             lines_range = Option<BlockRange>::None,
+            symbol = Option<string>::None,
+            symbol_scope = Option<string>::None,
             max_lines = Option<usize>::None,
             max_result_bytes = Option<usize>::None,
             max_columns = Option<usize>::None,
@@ -961,6 +1164,10 @@ fn execute_view_stream_lines(
     if truncated {
         term_reason = trunc_reason.clone()
     }
+    auto out_stat# = string::from("complete")
+    if truncated {
+        out_stat = string::from("budget_truncated")
+    }
 
     return Result<ViewResult, string>::Ok(ViewResult(
         text = cede out,
@@ -978,7 +1185,13 @@ fn execute_view_stream_lines(
         content_omitted = content_omitted,
         complete = complete,
         eof_reached = eof_reached,
-        records = cede records
+        records = cede records,
+        selection_status = string::from("found"),
+        range_status = Option<string>::None,
+        output_status = cede out_stat,
+        target_symbol = Vec<SymbolTargetInfo>::new(),
+        candidates = Vec<SymbolCandidateInfo>::new(),
+        candidates_truncated = false
     ))
 }
 
@@ -1329,6 +1542,10 @@ fn execute_view_stream_point(
     if truncated {
         term_reason = trunc_reason.clone()
     }
+    auto out_stat# = string::from("complete")
+    if truncated {
+        out_stat = string::from("budget_truncated")
+    }
 
     return Result<ViewResult, string>::Ok(ViewResult(
         text = cede out,
@@ -1346,7 +1563,13 @@ fn execute_view_stream_point(
         content_omitted = content_omitted,
         complete = !truncated,
         eof_reached = eof_reached,
-        records = cede records
+        records = cede records,
+        selection_status = string::from("found"),
+        range_status = Option<string>::None,
+        output_status = cede out_stat,
+        target_symbol = Vec<SymbolTargetInfo>::new(),
+        candidates = Vec<SymbolCandidateInfo>::new(),
+        candidates_truncated = false
     ))
 }
 
@@ -2178,6 +2401,10 @@ fn execute_view_stream_block(
     auto last_line = target_line + a_take_actual
     auto lines_emitted = 1:usize + b_take_actual + a_take_actual
     auto bytes_emitted = out.len()
+    auto out_stat# = string::from("complete")
+    if truncated {
+        out_stat = string::from("budget_truncated")
+    }
 
     return Result<ViewResult, string>::Ok(ViewResult(
         text = cede out,
@@ -2195,11 +2422,874 @@ fn execute_view_stream_block(
         content_omitted = content_omitted,
         complete = !truncated,
         eof_reached = eof_reached,
-        records = cede records
+        records = cede records,
+        selection_status = string::from("found"),
+        range_status = Option<string>::None,
+        output_status = cede out_stat,
+        target_symbol = Vec<SymbolTargetInfo>::new(),
+        candidates = Vec<SymbolCandidateInfo>::new(),
+        candidates_truncated = false
+    ))
+}
+
+fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
+    auto target_name# = string::new()
+    match opts.symbol {
+        auto Option<string>::Some(&s) => {
+            target_name = string::from(s.as_str())
+        }
+        auto Option<string>::None => {}
+    }
+    auto target_has_scope# = false
+    auto target_scope# = string::new()
+    match opts.symbol_scope {
+        auto Option<string>::Some(&sc) => {
+            target_has_scope = true
+            target_scope = string::from(sc.as_str())
+        }
+        auto Option<string>::None => {}
+    }
+
+    // 1. Syntax check
+    if !is_symbol_view_supported(opts.file_path.as_str()) {
+        auto msg# = string::from("trg view: file '")
+        msg#.push_str(opts.file_path.as_str())
+        msg#.push_str("' has unsupported syntax for symbol view")
+        return Result<ViewResult, string>::Ok(ViewResult(
+            text = cede msg,
+            truncated = false,
+            reason = string::from("unsupported_syntax"),
+            lines_emitted = 0:usize,
+            bytes_emitted = 0:usize,
+            mode = string::from("symbol"),
+            path = string::from(opts.file_path.as_str()),
+            requested_line = Option<usize>::None,
+            requested_range = Option<BlockRange>::None,
+            detected_block_range = Option<BlockRange>::None,
+            emitted_range = Option<BlockRange>::None,
+            target_included = Option<bool>::None,
+            content_omitted = false,
+            complete = false,
+            eof_reached = false,
+            records = Vec<ViewLineRecord>::new(),
+            selection_status = string::from("unsupported_syntax"),
+            range_status = Option<string>::None,
+            output_status = string::from("complete"),
+            target_symbol = Vec<SymbolTargetInfo>::new(),
+            candidates = Vec<SymbolCandidateInfo>::new(),
+            candidates_truncated = false
+        ))
+    }
+
+    // 2. Single bounded read into memory (10MB ceiling)
+    auto path_str = string::from(opts.file_path.as_str())
+    auto mode_buf# = [0:char; 4]
+    mode_buf[0] = 'r' as char
+    mode_buf[1] = 'b' as char
+    mode_buf[2] = 0 as char
+
+    auto lines# = Vec<string>::new()
+    auto read_err# = false
+    auto size_exceeded# = false
+    auto open_err# = false
+    auto bytes_read_accum# = 0:usize
+    auto max_file_read_bytes = 10485760:usize
+
+    unsafe {
+        auto *mode_ptr = &mode_buf[0] as *char
+        auto *path_c = path_str.c_str()
+        auto nul *fp = libc_fopen(*path_c, *mode_ptr)
+        if *fp == null {
+            open_err = true
+        } else {
+            auto *file = fp.unwrap()
+            auto nul *raw_buf = libc_malloc(65536:usize)
+            if *raw_buf == null {
+                libc_fclose(*file)
+                read_err = true
+            } else {
+                auto *buf = raw_buf.unwrap()
+                auto line_buf# = string::new()
+
+                loop true {
+                    auto n = libc_fread(*buf, 1:usize, 65536:usize, *file)
+                    if n == 0 {
+                        if posix_ferror((*file) as Addr) {
+                            read_err = true
+                        }
+                        break
+                    }
+
+                    bytes_read_accum = bytes_read_accum + n
+                    if bytes_read_accum > max_file_read_bytes {
+                        size_exceeded = true
+                        break
+                    }
+
+                    auto *c_ptr = ((*buf) as Addr) as *char
+                    auto chunk_str = string::from_with_len(*c_ptr, n)
+                    auto chunk_view = chunk_str.as_str()
+                    auto cursor# = 0:usize
+
+                    loop cursor < chunk_view.len {
+                        auto rem = chunk_view.substr(cursor, chunk_view.len - cursor)
+                        auto nl_opt = rem.index_of('\n' as char)
+                        if nl_opt.is_none() {
+                            line_buf#.push_str(rem)
+                            break
+                        }
+                        auto nl_pos = nl_opt.unwrap()
+                        auto chunk_slice = rem.substr(0, nl_pos)
+                        line_buf#.push_str(chunk_slice)
+                        lines#.push(line_buf.clone())
+                        line_buf#.clear()
+                        cursor = cursor + nl_pos + 1:usize
+                    }
+                }
+
+                if !read_err && !size_exceeded && line_buf.len() > 0 {
+                    lines#.push(line_buf.clone())
+                    line_buf#.clear()
+                }
+
+                libc_free(*buf)
+                libc_fclose(*file)
+            }
+        }
+    }
+
+    if open_err || read_err {
+        auto msg# = string::from("trg view: error reading '")
+        msg#.push_str(opts.file_path.as_str())
+        msg#.push_str("'")
+        return Result<ViewResult, string>::Ok(ViewResult(
+            text = cede msg,
+            truncated = false,
+            reason = string::from("io_error"),
+            lines_emitted = 0:usize,
+            bytes_emitted = 0:usize,
+            mode = string::from("symbol"),
+            path = string::from(opts.file_path.as_str()),
+            requested_line = Option<usize>::None,
+            requested_range = Option<BlockRange>::None,
+            detected_block_range = Option<BlockRange>::None,
+            emitted_range = Option<BlockRange>::None,
+            target_included = Option<bool>::None,
+            content_omitted = false,
+            complete = false,
+            eof_reached = false,
+            records = Vec<ViewLineRecord>::new(),
+            selection_status = string::from("io_error"),
+            range_status = Option<string>::None,
+            output_status = string::from("complete"),
+            target_symbol = Vec<SymbolTargetInfo>::new(),
+            candidates = Vec<SymbolCandidateInfo>::new(),
+            candidates_truncated = false
+        ))
+    }
+
+    if size_exceeded {
+        auto msg# = string::from("trg view: symbol scan incomplete for '")
+        msg#.push_str(opts.file_path.as_str())
+        msg#.push_str("' (file too large, exceeds 10MiB input read limit)")
+        return Result<ViewResult, string>::Ok(ViewResult(
+            text = cede msg,
+            truncated = true,
+            reason = string::from("scan_incomplete"),
+            lines_emitted = 0:usize,
+            bytes_emitted = 0:usize,
+            mode = string::from("symbol"),
+            path = string::from(opts.file_path.as_str()),
+            requested_line = Option<usize>::None,
+            requested_range = Option<BlockRange>::None,
+            detected_block_range = Option<BlockRange>::None,
+            emitted_range = Option<BlockRange>::None,
+            target_included = Option<bool>::None,
+            content_omitted = false,
+            complete = false,
+            eof_reached = false,
+            records = Vec<ViewLineRecord>::new(),
+            selection_status = string::from("scan_incomplete"),
+            range_status = Option<string>::None,
+            output_status = string::from("complete"),
+            target_symbol = Vec<SymbolTargetInfo>::new(),
+            candidates = Vec<SymbolCandidateInfo>::new(),
+            candidates_truncated = false
+        ))
+    }
+
+    // 3. Scan symbols from in-memory lines
+    auto sym_res = outline_symbols_lines(lines, opts.file_path.as_str(), Option<Vec<string>>::None, Option<usize>::Some(5000:usize), Option<usize>::None)
+    if sym_res.is_err() {
+        auto msg# = string::from("trg view: error scanning symbols for '")
+        msg#.push_str(opts.file_path.as_str())
+        msg#.push_str("'")
+        return Result<ViewResult, string>::Ok(ViewResult(
+            text = cede msg,
+            truncated = false,
+            reason = string::from("io_error"),
+            lines_emitted = 0:usize,
+            bytes_emitted = 0:usize,
+            mode = string::from("symbol"),
+            path = string::from(opts.file_path.as_str()),
+            requested_line = Option<usize>::None,
+            requested_range = Option<BlockRange>::None,
+            detected_block_range = Option<BlockRange>::None,
+            emitted_range = Option<BlockRange>::None,
+            target_included = Option<bool>::None,
+            content_omitted = false,
+            complete = false,
+            eof_reached = false,
+            records = Vec<ViewLineRecord>::new(),
+            selection_status = string::from("io_error"),
+            range_status = Option<string>::None,
+            output_status = string::from("complete"),
+            target_symbol = Vec<SymbolTargetInfo>::new(),
+            candidates = Vec<SymbolCandidateInfo>::new(),
+            candidates_truncated = false
+        ))
+    }
+
+    auto sym_data = sym_res.unwrap()
+    if sym_data.truncated {
+        auto msg# = string::from("trg view: symbol scan incomplete for '")
+        msg#.push_str(opts.file_path.as_str())
+        msg#.push_str("' (internal symbol limit 5000 exceeded)")
+        return Result<ViewResult, string>::Ok(ViewResult(
+            text = cede msg,
+            truncated = true,
+            reason = string::from("scan_incomplete"),
+            lines_emitted = 0:usize,
+            bytes_emitted = 0:usize,
+            mode = string::from("symbol"),
+            path = string::from(opts.file_path.as_str()),
+            requested_line = Option<usize>::None,
+            requested_range = Option<BlockRange>::None,
+            detected_block_range = Option<BlockRange>::None,
+            emitted_range = Option<BlockRange>::None,
+            target_included = Option<bool>::None,
+            content_omitted = false,
+            complete = false,
+            eof_reached = false,
+            records = Vec<ViewLineRecord>::new(),
+            selection_status = string::from("scan_incomplete"),
+            range_status = Option<string>::None,
+            output_status = string::from("complete"),
+            target_symbol = Vec<SymbolTargetInfo>::new(),
+            candidates = Vec<SymbolCandidateInfo>::new(),
+            candidates_truncated = false
+        ))
+    }
+
+    // 4. Candidate matching
+    auto matched_indices# = Vec<usize>::new()
+    auto si# = 0:usize
+    loop si < sym_data.symbols.len() {
+        auto &s = sym_data.symbols.borrow(si)
+        if s.name.as_str() == target_name.as_str() {
+            auto scope_matches# = true
+            if target_has_scope {
+                if s.scope.as_str() != target_scope.as_str() {
+                    scope_matches = false
+                }
+            }
+            if scope_matches {
+                matched_indices#.push(si)
+            }
+        }
+        si = si + 1:usize
+    }
+
+    if matched_indices.len() == 0:usize {
+        auto msg# = string::from("trg view: symbol '")
+        msg#.push_str(target_name.as_str())
+        if target_has_scope {
+            msg#.push_str("' in scope '")
+            msg#.push_str(target_scope.as_str())
+        }
+        msg#.push_str("' not found in ")
+        msg#.push_str(opts.file_path.as_str())
+
+        return Result<ViewResult, string>::Ok(ViewResult(
+            text = cede msg,
+            truncated = false,
+            reason = string::from("completed"),
+            lines_emitted = 0:usize,
+            bytes_emitted = 0:usize,
+            mode = string::from("symbol"),
+            path = string::from(opts.file_path.as_str()),
+            requested_line = Option<usize>::None,
+            requested_range = Option<BlockRange>::None,
+            detected_block_range = Option<BlockRange>::None,
+            emitted_range = Option<BlockRange>::None,
+            target_included = Option<bool>::None,
+            content_omitted = false,
+            complete = true,
+            eof_reached = true,
+            records = Vec<ViewLineRecord>::new(),
+            selection_status = string::from("not_found"),
+            range_status = Option<string>::None,
+            output_status = string::from("complete"),
+            target_symbol = Vec<SymbolTargetInfo>::new(),
+            candidates = Vec<SymbolCandidateInfo>::new(),
+            candidates_truncated = false
+        ))
+    }
+
+    auto max_lines_val# = 0:usize
+    auto has_max_lines# = false
+    match opts.max_lines {
+        auto Option<usize>::Some(ml) => {
+            max_lines_val = ml
+            has_max_lines = true
+        }
+        auto Option<usize>::None => {}
+    }
+
+    auto max_bytes_val# = 0:usize
+    auto has_max_bytes# = false
+    match opts.max_result_bytes {
+        auto Option<usize>::Some(mb) => {
+            max_bytes_val = mb
+            has_max_bytes = true
+        }
+        auto Option<usize>::None => {}
+    }
+
+    auto max_cols_val# = 0:usize
+    auto has_max_cols# = false
+    match opts.max_columns {
+        auto Option<usize>::Some(mc) => {
+            max_cols_val = mc
+            has_max_cols = true
+        }
+        auto Option<usize>::None => {}
+    }
+
+    if matched_indices.len() > 1:usize {
+        auto total_matched = matched_indices.len()
+        auto same_scope# = true
+        auto first_idx = matched_indices.get(0)
+        auto first_scope = string::from(sym_data.symbols.borrow(first_idx).scope.as_str())
+
+        auto all_cands# = Vec<SymbolCandidateInfo>::new()
+        auto cand_lines# = Vec<string>::new()
+
+        auto mi# = 0:usize
+        loop mi < total_matched {
+            auto cand_idx = matched_indices.get(mi)
+            auto &cand_sym = sym_data.symbols.borrow(cand_idx)
+            if cand_sym.scope.as_str() != first_scope.as_str() {
+                same_scope = false
+            }
+            auto cand_r_status# = string::from("confirmed")
+            if cand_sym.range_reliability == "eof_fallback" || cand_sym.range_end.is_none() {
+                cand_r_status = string::from("unknown")
+            }
+
+            auto cline# = string::new()
+            cline#.push_str("  line ")
+            cline#.push_str(u64_to_string(cand_sym.line as u64).as_str())
+            cline#.push_str(": ")
+            cline#.push_str(cand_sym.kind.as_str())
+            cline#.push_str(" ")
+            cline#.push_str(cand_sym.name.as_str())
+            if cand_sym.scope.len() > 0:usize {
+                cline#.push_str(" (scope: ")
+                cline#.push_str(cand_sym.scope.as_str())
+                cline#.push_str(")")
+            }
+            cline#.push_str(" - ")
+            cline#.push_str(cand_sym.detail.as_str())
+            cline#.push_str("\n")
+            cand_lines#.push(cede cline)
+
+            all_cands#.push(SymbolCandidateInfo(
+                name = string::from(cand_sym.name.as_str()),
+                kind = string::from(cand_sym.kind.as_str()),
+                line = cand_sym.line,
+                range_start = cand_sym.range_start,
+                range_end = cand_sym.range_end,
+                range_status = cede cand_r_status,
+                scope = string::from(cand_sym.scope.as_str()),
+                detail = string::from(cand_sym.detail.as_str())
+            ))
+            mi = mi + 1:usize
+        }
+
+        auto diag_head# = string::new()
+        diag_head#.push_str("Multiple candidates found for symbol '")
+        diag_head#.push_str(target_name.as_str())
+        diag_head#.push_str("':\n")
+
+        auto hint# = string::new()
+        if same_scope {
+            hint#.push_str("Hint: use 'trg view <path>:<line>' to select by line number\n")
+        } else {
+            hint#.push_str("Hint: specify enclosing scope with --scope <SCOPE> or --symbol '<SCOPE>::<NAME>'\n")
+        }
+
+        // Check minimum diagnostic byte budget (header + candidate 0 + omission + hint)
+        auto min_bytes# = diag_head.len() + cand_lines.borrow(0).len() + hint.len()
+        if total_matched > 1:usize {
+            auto min_om# = string::from("  [and ")
+            min_om#.push_str(u64_to_string((total_matched - 1:usize) as u64).as_str())
+            min_om#.push_str(" more candidates omitted]\n")
+            min_bytes = min_bytes + min_om.len()
+        }
+        if has_max_bytes && min_bytes > max_bytes_val {
+            auto err# = string::from("target_exceeds_max_result_bytes: Multiple candidates diagnostic (")
+            err#.push_str(u64_to_string(min_bytes as u64).as_str())
+            err#.push_str(" bytes) exceeds max_result_bytes (")
+            err#.push_str(u64_to_string(max_bytes_val as u64).as_str())
+            err#.push_str(" bytes)")
+            return Result<ViewResult, string>::Err(cede err)
+        }
+
+        auto max_k# = total_matched
+        if max_k > 20:usize {
+            max_k = 20:usize
+        }
+
+        auto chosen_k# = 1:usize
+        auto k# = max_k
+        loop k >= 1:usize {
+            auto cand_bytes# = 0:usize
+            auto ci# = 0:usize
+            loop ci < k {
+                cand_bytes = cand_bytes + cand_lines.borrow(ci).len()
+                ci = ci + 1:usize
+            }
+            auto om_bytes# = 0:usize
+            if k < total_matched {
+                auto om# = string::from("  [and ")
+                om#.push_str(u64_to_string((total_matched - k) as u64).as_str())
+                om#.push_str(" more candidates omitted]\n")
+                om_bytes = om.len()
+            }
+            auto total_d_bytes = diag_head.len() + cand_bytes + om_bytes + hint.len()
+            if !has_max_bytes || total_d_bytes <= max_bytes_val {
+                chosen_k = k
+                break
+            }
+            k = k - 1:usize
+        }
+
+        auto diag# = string::new()
+        diag#.push_str(diag_head.as_str())
+        auto ci# = 0:usize
+        loop ci < chosen_k {
+            diag#.push_str(cand_lines.borrow(ci).as_str())
+            ci = ci + 1:usize
+        }
+        auto is_cands_truncated = chosen_k < total_matched
+        if is_cands_truncated {
+            diag#.push_str("  [and ")
+            diag#.push_str(u64_to_string((total_matched - chosen_k) as u64).as_str())
+            diag#.push_str(" more candidates omitted]\n")
+        }
+        diag#.push_str(hint.as_str())
+
+        auto final_cands# = Vec<SymbolCandidateInfo>::new()
+        auto fci# = 0:usize
+        loop fci < chosen_k {
+            auto &c = all_cands.borrow(fci)
+            final_cands#.push(SymbolCandidateInfo(
+                name = string::from(c.name.as_str()),
+                kind = string::from(c.kind.as_str()),
+                line = c.line,
+                range_start = c.range_start,
+                range_end = c.range_end,
+                range_status = string::from(c.range_status.as_str()),
+                scope = string::from(c.scope.as_str()),
+                detail = string::from(c.detail.as_str())
+            ))
+            fci = fci + 1:usize
+        }
+
+        auto diag_len = diag.len()
+        auto is_budget_truncated = has_max_bytes && is_cands_truncated
+        auto reason_str# = string::from("completed")
+        auto output_status_str# = string::from("complete")
+        if is_budget_truncated {
+            reason_str = string::from("max_result_bytes")
+            output_status_str = string::from("budget_truncated")
+        }
+
+        return Result<ViewResult, string>::Ok(ViewResult(
+            text = cede diag,
+            truncated = is_budget_truncated,
+            reason = cede reason_str,
+            lines_emitted = 0:usize,
+            bytes_emitted = diag_len,
+            mode = string::from("symbol"),
+            path = string::from(opts.file_path.as_str()),
+            requested_line = Option<usize>::None,
+            requested_range = Option<BlockRange>::None,
+            detected_block_range = Option<BlockRange>::None,
+            emitted_range = Option<BlockRange>::None,
+            target_included = Option<bool>::None,
+            content_omitted = false,
+            complete = !is_budget_truncated,
+            eof_reached = true,
+            records = Vec<ViewLineRecord>::new(),
+            selection_status = string::from("multiple_candidates"),
+            range_status = Option<string>::None,
+            output_status = cede output_status_str,
+            target_symbol = Vec<SymbolTargetInfo>::new(),
+            candidates = cede final_cands,
+            candidates_truncated = is_cands_truncated
+        ))
+    }
+
+    auto target_sym_idx = matched_indices.get(0)
+    auto &target_sym = sym_data.symbols.borrow(target_sym_idx)
+
+    auto range_status_str# = string::from("confirmed")
+    if target_sym.range_reliability == "eof_fallback" || target_sym.range_end.is_none() {
+        range_status_str = string::from("unknown")
+    }
+
+    auto total_file_lines = lines.len()
+    auto sym_start# = target_sym.range_start + 0:usize
+    auto sym_end# = target_sym.line + 0:usize
+    match target_sym.range_end {
+        auto Option<usize>::Some(re) => {
+            sym_end = re + 0:usize
+        }
+        auto Option<usize>::None => {}
+    }
+    if range_status_str == "unknown" {
+        sym_end = sym_start + opts.max_block_lines - 1:usize
+        if sym_end > total_file_lines {
+            sym_end = total_file_lines
+        }
+    }
+    if sym_end > total_file_lines {
+        sym_end = total_file_lines
+    }
+    if sym_start > sym_end {
+        sym_start = sym_end
+    }
+
+    auto header# = string::new()
+    if range_status_str == "confirmed" {
+        header#.push_str("[symbol: ")
+        header#.push_str(target_sym.name.as_str())
+        if target_sym.scope.len() > 0:usize {
+            header#.push_str(", scope: ")
+            header#.push_str(target_sym.scope.as_str())
+        }
+        header#.push_str(", lines: L")
+        header#.push_str(u64_to_string(sym_start as u64).as_str())
+        header#.push_str("-L")
+        header#.push_str(u64_to_string(sym_end as u64).as_str())
+        header#.push_str("]\n")
+    } else {
+        header#.push_str("[symbol: ")
+        header#.push_str(target_sym.name.as_str())
+        if target_sym.scope.len() > 0:usize {
+            header#.push_str(", scope: ")
+            header#.push_str(target_sym.scope.as_str())
+        }
+        header#.push_str(", preview: L")
+        header#.push_str(u64_to_string(sym_start as u64).as_str())
+        header#.push_str("-L")
+        header#.push_str(u64_to_string(sym_end as u64).as_str())
+        header#.push_str(" (unclosed structure)]\n")
+    }
+
+    if has_max_lines && max_lines_val < 1:usize {
+        return Result<ViewResult, string>::Err(string::from("target_exceeds_max_lines: Target line cannot fit within max_lines 0"))
+    }
+
+    auto target_line_no = target_sym.line
+    auto target_raw_text# = ""
+    if target_line_no >= 1:usize && target_line_no <= total_file_lines {
+        target_raw_text = lines.borrow(target_line_no - 1:usize).as_str()
+        if target_raw_text.len > 0 && target_raw_text.byte_at(target_raw_text.len - 1) == ('\r' as char) {
+            target_raw_text = target_raw_text.substr(0, target_raw_text.len - 1)
+        }
+    }
+    auto content_omitted# = false
+    auto target_disp# = target_raw_text
+    if has_max_cols && max_cols_val > 0 && target_raw_text.len > max_cols_val {
+        target_disp = "[omitted]"
+        content_omitted = true
+    }
+    auto target_entry# = string::new()
+    target_entry#.push_str(u64_to_string(target_line_no as u64).as_str())
+    target_entry#.push_str(":")
+    target_entry#.push_str(target_disp)
+    target_entry#.push_str("\n")
+
+    auto base_bytes = header.len() + target_entry.len()
+    if has_max_bytes && base_bytes > max_bytes_val {
+        auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record (")
+        err#.push_str(u64_to_string(base_bytes as u64).as_str())
+        err#.push_str(" bytes) exceeds max_result_bytes (")
+        err#.push_str(u64_to_string(max_bytes_val as u64).as_str())
+        err#.push_str(" bytes)")
+        return Result<ViewResult, string>::Err(cede err)
+    }
+
+    auto avail_before = target_line_no - sym_start
+    auto avail_after = sym_end - target_line_no
+    auto block_len = sym_end - sym_start + 1:usize
+
+    auto win_lines# = block_len
+    if has_max_lines && win_lines > max_lines_val {
+        win_lines = max_lines_val
+    }
+
+    auto take_before# = 0:usize
+    auto take_after# = 0:usize
+    if win_lines > 1:usize {
+        auto half_before = (win_lines - 1:usize) / 2:usize
+        auto half_after = (win_lines - 1:usize) - half_before
+        if avail_before < half_before {
+            take_before = avail_before
+            take_after = win_lines - 1:usize - take_before
+            if take_after > avail_after {
+                take_after = avail_after
+            }
+        } else if avail_after < half_after {
+            take_after = avail_after
+            take_before = win_lines - 1:usize - take_after
+            if take_before > avail_before {
+                take_before = avail_before
+            }
+        } else {
+            take_before = half_before
+            take_after = half_after
+        }
+    }
+
+    auto rem_bytes# = 18446744073709551615:usize
+    if has_max_bytes {
+        rem_bytes = max_bytes_val - base_bytes
+    }
+
+    auto b_take_actual# = 0:usize
+    auto a_take_actual# = 0:usize
+    auto byte_truncated# = false
+
+    loop b_take_actual < take_before || a_take_actual < take_after {
+        auto can_b = b_take_actual < take_before
+        auto can_a = a_take_actual < take_after
+        if !can_b && !can_a {
+            break
+        }
+
+        if can_b && (b_take_actual <= a_take_actual || !can_a) {
+            auto b_line_num = target_line_no - 1:usize - b_take_actual
+            auto b_raw = lines.borrow(b_line_num - 1:usize).as_str()
+            auto clean_b# = b_raw
+            if b_raw.len > 0 && b_raw.byte_at(b_raw.len - 1) == ('\r' as char) {
+                clean_b = b_raw.substr(0, b_raw.len - 1)
+            }
+            auto b_disp# = clean_b
+            if has_max_cols && max_cols_val > 0 && clean_b.len > max_cols_val {
+                b_disp = "[omitted]"
+                content_omitted = true
+            }
+            auto b_len = u64_to_string(b_line_num as u64).len() + 1:usize + b_disp.len + 1:usize
+            if has_max_bytes && b_len > rem_bytes {
+                byte_truncated = true
+                break
+            }
+            if has_max_bytes {
+                rem_bytes = rem_bytes - b_len
+            }
+            b_take_actual = b_take_actual + 1:usize
+        }
+
+        if can_a && (a_take_actual < b_take_actual || !can_b) {
+            auto a_line_num = target_line_no + 1:usize + a_take_actual
+            auto a_raw = lines.borrow(a_line_num - 1:usize).as_str()
+            auto clean_a# = a_raw
+            if a_raw.len > 0 && a_raw.byte_at(a_raw.len - 1) == ('\r' as char) {
+                clean_a = a_raw.substr(0, a_raw.len - 1)
+            }
+            auto a_disp# = clean_a
+            if has_max_cols && max_cols_val > 0 && clean_a.len > max_cols_val {
+                a_disp = "[omitted]"
+                content_omitted = true
+            }
+            auto a_len = u64_to_string(a_line_num as u64).len() + 1:usize + a_disp.len + 1:usize
+            if has_max_bytes && a_len > rem_bytes {
+                byte_truncated = true
+                break
+            }
+            if has_max_bytes {
+                rem_bytes = rem_bytes - a_len
+            }
+            a_take_actual = a_take_actual + 1:usize
+        }
+    }
+
+    auto truncated# = false
+    auto trunc_reason# = string::from("completed")
+    if byte_truncated {
+        truncated = true
+        trunc_reason = string::from("max_result_bytes")
+    } else if has_max_lines && (1:usize + b_take_actual + a_take_actual < block_len) {
+        truncated = true
+        trunc_reason = string::from("max_lines")
+    }
+
+    auto out# = string::new()
+    out#.push_str(header.as_str())
+
+    auto records# = Vec<ViewLineRecord>::new()
+    auto bytes_emitted# = header.len()
+    auto lines_emitted = 1:usize + b_take_actual + a_take_actual
+
+    // 1. Lines before target
+    if b_take_actual > 0:usize {
+        auto idx# = b_take_actual
+        loop idx > 0:usize {
+            auto l_num = target_line_no - idx
+            auto raw = lines.borrow(l_num - 1:usize).as_str()
+            auto clean_l# = raw
+            if raw.len > 0 && raw.byte_at(raw.len - 1) == ('\r' as char) {
+                clean_l = raw.substr(0, raw.len - 1)
+            }
+            auto disp# = clean_l
+            if has_max_cols && max_cols_val > 0 && clean_l.len > max_cols_val {
+                disp = "[omitted]"
+            }
+            auto line_entry# = string::new()
+            line_entry#.push_str(u64_to_string(l_num as u64).as_str())
+            line_entry#.push_str("-")
+            line_entry#.push_str(disp)
+            line_entry#.push_str("\n")
+            bytes_emitted = bytes_emitted + line_entry.len()
+            out#.push_str(line_entry.as_str())
+            records#.push(ViewLineRecord(
+                line_number = l_num,
+                kind = string::from("context"),
+                text = string::from(disp)
+            ))
+            idx = idx - 1:usize
+        }
+    }
+
+    // 2. Target line
+    bytes_emitted = bytes_emitted + target_entry.len()
+    out#.push_str(target_entry.as_str())
+    records#.push(ViewLineRecord(
+        line_number = target_line_no,
+        kind = string::from("target"),
+        text = string::from(target_disp)
+    ))
+
+    // 3. Lines after target
+    if a_take_actual > 0:usize {
+        auto idx# = 1:usize
+        loop idx <= a_take_actual {
+            auto l_num = target_line_no + idx
+            auto raw = lines.borrow(l_num - 1:usize).as_str()
+            auto clean_l# = raw
+            if raw.len > 0 && raw.byte_at(raw.len - 1) == ('\r' as char) {
+                clean_l = raw.substr(0, raw.len - 1)
+            }
+            auto disp# = clean_l
+            if has_max_cols && max_cols_val > 0 && clean_l.len > max_cols_val {
+                disp = "[omitted]"
+            }
+            auto line_entry# = string::new()
+            line_entry#.push_str(u64_to_string(l_num as u64).as_str())
+            line_entry#.push_str("-")
+            line_entry#.push_str(disp)
+            line_entry#.push_str("\n")
+            bytes_emitted = bytes_emitted + line_entry.len()
+            out#.push_str(line_entry.as_str())
+            records#.push(ViewLineRecord(
+                line_number = l_num,
+                kind = string::from("context"),
+                text = string::from(disp)
+            ))
+            idx = idx + 1:usize
+        }
+    }
+
+    auto emitted_range = Option<BlockRange>::Some(BlockRange(
+        start = target_line_no - b_take_actual,
+        end = target_line_no + a_take_actual
+    ))
+
+    auto target_included = Option<bool>::Some(true)
+
+    auto target_info = SymbolTargetInfo(
+        name = string::from(target_sym.name.as_str()),
+        kind = string::from(target_sym.kind.as_str()),
+        line = target_sym.line,
+        range_start = target_sym.range_start,
+        range_end = target_sym.range_end,
+        range_status = string::from(range_status_str.as_str()),
+        scope = string::from(target_sym.scope.as_str()),
+        detail = string::from(target_sym.detail.as_str())
+    )
+
+    auto detected_block = BlockRange(start = sym_start, end = sym_end)
+    auto requested_block# = Option<BlockRange>::None
+    if range_status_str == "confirmed" {
+        requested_block = Option<BlockRange>::Some(detected_block.clone())
+    }
+
+    auto output_status_str# = string::from("complete")
+    if truncated {
+        output_status_str = string::from("budget_truncated")
+    }
+
+    auto target_vec# = Vec<SymbolTargetInfo>::new()
+    target_vec#.push(target_info)
+
+    return Result<ViewResult, string>::Ok(ViewResult(
+        text = cede out,
+        truncated = truncated,
+        reason = cede trunc_reason,
+        lines_emitted = lines_emitted,
+        bytes_emitted = bytes_emitted,
+        mode = string::from("symbol"),
+        path = string::from(opts.file_path.as_str()),
+        requested_line = Option<usize>::Some(target_line_no),
+        requested_range = requested_block,
+        detected_block_range = Option<BlockRange>::Some(detected_block),
+        emitted_range = emitted_range,
+        target_included = target_included,
+        content_omitted = content_omitted,
+        complete = !truncated,
+        eof_reached = !truncated && (sym_end == total_file_lines),
+        records = cede records,
+        selection_status = string::from("found"),
+        range_status = Option<string>::Some(cede range_status_str),
+        output_status = cede output_status_str,
+        target_symbol = cede target_vec,
+        candidates = Vec<SymbolCandidateInfo>::new(),
+        candidates_truncated = false
     ))
 }
 
 pub fn execute_view_operation(opts: ViewOptions) -> Result<ViewResult, string> {
+    if opts.symbol.is_some() {
+        if opts.line.is_some() {
+            return Result<ViewResult, string>::Err(string::from("Cannot specify both 'symbol' and target line"))
+        }
+        if opts.lines_range.is_some() {
+            return Result<ViewResult, string>::Err(string::from("Cannot specify both 'symbol' and 'lines'"))
+        }
+        if opts.block {
+            return Result<ViewResult, string>::Err(string::from("Cannot specify both 'symbol' and 'block'"))
+        }
+        return execute_view_stream_symbol(opts)
+    }
+
+    if opts.symbol_scope.is_some() {
+        return Result<ViewResult, string>::Err(string::from("Cannot specify 'scope' without 'symbol'"))
+    }
+
     if opts.lines_range.is_some() && opts.line.is_some() {
         return Result<ViewResult, string>::Err(string::from("Cannot specify both 'line' and 'lines'"))
     }
@@ -2238,15 +3328,18 @@ pub fn execute_view_operation(opts: ViewOptions) -> Result<ViewResult, string> {
 pub fn execute_view_cli(args: Vec<string>) -> i32 {
     auto num_args = args.len()
     if num_args < 3:usize {
-        print_err("Usage: trg view <path>:<line> [-C N] [--block] | trg view <path> --lines <start>-<end>")
+        print_err("Usage: trg view <path>:<line> [-C N] [--block] | trg view <path> --lines <start>-<end> | trg view <path> --symbol <SPEC> [--scope <SCOPE>]")
         return 2
     }
 
     auto path_opt# = Option<string>::None
     auto line_opt# = Option<usize>::None
     auto context# = 10:usize
+    auto context_passed# = false
     auto block# = false
     auto lines_range# = Option<BlockRange>::None
+    auto symbol_raw_opt# = Option<string>::None
+    auto scope_raw_opt# = Option<string>::None
     auto max_lines_opt# = Option<usize>::None
     auto max_bytes_opt# = Option<usize>::None
     auto max_columns_opt# = Option<usize>::None
@@ -2258,21 +3351,61 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         auto view = arg.as_str()
 
         if view == "-h" || view == "--help" {
-            println("Usage: trg view <path>:<line> [-C N] [--block] | trg view <path> --lines <start>-<end>")
+            println("Usage: trg view <path>:<line> [-C N] [--block] | trg view <path> --lines <start>-<end> | trg view <path> --symbol <SPEC> [--scope <SCOPE>]")
             println("")
             println("Options:")
             println("  -C, --context <NUM>       Lines of context around target line (default: 10)")
             println("      --block               Expand enclosing syntactic block context")
             println("      --lines <M-N>         Extract explicit physical line range M to N")
+            println("      --symbol <NAME>       Extract enclosing code range for target symbol (e.g. 'fn_name' or 'Scope::name')")
+            println("      --scope <SCOPE>       Optional enclosing scope to disambiguate target symbol")
             println("      --max-lines <NUM>     Maximum lines of output before truncating")
             println("      --max-bytes <SIZE>    Maximum hydrated output bytes (alias: --max-result-bytes; counts formatted view lines; default: unlimited; 0 stops hydration immediately)")
             println("      --max-columns <NUM>   Omit lines exceeding NUM characters with [omitted]")
-            println("      --max-block-lines <NUM> Maximum lines per expanded block context (default: 80)")
+            println("      --max-block-lines <NUM> Maximum lines per expanded block context or unknown symbol preview (default: 80)")
             return 0
         }
 
         if view == "--block" {
             block = true
+            i = i + 1
+            continue
+        }
+
+        if view == "--symbol" {
+            if i + 1 >= num_args {
+                print_err("Option requires an argument: --symbol")
+                return 2
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            symbol_raw_opt = Option<string>::Some(string::from(val_arg.as_str()))
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--symbol=") {
+            auto val_str = view.substr(9:usize, view.len - 9:usize)
+            symbol_raw_opt = Option<string>::Some(string::from(val_str))
+            i = i + 1
+            continue
+        }
+
+        if view == "--scope" {
+            if i + 1 >= num_args {
+                print_err("Option requires an argument: --scope")
+                return 2
+            }
+            i = i + 1
+            auto &val_arg = args.borrow(i)
+            scope_raw_opt = Option<string>::Some(string::from(val_arg.as_str()))
+            i = i + 1
+            continue
+        }
+
+        if view.starts_with("--scope=") {
+            auto val_str = view.substr(8:usize, view.len - 8:usize)
+            scope_raw_opt = Option<string>::Some(string::from(val_str))
             i = i + 1
             continue
         }
@@ -2290,6 +3423,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
                 return 2
             }
             context = c_res.unwrap()
+            context_passed = true
             i = i + 1
             continue
         }
@@ -2302,6 +3436,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
                 return 2
             }
             context = c_res.unwrap()
+            context_passed = true
             i = i + 1
             continue
         }
@@ -2314,6 +3449,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
                 return 2
             }
             context = c_res.unwrap()
+            context_passed = true
             i = i + 1
             continue
         }
@@ -2534,6 +3670,94 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         return 2
     }
 
+    auto parsed_symbol# = Option<string>::None
+    auto parsed_scope# = Option<string>::None
+
+    if scope_raw_opt.is_some() && symbol_raw_opt.is_none() {
+        print_err("--scope cannot be used without --symbol")
+        return 2
+    }
+
+    match symbol_raw_opt {
+        auto Option<string>::Some(&sym_raw) => {
+            auto sym_view = sym_raw.as_str().trim()
+            if sym_view.len == 0 {
+                print_err("Invalid symbol name: cannot be empty")
+                return 2
+            }
+
+            if sym_view.starts_with("::") || sym_view.ends_with("::") {
+                print_err("Invalid symbol specification: empty scope or symbol name")
+                return 2
+            }
+
+            auto first_col = sym_view.index_of_str("::")
+            if first_col.is_some() {
+                auto pos1 = first_col.unwrap()
+                auto rem = sym_view.substr(pos1 + 2:usize, sym_view.len - pos1 - 2:usize)
+                if rem.index_of_str("::").is_some() {
+                    print_err("Invalid symbol specification: nested scopes (e.g. A::B::C) are not supported")
+                    return 2
+                }
+                auto scope_part = sym_view.substr(0, pos1).trim()
+                auto name_part = rem.trim()
+                if scope_part.len == 0 || name_part.len == 0 {
+                    print_err("Invalid symbol specification: empty scope or symbol name")
+                    return 2
+                }
+                match scope_raw_opt {
+                    auto Option<string>::Some(&s_arg) => {
+                        if s_arg.as_str().trim() != scope_part {
+                            print_err("Conflicting scopes specified: --scope does not match symbol scope prefix")
+                            return 2
+                        }
+                    }
+                    auto Option<string>::None => {}
+                }
+                parsed_symbol = Option<string>::Some(string::from(name_part))
+                parsed_scope = Option<string>::Some(string::from(scope_part))
+            } else {
+                parsed_symbol = Option<string>::Some(string::from(sym_view))
+                match scope_raw_opt {
+                    auto Option<string>::Some(&sr) => {
+                        auto sr_trim = sr.as_str().trim()
+                        if sr_trim.len == 0 {
+                            print_err("Invalid scope name: cannot be empty")
+                            return 2
+                        }
+                        parsed_scope = Option<string>::Some(string::from(sr_trim))
+                    }
+                    auto Option<string>::None => {}
+                }
+            }
+        }
+        auto Option<string>::None => {}
+    }
+
+    if parsed_symbol.is_some() {
+        if context_passed {
+            print_err("--symbol cannot be used with -C / --context")
+            return 2
+        }
+        if block {
+            print_err("--symbol cannot be used with --block")
+            return 2
+        }
+        if lines_range.is_some() {
+            print_err("--symbol cannot be used with --lines")
+            return 2
+        }
+        if line_opt.is_some() {
+            print_err("--symbol cannot be used with target line (<path>:<line>)")
+            return 2
+        }
+    }
+
+    if parsed_symbol.is_none() && line_opt.is_none() && lines_range.is_none() {
+        print_err("trg view: viewing requires a target line number (e.g. <path>:<line>), --lines, or --symbol")
+        return 2
+    }
+
     auto raw_path = path_opt.unwrap()
     auto startup_cwd = normalize_cwd(env::current_dir().as_str())
     auto id_res = compute_identity_key(startup_cwd.as_str(), raw_path.as_str())
@@ -2552,6 +3776,8 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         context = context,
         block = block,
         lines_range = lines_range,
+        symbol = cede parsed_symbol,
+        symbol_scope = cede parsed_scope,
         max_lines = max_lines_opt,
         max_result_bytes = max_bytes_opt,
         max_columns = max_columns_opt,
@@ -2565,6 +3791,20 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
     }
 
     auto view_res = res.unwrap()
+    if view_res.mode == "symbol" {
+        if view_res.selection_status == "not_found" {
+            print_err(view_res.text.as_str())
+            return 1
+        }
+        if view_res.selection_status == "multiple_candidates" ||
+           view_res.selection_status == "unsupported_syntax" ||
+           view_res.selection_status == "scan_incomplete" ||
+           view_res.selection_status == "io_error" {
+            print_err(view_res.text.as_str())
+            return 2
+        }
+    }
+
     if view_res.truncated && view_res.reason.len() > 0 {
         auto t_msg# = string::from("[trg_view: truncated=true, reason=")
         t_msg#.push_str(view_res.reason.as_str())

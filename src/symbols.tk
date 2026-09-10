@@ -33,7 +33,8 @@ pub shape SymbolRecord (
     range_start: usize,
     range_end: Option<usize>,
     scope: string,
-    detail: string
+    detail: string,
+    range_reliability: string
 )
 
 pub shape SymbolsOptions (
@@ -292,6 +293,7 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                                     auto Option<usize>::Some(si) => {
                                         auto &sym# = all_symbols#.borrow_mut(si)
                                         sym.range_end = Option<usize>::Some(cur_line)
+                                        sym.range_reliability = string::from("observed_close")
                                     }
                                     auto Option<usize>::None => {}
                                 }
@@ -310,6 +312,7 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                                         auto Option<usize>::Some(si) => {
                                             auto &sym# = all_symbols#.borrow_mut(si)
                                             sym.range_end = Option<usize>::Some(cur_line - 1:usize)
+                                            sym.range_reliability = string::from("observed_close")
                                         }
                                         auto Option<usize>::None => {}
                                     }
@@ -387,8 +390,14 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
 
                         auto range_s = snap_symbol_start_decorators(cur_line, first_stored_line, recent_lines)
                         auto r_end# = Option<usize>::None
+                        auto r_rel# = string::from("unknown")
                         if is_self_closed {
                             r_end = Option<usize>::Some(cur_line)
+                            r_rel = string::from("single_line")
+                        } else if pat_text.trim().ends_with(";") && pat_text.index_of('{' as char).is_none() {
+                            is_self_closed = true
+                            r_end = Option<usize>::Some(cur_line)
+                            r_rel = string::from("single_line")
                         }
 
                         auto detail_str# = string::from(pat_text.trim())
@@ -406,7 +415,8 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                             range_start = range_s,
                             range_end = r_end,
                             scope = scope_name.clone(),
-                            detail = cede detail_str
+                            detail = cede detail_str,
+                            range_reliability = cede r_rel
                         ))
 
                         // Approximate byte budget tracking
@@ -468,6 +478,11 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                     auto &sym# = all_symbols#.borrow_mut(si)
                     if sym.range_end.is_none() {
                         sym.range_end = Option<usize>::Some(total_lines)
+                        if family == SyntaxFamily::Indent && d.is_clean_eof() {
+                            sym.range_reliability = string::from("valid_indent_eof")
+                        } else {
+                            sym.range_reliability = string::from("eof_fallback")
+                        }
                     }
                 }
                 auto Option<usize>::None => {}
@@ -478,6 +493,264 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
     auto total = all_symbols.len()
     return Result<SymbolsResult, string>::Ok(SymbolsResult(
         path = string::from(opts.file_path.as_str()),
+        symbols = cede all_symbols,
+        total_symbols = total,
+        complete = !truncated,
+        truncated = truncated,
+        termination_reason = cede term_reason
+    ))
+}
+
+pub fn outline_symbols_lines(
+    lines: Vec<string>,
+    file_path: str,
+    kinds: Option<Vec<string>>,
+    max_symbols: Option<usize>,
+    max_result_bytes: Option<usize>
+) -> Result<SymbolsResult, string> {
+    auto max_syms_val# = 0:usize
+    auto has_max_syms# = false
+    match max_symbols {
+        auto Option<usize>::Some(v) => {
+            max_syms_val = v
+            has_max_syms = true
+        }
+        _ => {}
+    }
+
+    auto max_bytes_val# = 0:usize
+    auto has_max_bytes# = false
+    match max_result_bytes {
+        auto Option<usize>::Some(v) => {
+            max_bytes_val = v
+            has_max_bytes = true
+        }
+        _ => {}
+    }
+
+    auto family = detect_syntax_family(file_path)
+    auto dialect = detect_lexical_dialect(file_path)
+
+    auto d# = DelimiterDepths::new()
+    auto open_stack# = Vec<OpenSymbolEntry>::new()
+    auto all_symbols# = Vec<SymbolRecord>::new()
+    auto recent_lines# = Vec<string>::new()
+    auto first_stored_line# = 1:usize
+
+    auto truncated# = false
+    auto term_reason# = string::from("completed")
+    auto total_lines = lines.len()
+    auto approx_bytes_accum# = 0:usize
+
+    auto line_idx# = 0:usize
+    loop line_idx < total_lines {
+        auto cur_line = line_idx + 1:usize
+        auto &line_str = lines.borrow(line_idx)
+        auto full_view = line_str.as_str()
+        auto pat_text# = full_view
+        if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
+            pat_text = full_view.substr(0, full_view.len - 1)
+        }
+
+        auto lex = scan_line_lexical(pat_text, d#, dialect)
+
+        // 1. Pop closed symbols from open_stack
+        match family {
+            auto SyntaxFamily::Brace => {
+                loop open_stack.len() > 0:usize {
+                    auto top_idx = open_stack.len() - 1:usize
+                    auto should_pop# = false
+                    {
+                        auto &top = open_stack.borrow(top_idx)
+                        if top.delimiter == BlockDelimiter::Brace && lex.depth_after_brace <= top.depth && lex.has_code_brace_closer {
+                            should_pop = true
+                        } else if top.delimiter == BlockDelimiter::Paren && lex.depth_after_paren <= top.depth && lex.has_code_paren_closer {
+                            should_pop = true
+                        }
+                    }
+                    if should_pop {
+                        auto top_entry = open_stack#.pop().unwrap()
+                        match top_entry.symbol_index {
+                            auto Option<usize>::Some(si) => {
+                                auto &sym# = all_symbols#.borrow_mut(si)
+                                sym.range_end = Option<usize>::Some(cur_line)
+                                sym.range_reliability = string::from("observed_close")
+                            }
+                            auto Option<usize>::None => {}
+                        }
+                    } else {
+                        break
+                    }
+                }
+            }
+            auto SyntaxFamily::Indent => {
+                if lex.participates_in_indent {
+                    loop open_stack.len() > 0:usize {
+                        auto top_idx = open_stack.len() - 1:usize
+                        if lex.statement_indent <= open_stack.borrow(top_idx).indent {
+                            auto top_entry = open_stack#.pop().unwrap()
+                            match top_entry.symbol_index {
+                                auto Option<usize>::Some(si) => {
+                                    auto &sym# = all_symbols#.borrow_mut(si)
+                                    sym.range_end = Option<usize>::Some(cur_line - 1:usize)
+                                    sym.range_reliability = string::from("observed_close")
+                                }
+                                auto Option<usize>::None => {}
+                            }
+                        } else {
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Identify declarations on this line
+        auto ident = extract_declared_identifier(pat_text)
+        if ident.len() > 0 {
+            auto kind_raw = classify_symbol_kind(pat_text)
+            auto kind# = cede kind_raw
+            auto scope_name# = string::new()
+
+            auto stripped = strip_declaration_modifiers(pat_text)
+            if stripped.starts_with("func ") {
+                auto recv = extract_go_receiver_type(stripped)
+                if recv.len() > 0 {
+                    scope_name = cede recv
+                    kind = string::from("method")
+                }
+            } else if open_stack.len() > 0:usize {
+                auto top_idx = open_stack.len() - 1:usize
+                auto top_name = open_stack.borrow(top_idx).name.clone()
+                scope_name = cede top_name
+                if kind == "function" {
+                    kind = string::from("method")
+                }
+            }
+
+            auto delim = detect_block_delimiter(pat_text)
+            auto is_self_closed# = false
+            if check_is_self_closed_structured(delim, lex.depth_after_brace, lex.depth_after_paren, lex.depth_before_brace, lex.has_code_brace_closer, lex.has_code_paren_closer) {
+                is_self_closed = true
+            }
+            auto arr_opt = find_arrow_function_pos(pat_text)
+            if arr_opt.is_some() {
+                auto arr_idx = arr_opt.unwrap()
+                auto after_arr = pat_text.substr(arr_idx + 2:usize, pat_text.len - arr_idx - 2:usize).trim()
+                if !after_arr.starts_with("{") {
+                    is_self_closed = true
+                }
+            }
+            if pat_text.trim().ends_with(";") && pat_text.index_of('{' as char).is_none() {
+                is_self_closed = true
+            }
+
+            auto sym_idx_opt# = Option<usize>::None
+            auto is_kind_match# = true
+            match kinds {
+                auto Option<Vec<string>>::Some(&klist) => {
+                    is_kind_match = false
+                    auto ki# = 0:usize
+                    loop ki < klist.len() {
+                        if klist.borrow(ki).as_str() == kind.as_str() {
+                            is_kind_match = true
+                            break
+                        }
+                        ki = ki + 1
+                    }
+                }
+                auto Option<Vec<string>>::None => {}
+            }
+
+            if is_kind_match {
+                if has_max_syms && all_symbols.len() >= max_syms_val {
+                    truncated = true
+                    term_reason = string::from("max_symbols")
+                    break
+                }
+
+                auto range_s = snap_symbol_start_decorators(cur_line, first_stored_line, recent_lines)
+                auto r_end# = Option<usize>::None
+                auto r_rel# = string::from("unknown")
+                if is_self_closed {
+                    r_end = Option<usize>::Some(cur_line)
+                    r_rel = string::from("single_line")
+                }
+
+                auto detail_str# = string::from(pat_text.trim())
+                if detail_str.len() > 100:usize {
+                    detail_str = string::from(detail_str.as_str().substr(0, 97))
+                    detail_str#.push_str("...")
+                }
+
+                auto sym_idx = all_symbols.len()
+                sym_idx_opt = Option<usize>::Some(sym_idx)
+                all_symbols#.push(SymbolRecord(
+                    name = ident.clone(),
+                    kind = kind.clone(),
+                    line = cur_line,
+                    range_start = range_s,
+                    range_end = r_end,
+                    scope = scope_name.clone(),
+                    detail = cede detail_str,
+                    range_reliability = cede r_rel
+                ))
+
+                approx_bytes_accum = approx_bytes_accum + 120:usize + ident.len() + scope_name.len()
+                if has_max_bytes && approx_bytes_accum >= max_bytes_val {
+                    truncated = true
+                    term_reason = string::from("max_result_bytes")
+                    break
+                }
+            }
+
+            if !is_self_closed && is_scope_declaration(pat_text) {
+                auto d_val# = lex.depth_before_brace
+                if delim == BlockDelimiter::Paren {
+                    d_val = lex.depth_before_paren
+                }
+                open_stack#.push(OpenSymbolEntry(
+                    symbol_index = sym_idx_opt,
+                    name = cede ident,
+                    delimiter = delim,
+                    depth = d_val,
+                    indent = lex.statement_indent
+                ))
+            }
+        }
+
+        recent_lines#.push(string::from(pat_text))
+        if recent_lines.len() > 40:usize {
+            recent_lines#.remove(0)
+            first_stored_line = first_stored_line + 1:usize
+        }
+
+        line_idx = line_idx + 1:usize
+    }
+
+    if !truncated {
+        loop open_stack.len() > 0:usize {
+            auto top_entry = open_stack#.pop().unwrap()
+            match top_entry.symbol_index {
+                auto Option<usize>::Some(si) => {
+                    auto &sym# = all_symbols#.borrow_mut(si)
+                    if sym.range_end.is_none() {
+                        sym.range_end = Option<usize>::Some(total_lines)
+                        if family == SyntaxFamily::Indent && d.is_clean_eof() {
+                            sym.range_reliability = string::from("valid_indent_eof")
+                        } else {
+                            sym.range_reliability = string::from("eof_fallback")
+                        }
+                    }
+                }
+                auto Option<usize>::None => {}
+            }
+        }
+    }
+
+    auto total = all_symbols.len()
+    return Result<SymbolsResult, string>::Ok(SymbolsResult(
+        path = string::from(file_path),
         symbols = cede all_symbols,
         total_symbols = total,
         complete = !truncated,

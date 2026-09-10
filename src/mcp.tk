@@ -611,7 +611,7 @@ pub fn run_mcp_server() -> i32 {
                     resp#.push_str(id_str.as_str())
                     resp#.push_str(",\"result\":{\"protocolVersion\":\"")
                     resp#.push_str(negotiated.as_str())
-                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.17.0\"}}}\n")
+                    resp#.push_str("\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"trg\",\"version\":\"0.18.0\"}}}\n")
                     send_mcp_response(resp.as_str())
                 } else if method.as_str() == "ping" {
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
@@ -677,7 +677,7 @@ pub fn run_mcp_server() -> i32 {
                                                             if nxt.is_none() { break }
                                                             auto entry = nxt.unwrap()
                                                             auto k = entry.key().as_str()
-                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" {
+                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" && k != "symbol" && k != "scope" {
                                                                 unexp_opt = Option<string>::Some(entry.key().clone())
                                                                 break
                                                             }
@@ -862,17 +862,149 @@ pub fn run_mcp_server() -> i32 {
                                                             continue
                                                         }
 
-                                                        if line_opt.is_none() && lines_range_opt.is_none() {
-                                                            send_error(id_str.as_str(), -32602, "Invalid params: viewing requires either 'line' or 'lines'")
+                                                        auto symbol_raw_opt# = Option<string>::None
+                                                        auto symbol_err# = false
+                                                        match arg_map.try_borrow(string::from("symbol")) {
+                                                            auto Option<&JsonNode>::Some(&sn) => {
+                                                                match sn {
+                                                                    auto JsonNode::StrNode(&s) => {
+                                                                        if s.len() > 0 {
+                                                                            symbol_raw_opt = Option<string>::Some(s.clone())
+                                                                        } else {
+                                                                            symbol_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {}
+                                                                    _ => {
+                                                                        symbol_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if symbol_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'symbol' must be a non-empty string or null")
                                                             continue
                                                         }
-                                                        if line_opt.is_some() && lines_range_opt.is_some() {
-                                                            send_error(id_str.as_str(), -32602, "Invalid params: cannot specify both 'line' and 'lines'")
+
+                                                        auto scope_raw_opt# = Option<string>::None
+                                                        auto scope_err# = false
+                                                        match arg_map.try_borrow(string::from("scope")) {
+                                                            auto Option<&JsonNode>::Some(&scn) => {
+                                                                match scn {
+                                                                    auto JsonNode::StrNode(&scs) => {
+                                                                        if scs.len() > 0 {
+                                                                            scope_raw_opt = Option<string>::Some(scs.clone())
+                                                                        } else {
+                                                                            scope_err = true
+                                                                        }
+                                                                    }
+                                                                    auto JsonNode::NullNode(_) => {}
+                                                                    _ => {
+                                                                        scope_err = true
+                                                                    }
+                                                                }
+                                                            }
+                                                            _ => {}
+                                                        }
+                                                        if scope_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'scope' must be a non-empty string or null")
                                                             continue
                                                         }
-                                                        if block_val && lines_range_opt.is_some() {
-                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with explicit 'lines' range")
+
+                                                        if scope_raw_opt.is_some() && symbol_raw_opt.is_none() {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'scope' cannot be specified without 'symbol'")
                                                             continue
+                                                        }
+
+                                                        auto parsed_symbol# = Option<string>::None
+                                                        auto parsed_scope# = Option<string>::None
+                                                        if symbol_raw_opt.is_some() {
+                                                            auto sym_raw_str# = string::new()
+                                                            match symbol_raw_opt {
+                                                                auto Option<string>::Some(&s) => { sym_raw_str = string::from(s.as_str()) }
+                                                                auto Option<string>::None => {}
+                                                            }
+                                                            auto sym_view = sym_raw_str.as_str().trim()
+                                                            if sym_view.len == 0 {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'symbol' cannot be empty")
+                                                                continue
+                                                            }
+                                                            if sym_view.starts_with("::") || sym_view.ends_with("::") {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: empty scope or symbol name in 'symbol'")
+                                                                continue
+                                                            }
+                                                            auto first_col = sym_view.index_of_str("::")
+                                                            if first_col.is_some() {
+                                                                auto pos1 = first_col.unwrap()
+                                                                auto rem = sym_view.substr(pos1 + 2:usize, sym_view.len - pos1 - 2:usize)
+                                                                if rem.index_of_str("::").is_some() {
+                                                                    send_error(id_str.as_str(), -32602, "Invalid params: nested scopes (e.g. A::B::C) are not supported")
+                                                                    continue
+                                                                }
+                                                                auto scope_part = sym_view.substr(0, pos1).trim()
+                                                                auto name_part = rem.trim()
+                                                                if scope_part.len == 0 || name_part.len == 0 {
+                                                                    send_error(id_str.as_str(), -32602, "Invalid params: empty scope or symbol name in 'symbol'")
+                                                                    continue
+                                                                }
+                                                                if scope_raw_opt.is_some() {
+                                                                    auto s_arg# = string::new()
+                                                                    match scope_raw_opt {
+                                                                        auto Option<string>::Some(&sa) => { s_arg = string::from(sa.as_str()) }
+                                                                        auto Option<string>::None => {}
+                                                                    }
+                                                                    if s_arg.as_str().trim() != scope_part {
+                                                                        send_error(id_str.as_str(), -32602, "Invalid params: conflicting scopes specified: 'scope' does not match symbol scope prefix")
+                                                                        continue
+                                                                    }
+                                                                }
+                                                                parsed_symbol = Option<string>::Some(string::from(name_part))
+                                                                parsed_scope = Option<string>::Some(string::from(scope_part))
+                                                            } else {
+                                                                parsed_symbol = Option<string>::Some(string::from(sym_view))
+                                                                match scope_raw_opt {
+                                                                    auto Option<string>::Some(&sr) => {
+                                                                        auto sr_trim = sr.as_str().trim()
+                                                                        if sr_trim.len == 0 {
+                                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'scope' cannot be empty")
+                                                                            continue
+                                                                        }
+                                                                        parsed_scope = Option<string>::Some(string::from(sr_trim))
+                                                                    }
+                                                                    auto Option<string>::None => {}
+                                                                }
+                                                            }
+                                                        }
+
+                                                        auto has_explicit_context = arg_map.try_borrow(string::from("context")).is_some()
+
+                                                        if parsed_symbol.is_some() {
+                                                            if line_opt.is_some() || lines_range_opt.is_some() {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'symbol' is mutually exclusive with 'line' and 'lines'")
+                                                                continue
+                                                            }
+                                                            if block_val {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with 'symbol'")
+                                                                continue
+                                                            }
+                                                            if has_explicit_context {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'context' cannot be used with 'symbol'")
+                                                                continue
+                                                            }
+                                                        } else {
+                                                            if line_opt.is_none() && lines_range_opt.is_none() {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: viewing requires either 'line', 'lines', or 'symbol'")
+                                                                continue
+                                                            }
+                                                            if line_opt.is_some() && lines_range_opt.is_some() {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: cannot specify both 'line' and 'lines'")
+                                                                continue
+                                                            }
+                                                            if block_val && lines_range_opt.is_some() {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with explicit 'lines' range")
+                                                                continue
+                                                            }
                                                         }
 
                                                         auto max_lines_opt# = Option<usize>::Some(200:usize)
@@ -1057,7 +1189,9 @@ pub fn run_mcp_server() -> i32 {
                                                             max_lines = max_lines_opt,
                                                             max_result_bytes = exec_max_bytes,
                                                             max_columns = max_columns_opt,
-                                                            max_block_lines = max_block_lines_val
+                                                            max_block_lines = max_block_lines_val,
+                                                            symbol = cede parsed_symbol,
+                                                            symbol_scope = cede parsed_scope
                                                         )
                                                         auto view_res = execute_view_operation(view_opts)
                                                         if view_res.is_err() {
@@ -1069,6 +1203,11 @@ pub fn run_mcp_server() -> i32 {
                                                             continue
                                                         }
                                                         auto vr# = view_res.unwrap()
+
+                                                        auto is_tool_err# = false
+                                                        if vr.selection_status == "multiple_candidates" || vr.selection_status == "unsupported_syntax" || vr.selection_status == "scan_incomplete" || vr.selection_status == "io_error" {
+                                                            is_tool_err = true
+                                                        }
 
                                                         if format_is_json {
                                                             auto json_str# = string::new()
@@ -1093,6 +1232,9 @@ pub fn run_mcp_server() -> i32 {
                                                             resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
                                                             resp#.push_str(json_escape(json_str.as_str()).as_str())
                                                             resp#.push_str("\"}]")
+                                                            if is_tool_err {
+                                                                resp#.push_str(",\"isError\":true")
+                                                            }
 
                                                             if server_state.negotiated_version.as_str() == "2025-11-25" {
                                                                 resp#.push_str(",\"structuredContent\":")
@@ -1137,7 +1279,12 @@ pub fn run_mcp_server() -> i32 {
                                                         resp#.push_str(id_str.as_str())
                                                         resp#.push_str(",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
                                                         resp#.push_str(json_escape(vr.text.as_str()).as_str())
-                                                        resp#.push_str("\"}],\"isError\":false")
+                                                        resp#.push_str("\"}],\"isError\":")
+                                                        if is_tool_err {
+                                                            resp#.push_str("true")
+                                                        } else {
+                                                            resp#.push_str("false")
+                                                        }
 
                                                         if server_state.negotiated_version.as_str() == "2025-11-25" {
                                                             resp#.push_str(",\"structuredContent\":")

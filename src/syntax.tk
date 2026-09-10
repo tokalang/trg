@@ -9,6 +9,8 @@ import src/file_types::{extract_file_extension}
 pub shape DelimiterDepths (
     brace_depth: usize,
     paren_depth: usize,
+    bracket_depth: usize,
+    trailing_backslash: bool,
     in_str: bool,
     str_char: char,
     escape: bool,
@@ -21,6 +23,8 @@ impl DelimiterDepths {
         return DelimiterDepths(
             brace_depth = self.brace_depth,
             paren_depth = self.paren_depth,
+            bracket_depth = self.bracket_depth,
+            trailing_backslash = self.trailing_backslash,
             in_str = self.in_str,
             str_char = self.str_char,
             escape = self.escape,
@@ -33,12 +37,18 @@ impl DelimiterDepths {
         return DelimiterDepths(
             brace_depth = 0:usize,
             paren_depth = 0:usize,
+            bracket_depth = 0:usize,
+            trailing_backslash = false,
             in_str = false,
             str_char = 0:char,
             escape = false,
             is_triple_quote = false,
             block_comment_depth = 0:usize
         )
+    }
+
+    pub fn is_clean_eof(self) -> bool {
+        return !self.in_str && !self.is_triple_quote && self.block_comment_depth == 0:usize && self.brace_depth == 0:usize && self.paren_depth == 0:usize && self.bracket_depth == 0:usize && !self.trailing_backslash
     }
 }
 
@@ -149,6 +159,18 @@ pub fn detect_syntax_family(path: str) -> SyntaxFamily {
     return SyntaxFamily::Brace
 }
 
+pub fn is_symbol_view_supported(path: str) -> bool {
+    auto ext = extract_file_extension(path)
+    if ext == "tk" || ext == "rs" || ext == "py" || ext == "pyi" || ext == "go" ||
+       ext == "c" || ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "h" || ext == "hpp" || ext == "hxx" ||
+       ext == "js" || ext == "jsx" || ext == "ts" || ext == "tsx" || ext == "mjs" || ext == "cjs" ||
+       ext == "java" || ext == "kt" || ext == "kts" || ext == "scala" || ext == "swift" || ext == "cs" ||
+       ext == "rb" || ext == "php" || ext == "dart" || ext == "zig" || ext == "nim" || ext == "lua" {
+        return true
+    }
+    return false
+}
+
 pub fn detect_lexical_dialect(path: str) -> LexicalDialect {
     auto ext = extract_file_extension(path)
     if ext == "tk" {
@@ -203,6 +225,8 @@ pub fn scan_line_lexical_with_mask(
     auto has_code_brace_closer# = false
     auto has_code_paren_closer# = false
     auto has_code# = false
+    auto saw_code_char# = false
+    auto last_code_char# = 0:char
     auto first_token_is_quote# = false
     auto first_token_col# = 0:usize
     auto saw_first_non_ws# = false
@@ -366,6 +390,8 @@ pub fn scan_line_lexical_with_mask(
                                 first_token_col = i
                             }
                             has_code = true
+                            saw_code_char = true
+                            last_code_char = ch
                             out#.push_char(ch)
                             if with_mask {
                                 mask#.push(BYTE_KIND_CODE)
@@ -380,6 +406,7 @@ pub fn scan_line_lexical_with_mask(
                                 if !is_id {
                                     break
                                 }
+                                last_code_char = ic
                                 out#.push_char(ic)
                                 if with_mask {
                                     mask#.push(BYTE_KIND_CODE)
@@ -438,6 +465,8 @@ pub fn scan_line_lexical_with_mask(
                 first_token_col = i
             }
             has_code = true
+            saw_code_char = true
+            last_code_char = ch
 
             if ch == ('{' as char) {
                 depths.brace_depth = depths.brace_depth + 1:usize
@@ -453,6 +482,12 @@ pub fn scan_line_lexical_with_mask(
                     depths.paren_depth = depths.paren_depth - 1:usize
                 }
                 has_code_paren_closer = true
+            } else if ch == ('[' as char) {
+                depths.bracket_depth = depths.bracket_depth + 1:usize
+            } else if ch == (']' as char) {
+                if depths.bracket_depth > 0:usize {
+                    depths.bracket_depth = depths.bracket_depth - 1:usize
+                }
             }
         }
 
@@ -461,6 +496,14 @@ pub fn scan_line_lexical_with_mask(
             mask#.push(BYTE_KIND_CODE)
         }
         i = i + 1:usize
+    }
+
+    if saw_code_char {
+        if last_code_char == ('\\' as char) {
+            depths.trailing_backslash = true
+        } else {
+            depths.trailing_backslash = false
+        }
     }
 
     // End-of-line string persistence:

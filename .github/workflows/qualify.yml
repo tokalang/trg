@@ -70,6 +70,11 @@ jobs:
       - name: Run qualification suite
         run: python3 tests/qualify.py
 
+      - name: Run single-file symbol view test suite
+        run: python3 tests/test_view_symbol.py
+        env:
+          TRG_BIN: ./target/debug/trg
+
       - name: Verify standalone installer behavior
         run: python3 tests/verify_installer.py
 
@@ -178,7 +183,7 @@ jobs:
           clang -c build_win/toka_rt.c -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
           clang build_win/trg_x64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o trg.exe -lbcrypt -lws2_32 -lshell32
-          ./trg.exe -V | grep -F "0.17.0"
+          ./trg.exe -V | grep -F "0.18.0"
           clang build_win/trg_win_compat.c build_win/test_c_bridge_write.c \
             -o test_c_write_x64.exe -lkernel32 -lmsvcrt -O2
 
@@ -191,6 +196,11 @@ jobs:
           assert res['checked'] and res['third_party_dll_count'] == 0, f'Disallowed DLLs: {res}'
           print('DLL Check: 0 third-party DLLs detected.', res)
           "
+
+      - name: Run single-file symbol view test suite (Windows x64)
+        run: python3 tests/test_view_symbol.py
+        env:
+          TRG_BIN: trg.exe
 
       - name: Run Windows qualification matrix (native x64)
         run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_x64.exe --arch x64
@@ -261,7 +271,7 @@ jobs:
           clang -c build_win/toka_rt.c -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
           clang build_win/trg_arm64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o trg.exe -lbcrypt -lws2_32 -lshell32
-          ./trg.exe -V | grep -F "0.17.0"
+          ./trg.exe -V | grep -F "0.18.0"
           clang build_win/trg_win_compat.c build_win/test_c_bridge_write.c \
             -o test_c_write_arm64.exe -lkernel32 -lmsvcrt -O2
 
@@ -274,6 +284,11 @@ jobs:
           assert res['checked'] and res['third_party_dll_count'] == 0, f'Disallowed DLLs: {res}'
           print('DLL Check: 0 third-party DLLs detected.', res)
           "
+
+      - name: Run single-file symbol view test suite (Windows ARM64)
+        run: python3 tests/test_view_symbol.py
+        env:
+          TRG_BIN: trg.exe
 
       - name: Run Windows qualification matrix (native ARM64)
         run: python3 tests/test_windows_matrix.py --trg trg.exe --c-test test_c_write_arm64.exe --arch arm64
