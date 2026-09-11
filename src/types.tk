@@ -247,10 +247,13 @@ impl BudgetState {
         return true
     }
 
-    pub fn commit_match_emitted(self#, submatch_count: usize, is_first_emitted_for_file: bool, file_path: str) {
+    pub fn commit_match_emitted(self#, submatch_count: usize, is_first_emitted_for_file: bool, is_stdin: bool, reopenable_path: str) {
         if !self.single_hit_disqualified {
-            if self.matched_lines_emitted == 0:usize {
-                self.single_hit_candidate_path = string::from(file_path)
+            if is_stdin || reopenable_path.len == 0 {
+                self.single_hit_disqualified = true
+                self.single_hit_candidate_path = string::new()
+            } else if self.matched_lines_emitted == 0:usize {
+                self.single_hit_candidate_path = string::from(reopenable_path)
             } else {
                 self.single_hit_disqualified = true
                 self.single_hit_candidate_path = string::new()
@@ -581,7 +584,7 @@ impl SearchDiagnostic {
         )
     }
 
-    pub fn format_cli(self) -> string {
+    pub fn format_cli_with_hint_option(self, suppress_hint: bool) -> string {
         auto s# = string::new()
         match self.code {
             auto Option<string>::Some(&c) => {
@@ -596,14 +599,20 @@ impl SearchDiagnostic {
                 s#.push_str(self.message.as_str())
             }
         }
-        match self.hint {
-            auto Option<string>::Some(&h) => {
-                s#.push_str("\nhint: ")
-                s#.push_str(h.as_str())
+        if !suppress_hint {
+            match self.hint {
+                auto Option<string>::Some(&h) => {
+                    s#.push_str("\nhint: ")
+                    s#.push_str(h.as_str())
+                }
+                _ => {}
             }
-            _ => {}
         }
         return cede s
+    }
+
+    pub fn format_cli(self) -> string {
+        return self.format_cli_with_hint_option(false)
     }
 
     pub fn format_legacy(self) -> string {

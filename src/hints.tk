@@ -3,7 +3,7 @@
 
 import core/str::{str}
 import src/posix::{posix_write_stderr, is_windows_target}
-import src/types::{CliOptions, Hint, CaseMode}
+import src/types::{CliOptions, Hint, CaseMode, SearchReport}
 import src/printer::{u64_to_string}
 
 pub fn shell_quote(s: str) -> string {
@@ -71,11 +71,74 @@ impl HintSlot {
     }
 }
 
+pub fn is_single_hit_hint_eligible(opts: CliOptions, report: SearchReport) -> bool {
+    if opts.no_hints {
+        return false
+    }
+    if opts.patterns.len() != 1:usize {
+        return false
+    }
+    if opts.patterns.borrow(0).len() == 0 {
+        return false
+    }
+    if opts.only_matching ||
+       opts.quiet ||
+       opts.count ||
+       opts.files_with_matches ||
+       opts.files_mode ||
+       opts.type_list_only ||
+       opts.json_mode ||
+       opts.json_compact ||
+       opts.mcp_mode ||
+       opts.invert_match ||
+       opts.max_count_enabled ||
+       opts.code_only ||
+       opts.symbol_variants ||
+       opts.group_by_scope ||
+       opts.snippet {
+        return false
+    }
+    if opts.globs.len() > 0:usize ||
+       opts.include_types.len() > 0:usize ||
+       opts.exclude_types.len() > 0:usize ||
+       opts.include_type_exts.len() > 0:usize ||
+       opts.exclude_type_exts.len() > 0:usize {
+        return false
+    }
+    if opts.before_context > 0 ||
+       opts.after_context > 0 ||
+       opts.context_block ||
+       opts.scope {
+        return false
+    }
+    if report.had_error ||
+       report.is_broken_pipe ||
+       report.budget_state.is_truncated ||
+       report.budget_state.single_hit_disqualified {
+        return false
+    }
+    if report.budget_state.matched_lines_observed != 1:usize ||
+       report.budget_state.matched_lines_emitted != 1:usize {
+        return false
+    }
+    if report.budget_state.files_with_match_observed != 1:usize ||
+       report.budget_state.files_with_match_emitted != 1:usize {
+        return false
+    }
+    if report.budget_state.single_hit_candidate_path.len() == 0 {
+        return false
+    }
+    return true
+}
+
 pub fn build_single_hit_hint(opts: CliOptions, candidate_path: str) -> Option<Hint> {
-    if opts.patterns.len() == 0:usize || candidate_path.len == 0 {
+    if opts.patterns.len() != 1:usize || candidate_path.len == 0 {
         return Option<Hint>::None
     }
     auto pat_str = opts.patterns.borrow(0).as_str()
+    if pat_str.len == 0 {
+        return Option<Hint>::None
+    }
 
     auto cmd# = string::from("trg -n")
     if opts.fixed_strings {
@@ -110,35 +173,42 @@ pub fn build_single_hit_hint(opts: CliOptions, candidate_path: str) -> Option<Hi
 
 pub fn build_symbol_preview_truncation_hint(
     path: str,
-    symbol: str,
-    scope_opt: Option<string>,
-    sym_start: usize,
-    sym_end: usize
+    next_start: usize,
+    next_end: usize,
+    max_lines_opt: Option<usize>,
+    max_bytes_opt: Option<usize>,
+    is_following: bool
 ) -> Option<Hint> {
-    auto total_lines# = 1:usize
-    if sym_end >= sym_start {
-        total_lines = sym_end - sym_start + 1:usize
+    if next_end < next_start || path.len == 0 {
+        return Option<Hint>::None
     }
-    auto msg# = string::from("full symbol is L")
-    msg#.push_str(u64_to_string(sym_start as u64).as_str())
-    msg#.push_str("-L")
-    msg#.push_str(u64_to_string(sym_end as u64).as_str())
-    msg#.push_str(" (")
-    msg#.push_str(u64_to_string(total_lines as u64).as_str())
-    msg#.push_str(" lines); use --continuation to page through or view by line:")
+    auto msg# = string::new()
+    if is_following {
+        msg#.push_str("to view unshown lines following this section under budget, run:")
+    } else {
+        msg#.push_str("to view unshown lines preceding this section under budget, run:")
+    }
 
     auto cmd# = string::from("trg view ")
     cmd#.push_str(shell_quote(path).as_str())
-    cmd#.push_str(" --symbol ")
-    cmd#.push_str(shell_quote(symbol).as_str())
-    match scope_opt {
-        auto Option<string>::Some(&sc) => {
-            cmd#.push_str(" --scope ")
-            cmd#.push_str(shell_quote(sc.as_str()).as_str())
+    cmd#.push_str(" --lines ")
+    cmd#.push_str(u64_to_string(next_start as u64).as_str())
+    cmd#.push_str("-")
+    cmd#.push_str(u64_to_string(next_end as u64).as_str())
+    match max_lines_opt {
+        auto Option<usize>::Some(ml) => {
+            cmd#.push_str(" --max-lines ")
+            cmd#.push_str(u64_to_string(ml as u64).as_str())
         }
-        auto Option<string>::None => {}
+        _ => {}
     }
-    cmd#.push_str(" --continuation")
+    match max_bytes_opt {
+        auto Option<usize>::Some(mb) => {
+            cmd#.push_str(" --max-bytes ")
+            cmd#.push_str(u64_to_string(mb as u64).as_str())
+        }
+        _ => {}
+    }
 
     return Option<Hint>::Some(Hint(
         kind = string::from("symbol_preview_truncation"),

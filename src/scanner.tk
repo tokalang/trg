@@ -310,6 +310,11 @@ fn process_logical_line(
     scope_resolver#: FileScopeResolver
 ) -> LineProcessOutcome {
     if line_matches {
+        auto is_stdin_stream = resolved_path.path_kind == PathKind::Stdin
+        auto reopen_path# = ""
+        if !is_stdin_stream {
+            reopen_path = resolved_path.identity_key.as_str()
+        }
         auto is_first_for_file = !file_has_emitted_match
         auto res_ok = budget_state#.reserve_match(resolved_path.display_path.as_str(), line.line_number, is_first_for_file)
         if !res_ok {
@@ -416,7 +421,7 @@ fn process_logical_line(
                 ))
 
                 auto is_first_emitted = !file_has_emitted_match
-                budget_state#.commit_match_emitted(submatch_count, is_first_emitted, resolved_path.display_path.as_str())
+                budget_state#.commit_match_emitted(submatch_count, is_first_emitted, is_stdin_stream, reopen_path)
                 file_has_emitted_match = true
                 file_matched_lines_emitted = file_matched_lines_emitted + 1
                 state.last_emitted_line_num = line.line_number
@@ -684,7 +689,7 @@ fn process_logical_line(
         auto is_first_emitted = !file_has_emitted_match
         if opts.context_block {
             state.block_window#.push(cede m_rec)
-            budget_state#.commit_match_emitted(submatch_count, is_first_emitted, resolved_path.display_path.as_str())
+            budget_state#.commit_match_emitted(submatch_count, is_first_emitted, is_stdin_stream, reopen_path)
             file_has_emitted_match = true
             file_matched_lines_emitted = file_matched_lines_emitted + 1
             state.last_emitted_line_num = line.line_number
@@ -714,7 +719,7 @@ fn process_logical_line(
             auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
             match outcome {
                 EmitOutcome::Written => {
-                    budget_state#.commit_match_emitted(submatch_count, is_first_emitted, resolved_path.display_path.as_str())
+                    budget_state#.commit_match_emitted(submatch_count, is_first_emitted, is_stdin_stream, reopen_path)
                     file_has_emitted_match = true
                     file_matched_lines_emitted = file_matched_lines_emitted + 1
                     state.last_emitted_line_num = line.line_number
@@ -1065,7 +1070,12 @@ fn scan_and_process_line(
                 auto outcome = writer#.emit_files_mode_path(budget_state#, resolved_path.display_path.as_str())
                 match outcome {
                     EmitOutcome::Written => {
-                        budget_state#.commit_match_emitted(0, is_first, resolved_path.display_path.as_str())
+                        auto is_stdin_stream = resolved_path.path_kind == PathKind::Stdin
+                        auto reopen_path# = ""
+                        if !is_stdin_stream {
+                            reopen_path = resolved_path.identity_key.as_str()
+                        }
+                        budget_state#.commit_match_emitted(0, is_first, is_stdin_stream, reopen_path)
                         file_has_emitted_match = true
                         file_matched_lines_emitted = file_matched_lines_emitted + 1
                         return LineProcessOutcome::Continue

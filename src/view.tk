@@ -1008,10 +1008,8 @@ impl ViewResult {
                             _ => {}
                         }
                         out#.push_str("\n")
-                        if out.len() <= 1024:usize {
-                            posix_write_stderr(out.as_str())
-                            hint_slot.emitted = true
-                        }
+                        posix_write_stderr(out.as_str())
+                        hint_slot.emitted = true
                     }
                 }
                 auto Option<string>::None => {}
@@ -6373,29 +6371,36 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
     }
 
     if use_bounded_preview && hint_slot#.can_emit(no_hints) {
-        if view_res.target_symbol.len() > 0:usize {
-            auto &ts = view_res.target_symbol.borrow(0)
-            auto s_start = ts.range_start
-            auto s_end# = ts.line + 0:usize
-            match ts.range_end {
-                auto Option<usize>::Some(e) => {
-                    s_end = e + 0:usize
+        match preview_proj_opt {
+            auto Option<CliSymbolPreviewProjection>::Some(&proj) => {
+                auto sym_hint_opt# = Option<Hint>::None
+                if proj.has_rear_omitted {
+                    sym_hint_opt = build_symbol_preview_truncation_hint(
+                        opts.file_path.as_str(),
+                        proj.rear_omitted_start,
+                        proj.rear_omitted_end,
+                        max_lines_opt,
+                        max_bytes_opt,
+                        true
+                    )
+                } else if proj.has_front_omitted {
+                    sym_hint_opt = build_symbol_preview_truncation_hint(
+                        opts.file_path.as_str(),
+                        proj.front_omitted_start,
+                        proj.front_omitted_end,
+                        max_lines_opt,
+                        max_bytes_opt,
+                        false
+                    )
                 }
-                _ => {}
-            }
-            auto sym_hint_opt = build_symbol_preview_truncation_hint(
-                opts.file_path.as_str(),
-                ts.name.as_str(),
-                opts.symbol_scope,
-                s_start,
-                s_end
-            )
-            match sym_hint_opt {
-                auto Option<Hint>::Some(&h) => {
-                    hint_slot#.try_emit(no_hints, h.message.as_str(), Option<str>::Some(h.command.as_str()))
+                match sym_hint_opt {
+                    auto Option<Hint>::Some(&h) => {
+                        hint_slot#.try_emit(no_hints, h.message.as_str(), Option<str>::Some(h.command.as_str()))
+                    }
+                    auto Option<Hint>::None => {}
                 }
-                auto Option<Hint>::None => {}
             }
+            auto Option<CliSymbolPreviewProjection>::None => {}
         }
     }
     return 0

@@ -5,7 +5,7 @@ import src/cli::{parse_cli_args, print_help}
 import src/mcp::{run_mcp_server}
 import src/view::{execute_view_cli}
 import src/symbols::{execute_symbols_cli}
-import src/hints::{HintSlot, build_single_hit_hint}
+import src/hints::{HintSlot, build_single_hit_hint, is_single_hit_hint_eligible}
 import src/printer::{
     OutputBudgetWriter,
     EmitOutcome,
@@ -66,13 +66,9 @@ fn main() -> i32 {
             auto legacy_msg = diag.format_legacy()
             print_err(legacy_msg.as_str())
         } else {
-            if opts.no_hints {
-                auto legacy_msg = diag.format_legacy()
-                print_err(legacy_msg.as_str())
-            } else {
-                auto cli_msg = diag.format_cli()
-                print_err(cli_msg.as_str())
-            }
+            auto suppress_hint = opts.no_hints || opts.quiet
+            auto msg = diag.format_cli_with_hint_option(suppress_hint)
+            print_err(msg.as_str())
         }
         return 2
     }
@@ -98,38 +94,13 @@ fn main() -> i32 {
     }
 
     auto hint_slot# = HintSlot::new()
-    if !opts.no_hints {
-        auto is_single_hit = !opts.max_count_enabled &&
-            !opts.invert_match &&
-            report.budget_state.matched_lines_observed == 1:usize &&
-            report.budget_state.matched_lines_emitted == 1:usize &&
-            report.budget_state.files_with_match_observed == 1:usize &&
-            report.budget_state.files_with_match_emitted == 1:usize &&
-            !report.budget_state.single_hit_disqualified &&
-            report.budget_state.single_hit_candidate_path.len() > 0 &&
-            opts.before_context == 0 &&
-            opts.after_context == 0 &&
-            !opts.context_block &&
-            !opts.scope &&
-            !opts.json_mode &&
-            !opts.json_compact &&
-            !opts.quiet &&
-            !opts.count &&
-            !opts.files_with_matches &&
-            !opts.mcp_mode &&
-            !opts.files_mode &&
-            !opts.type_list_only &&
-            !report.budget_state.is_truncated &&
-            !report.had_error
-
-        if is_single_hit {
-            auto hit_hint_opt = build_single_hit_hint(opts, report.budget_state.single_hit_candidate_path.as_str())
-            match hit_hint_opt {
-                auto Option<Hint>::Some(&h) => {
-                    hint_slot#.try_emit(opts.no_hints, h.message.as_str(), Option<str>::Some(h.command.as_str()))
-                }
-                auto Option<Hint>::None => {}
+    if is_single_hit_hint_eligible(opts, report) {
+        auto hit_hint_opt = build_single_hit_hint(opts, report.budget_state.single_hit_candidate_path.as_str())
+        match hit_hint_opt {
+            auto Option<Hint>::Some(&h) => {
+                hint_slot#.try_emit(opts.no_hints, h.message.as_str(), Option<str>::Some(h.command.as_str()))
             }
+            auto Option<Hint>::None => {}
         }
     }
 
