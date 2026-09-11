@@ -1278,7 +1278,8 @@ pub fn run_mcp_server() -> i32 {
                                                             symbol = cede parsed_symbol,
                                                             symbol_scope = cede parsed_scope,
                                                             continuation = continuation_val || has_cont_token,
-                                                            continuation_token = cede cont_token_opt
+                                                            continuation_token = cede cont_token_opt,
+                                                            no_hints = true
                                                         )
                                                         auto view_res = execute_view_operation(view_opts)
                                                         if view_res.is_err() {

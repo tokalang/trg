@@ -160,7 +160,15 @@ pub shape BudgetState (
     is_truncated#: bool,
     truncation_reason#: string,
     stopped_path#: string,
-    stopped_line_num#: usize
+    stopped_line_num#: usize,
+    single_hit_candidate_path#: string,
+    single_hit_disqualified#: bool
+)
+
+pub shape Hint (
+    kind: string,
+    message: string,
+    command: string
 )
 
 impl BudgetState {
@@ -181,7 +189,9 @@ impl BudgetState {
             is_truncated = false,
             truncation_reason = string::from(""),
             stopped_path = string::from(""),
-            stopped_line_num = 0
+            stopped_line_num = 0,
+            single_hit_candidate_path = string::from(""),
+            single_hit_disqualified = false
         )
     }
 
@@ -202,7 +212,9 @@ impl BudgetState {
             is_truncated = self.is_truncated,
             truncation_reason = self.truncation_reason.clone(),
             stopped_path = self.stopped_path.clone(),
-            stopped_line_num = self.stopped_line_num
+            stopped_line_num = self.stopped_line_num,
+            single_hit_candidate_path = self.single_hit_candidate_path.clone(),
+            single_hit_disqualified = self.single_hit_disqualified
         )
     }
 
@@ -235,7 +247,15 @@ impl BudgetState {
         return true
     }
 
-    pub fn commit_match_emitted(self#, submatch_count: usize, is_first_emitted_for_file: bool) {
+    pub fn commit_match_emitted(self#, submatch_count: usize, is_first_emitted_for_file: bool, file_path: str) {
+        if !self.single_hit_disqualified {
+            if self.matched_lines_emitted == 0:usize {
+                self.single_hit_candidate_path = string::from(file_path)
+            } else {
+                self.single_hit_disqualified = true
+                self.single_hit_candidate_path = string::new()
+            }
+        }
         self.matched_lines_emitted = self.matched_lines_emitted + 1
         self.submatches_emitted = self.submatches_emitted + submatch_count
         if is_first_emitted_for_file {
@@ -292,7 +312,8 @@ pub shape CliOptions (
     symbol_variants: bool,
     snippet: bool,
     snippet_chars: usize,
-    code_only: bool
+    code_only: bool,
+    no_hints: bool
 )
 
 pub shape BlockDelimiter (

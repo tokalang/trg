@@ -91,6 +91,7 @@ pub fn print_help() {
     println("      --json                 Output newline-delimited JSONL search events (trg-json-v2)")
     println("      --json=compact         Output streamlined compact JSONL without control frames (alias: --json-compact)")
     println("      --hidden               Search hidden files and directories")
+    println("      --no-hints             Suppress lightweight action hints on stderr")
     println("  -h, --help                 Print this help message")
 }
 
@@ -326,6 +327,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
     auto exclude_type_exts# = Vec<string>::new()
     auto include_types# = Vec<string>::new()
     auto exclude_types# = Vec<string>::new()
+    auto no_hints# = false
 
     auto patterns# = Vec<string>::new()
     auto raw_positionals# = Vec<string>::new()
@@ -1316,6 +1318,12 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             continue
         }
 
+        if view == "--no-hints" {
+            no_hints = true
+            i = i + 1
+            continue
+        }
+
         // Handle short flag clustering e.g. -nF, -iE, -lc, -q, -o, -N
         if view.starts_with("-") && !view.starts_with("--") && view.len > 1 {
             auto is_flag_cluster# = true
@@ -1436,7 +1444,8 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
             symbol_variants = false,
             snippet = false,
             snippet_chars = 30:usize,
-            code_only = false
+            code_only = false,
+            no_hints = no_hints
         ))
     }
 
@@ -1586,6 +1595,7 @@ pub fn parse_cli_args_from_vec(args: Vec<string>) -> Result<CliOptions, string> 
         symbol_variants = symbol_variants,
         snippet = snippet,
         snippet_chars = snippet_chars,
-        code_only = code_only
+        code_only = code_only,
+        no_hints = no_hints
     ))
 }

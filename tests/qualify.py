@@ -6636,8 +6636,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_scope.returncode == 0, f"Scope test suite failed (exit {r_v_scope.returncode}):\n{r_v_scope.stderr}\n{r_v_scope.stdout}"
     log("Test 179 passed: Search scope boundary suite, resource caps, and deduplication verified.")
 
+    # Test 180: CLI Lightweight Hint Layer & --no-hints Suppression
+    log("Test 180: CLI Lightweight Hint Layer & --no-hints Suppression (tests/test_cli_hints.py)")
+    cli_hints_script = repo_root / "tests" / "test_cli_hints.py"
+    assert cli_hints_script.exists(), f"CLI hints test script not found at {cli_hints_script}"
+    env_v_hints = dict(os.environ)
+    env_v_hints["TRG_BIN"] = str(pkg_bin_path)
+    r_v_hints = subprocess.run([
+        sys.executable,
+        str(cli_hints_script)
+    ], cwd=str(repo_root), env=env_v_hints, capture_output=True, text=True)
+    assert r_v_hints.returncode == 0, f"CLI hints test suite failed (exit {r_v_hints.returncode}):\n{r_v_hints.stderr}\n{r_v_hints.stdout}"
+    log("Test 180 passed: CLI lightweight hint layer (5 categories, suppression, 1-hint slot, quoting) verified.")
+
     log("=" * 60)
-    log("ALL 179 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.2)!")
+    log("ALL 180 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.2)!")
     log("=" * 60)
 
 if __name__ == "__main__":

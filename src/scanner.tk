@@ -416,7 +416,7 @@ fn process_logical_line(
                 ))
 
                 auto is_first_emitted = !file_has_emitted_match
-                budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
+                budget_state#.commit_match_emitted(submatch_count, is_first_emitted, resolved_path.display_path.as_str())
                 file_has_emitted_match = true
                 file_matched_lines_emitted = file_matched_lines_emitted + 1
                 state.last_emitted_line_num = line.line_number
@@ -684,7 +684,7 @@ fn process_logical_line(
         auto is_first_emitted = !file_has_emitted_match
         if opts.context_block {
             state.block_window#.push(cede m_rec)
-            budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
+            budget_state#.commit_match_emitted(submatch_count, is_first_emitted, resolved_path.display_path.as_str())
             file_has_emitted_match = true
             file_matched_lines_emitted = file_matched_lines_emitted + 1
             state.last_emitted_line_num = line.line_number
@@ -714,7 +714,7 @@ fn process_logical_line(
             auto outcome = writer#.try_commit_batch(budget_state#, frame_state#, resolved_path, batch)
             match outcome {
                 EmitOutcome::Written => {
-                    budget_state#.commit_match_emitted(submatch_count, is_first_emitted)
+                    budget_state#.commit_match_emitted(submatch_count, is_first_emitted, resolved_path.display_path.as_str())
                     file_has_emitted_match = true
                     file_matched_lines_emitted = file_matched_lines_emitted + 1
                     state.last_emitted_line_num = line.line_number
@@ -1065,7 +1065,7 @@ fn scan_and_process_line(
                 auto outcome = writer#.emit_files_mode_path(budget_state#, resolved_path.display_path.as_str())
                 match outcome {
                     EmitOutcome::Written => {
-                        budget_state#.commit_match_emitted(0, is_first)
+                        budget_state#.commit_match_emitted(0, is_first, resolved_path.display_path.as_str())
                         file_has_emitted_match = true
                         file_matched_lines_emitted = file_matched_lines_emitted + 1
                         return LineProcessOutcome::Continue

@@ -1,0 +1,148 @@
+// src/hints.tk
+// Result-Driven Lightweight Hint Layer for trg CLI
+
+import core/str::{str}
+import src/posix::{posix_write_stderr, is_windows_target}
+import src/types::{CliOptions, Hint, CaseMode}
+import src/printer::{u64_to_string}
+
+pub fn shell_quote(s: str) -> string {
+    if s.len == 0 {
+        return string::from("''")
+    }
+    auto res# = string::new()
+    res#.push_char('\'')
+    auto is_win = is_windows_target()
+    auto i# = 0:usize
+    loop i < s.len {
+        auto ch = s.byte_at(i) as char
+        if ch == ('\'' as char) {
+            if is_win {
+                res#.push_str("''")
+            } else {
+                res#.push_str("'\\''")
+            }
+        } else {
+            res#.push_char(ch)
+        }
+        i = i + 1:usize
+    }
+    res#.push_char('\'')
+    return cede res
+}
+
+pub shape HintSlot (
+    emitted#: bool
+)
+
+impl HintSlot {
+    pub fn new() -> HintSlot {
+        return HintSlot(emitted = false)
+    }
+
+    pub fn can_emit(self, no_hints: bool) -> bool {
+        if no_hints || self.emitted {
+            return false
+        }
+        return true
+    }
+
+    pub fn try_emit(self#, no_hints: bool, message: str, cmd_opt: Option<str>) -> bool {
+        if !self.can_emit(no_hints) {
+            return false
+        }
+        auto out# = string::new()
+        out#.push_str("hint: ")
+        out#.push_str(message)
+        match cmd_opt {
+            auto Option<str>::Some(&cmd) => {
+                out#.push_str("\n  $ ")
+                out#.push_str(cmd)
+            }
+            auto Option<str>::None => {}
+        }
+        out#.push_str("\n")
+        if out.len() > 1024:usize {
+            return false
+        }
+        posix_write_stderr(out.as_str())
+        self.emitted = true
+        return true
+    }
+}
+
+pub fn build_single_hit_hint(opts: CliOptions, candidate_path: str) -> Option<Hint> {
+    if opts.patterns.len() == 0:usize || candidate_path.len == 0 {
+        return Option<Hint>::None
+    }
+    auto pat_str = opts.patterns.borrow(0).as_str()
+
+    auto cmd# = string::from("trg -n")
+    if opts.fixed_strings {
+        cmd#.push_str(" -F")
+    }
+    match opts.case_mode {
+        auto CaseMode::Insensitive => {
+            cmd#.push_str(" -i")
+        }
+        auto CaseMode::Smart => {
+            cmd#.push_str(" -S")
+        }
+        _ => {}
+    }
+    if opts.word_regexp {
+        cmd#.push_str(" -w")
+    }
+    if opts.line_regexp {
+        cmd#.push_str(" -x")
+    }
+    cmd#.push_str(" -C 5 --scope --max-bytes 8K -e ")
+    cmd#.push_str(shell_quote(pat_str).as_str())
+    cmd#.push_str(" -- ")
+    cmd#.push_str(shell_quote(candidate_path).as_str())
+
+    return Option<Hint>::Some(Hint(
+        kind = string::from("single_hit_enhancement"),
+        message = string::from("to inspect enclosing symbol and context, run:"),
+        command = cede cmd
+    ))
+}
+
+pub fn build_symbol_preview_truncation_hint(
+    path: str,
+    symbol: str,
+    scope_opt: Option<string>,
+    sym_start: usize,
+    sym_end: usize
+) -> Option<Hint> {
+    auto total_lines# = 1:usize
+    if sym_end >= sym_start {
+        total_lines = sym_end - sym_start + 1:usize
+    }
+    auto msg# = string::from("full symbol is L")
+    msg#.push_str(u64_to_string(sym_start as u64).as_str())
+    msg#.push_str("-L")
+    msg#.push_str(u64_to_string(sym_end as u64).as_str())
+    msg#.push_str(" (")
+    msg#.push_str(u64_to_string(total_lines as u64).as_str())
+    msg#.push_str(" lines); use --continuation to page through or view by line:")
+
+    auto cmd# = string::from("trg view ")
+    cmd#.push_str(shell_quote(path).as_str())
+    cmd#.push_str(" --symbol ")
+    cmd#.push_str(shell_quote(symbol).as_str())
+    match scope_opt {
+        auto Option<string>::Some(&sc) => {
+            cmd#.push_str(" --scope ")
+            cmd#.push_str(shell_quote(sc.as_str()).as_str())
+        }
+        auto Option<string>::None => {}
+    }
+    cmd#.push_str(" --continuation")
+
+    return Option<Hint>::Some(Hint(
+        kind = string::from("symbol_preview_truncation"),
+        message = cede msg,
+        command = cede cmd
+    ))
+}

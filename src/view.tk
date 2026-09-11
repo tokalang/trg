@@ -6,7 +6,8 @@ import std/vec::{Vec}
 import std/io::{println}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
 import src/posix::{posix_ferror, print_err, posix_write_stdout, posix_write_stderr}
-import src/types::{BlockRange, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo}
+import src/types::{BlockRange, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo, Hint}
+import src/hints::{HintSlot, build_symbol_preview_truncation_hint}
 import src/syntax::{
     detect_syntax_family,
     detect_lexical_dialect,
@@ -157,7 +158,8 @@ pub shape ViewOptions (
     max_columns: Option<usize>,
     max_block_lines: usize,
     continuation: bool,
-    continuation_token: Option<string>
+    continuation_token: Option<string>,
+    no_hints: bool
 )
 
 pub shape ViewResult (
@@ -980,7 +982,7 @@ impl ViewResult {
         return Result<string, string>::Ok(cede final_json)
     }
 
-    pub fn print_cli_truncation_notice(self#, max_lines_opt: Option<usize>, max_bytes_opt: Option<usize>) {
+    pub fn print_cli_truncation_notice(self#, max_lines_opt: Option<usize>, max_bytes_opt: Option<usize>, no_hints: bool, hint_slot#: HintSlot) {
         if self.truncated && self.reason.len() > 0 {
             posix_write_stderr("trg: [trg_view: truncated=true, reason=")
             posix_write_stderr(self.reason.as_str())
@@ -988,23 +990,29 @@ impl ViewResult {
 
             match self.continuation_token {
                 auto Option<string>::Some(&tok) => {
-                    posix_write_stderr("hint: continue reading: trg view --continue ")
-                    posix_write_stderr(tok.as_str())
-                    match max_lines_opt {
-                        auto Option<usize>::Some(ml) => {
-                            posix_write_stderr(" --max-lines ")
-                            posix_write_stderr(u64_to_string(ml as u64).as_str())
+                    if hint_slot#.can_emit(no_hints) {
+                        auto out# = string::from("hint: continue reading: trg view --continue ")
+                        out#.push_str(tok.as_str())
+                        match max_lines_opt {
+                            auto Option<usize>::Some(ml) => {
+                                out#.push_str(" --max-lines ")
+                                out#.push_str(u64_to_string(ml as u64).as_str())
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    }
-                    match max_bytes_opt {
-                        auto Option<usize>::Some(mb) => {
-                            posix_write_stderr(" --max-bytes ")
-                            posix_write_stderr(u64_to_string(mb as u64).as_str())
+                        match max_bytes_opt {
+                            auto Option<usize>::Some(mb) => {
+                                out#.push_str(" --max-bytes ")
+                                out#.push_str(u64_to_string(mb as u64).as_str())
+                            }
+                            _ => {}
                         }
-                        _ => {}
+                        out#.push_str("\n")
+                        if out.len() <= 1024:usize {
+                            posix_write_stderr(out.as_str())
+                            hint_slot.emitted = true
+                        }
                     }
-                    posix_write_stderr("\n")
                 }
                 auto Option<string>::None => {}
             }
@@ -1027,7 +1035,8 @@ impl ViewOptions {
             max_columns = Option<usize>::None,
             max_block_lines = 80:usize,
             continuation = false,
-            continuation_token = Option<string>::None
+            continuation_token = Option<string>::None,
+            no_hints = false
         )
     }
 }
@@ -4409,10 +4418,12 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         diag_head#.push_str("':\n")
 
         auto hint# = string::new()
-        if same_scope {
-            hint#.push_str("Hint: use 'trg view <path>:<line>' to select by line number\n")
-        } else {
-            hint#.push_str("Hint: specify enclosing scope with --scope <SCOPE> or --symbol '<SCOPE>::<NAME>'\n")
+        if !opts.no_hints {
+            if same_scope {
+                hint#.push_str("Hint: use 'trg view <path>:<line>' to select by line number\n")
+            } else {
+                hint#.push_str("Hint: specify enclosing scope with --scope <SCOPE> or --symbol '<SCOPE>::<NAME>'\n")
+            }
         }
 
         // Check minimum diagnostic byte budget (header + candidate 0 + omission + hint)
@@ -5777,6 +5788,8 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
     auto max_block_lines# = 80:usize
     auto continuation_flag# = false
     auto continue_token_opt# = Option<string>::None
+    auto no_hints# = false
+    auto hint_slot# = HintSlot::new()
 
     auto i# = 2:usize
     loop i < num_args {
@@ -5798,6 +5811,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
             println("      --max-bytes <SIZE>    Maximum hydrated output bytes (alias: --max-result-bytes; counts formatted view lines; default: unlimited; 0 stops hydration immediately)")
             println("      --max-columns <NUM>   Omit lines exceeding NUM characters with [omitted]")
             println("      --max-block-lines <NUM> Maximum lines per expanded block context or unknown symbol preview (default: 80)")
+            println("      --no-hints            Suppress lightweight action hints on stderr")
             return 0
         }
 
@@ -6092,6 +6106,12 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
             continue
         }
 
+        if view == "--no-hints" {
+            no_hints = true
+            i = i + 1
+            continue
+        }
+
         if view.starts_with("-") {
             auto err# = string::from("Unknown option '")
             err#.push_str(view)
@@ -6137,6 +6157,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
     if continue_token_opt.is_some() {
         if path_opt.is_some() || line_opt.is_some() || lines_range.is_some() || symbol_raw_opt.is_some() || scope_raw_opt.is_some() || block || context_passed || continuation_flag {
             print_err("Cannot specify target path or query options when using --continue")
+            hint_slot#.try_emit(no_hints, "to resume reading, pass only the token: trg view --continue <TOKEN>", Option<str>::None)
             return 2
         }
 
@@ -6153,7 +6174,8 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
             max_columns = max_columns_opt,
             max_block_lines = max_block_lines,
             continuation = true,
-            continuation_token = cede continue_token_opt
+            continuation_token = cede continue_token_opt,
+            no_hints = no_hints
         )
 
         auto res = execute_view_operation(opts)
@@ -6163,7 +6185,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         }
 
         auto view_res# = res.unwrap()
-        view_res#.print_cli_truncation_notice(max_lines_opt, max_bytes_opt)
+        view_res#.print_cli_truncation_notice(max_lines_opt, max_bytes_opt, no_hints, hint_slot#)
         auto write_res = posix_write_stdout(view_res.text.as_str())
         if write_res == 2 {
             return 2
@@ -6181,6 +6203,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
 
     if scope_raw_opt.is_some() && symbol_raw_opt.is_none() {
         print_err("--scope cannot be used without --symbol")
+        hint_slot#.try_emit(no_hints, "specify a target symbol with --symbol <NAME>", Option<str>::None)
         return 2
     }
 
@@ -6215,6 +6238,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
                     auto Option<string>::Some(&s_arg) => {
                         if s_arg.as_str().trim() != scope_part {
                             print_err("Conflicting scopes specified: --scope does not match symbol scope prefix")
+                            hint_slot#.try_emit(no_hints, "specify matching --scope <SCOPE> or omit --scope when using '<SCOPE>::<NAME>'", Option<str>::None)
                             return 2
                         }
                     }
@@ -6243,24 +6267,29 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
     if parsed_symbol.is_some() {
         if context_passed {
             print_err("--symbol cannot be used with -C / --context")
+            hint_slot#.try_emit(no_hints, "use line-based view with context: trg view <path>:<line> -C <NUM>", Option<str>::None)
             return 2
         }
         if block {
             print_err("--symbol cannot be used with --block")
+            hint_slot#.try_emit(no_hints, "use line-based block view: trg view <path>:<line> --block", Option<str>::None)
             return 2
         }
         if lines_range.is_some() {
             print_err("--symbol cannot be used with --lines")
+            hint_slot#.try_emit(no_hints, "use explicit line range view: trg view <path> --lines <M-N>", Option<str>::None)
             return 2
         }
         if line_opt.is_some() {
             print_err("--symbol cannot be used with target line (<path>:<line>)")
+            hint_slot#.try_emit(no_hints, "use either symbol view (trg view <path> --symbol <NAME>) or line view (trg view <path>:<line>)", Option<str>::None)
             return 2
         }
     }
 
     if parsed_symbol.is_none() && line_opt.is_none() && lines_range.is_none() {
         print_err("trg view: viewing requires a target line number (e.g. <path>:<line>), --lines, or --symbol")
+        hint_slot#.try_emit(no_hints, "specify a target line (e.g. trg view path/to/file.tk:42) or --symbol <NAME>", Option<str>::None)
         return 2
     }
 
@@ -6289,7 +6318,8 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         max_columns = max_columns_opt,
         max_block_lines = max_block_lines,
         continuation = continuation_flag,
-        continuation_token = Option<string>::None
+        continuation_token = Option<string>::None,
+        no_hints = no_hints
     )
 
     auto res = execute_view_operation(opts)
@@ -6328,7 +6358,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         preview_proj_opt = Option<CliSymbolPreviewProjection>::Some(prev_res.unwrap())
     }
 
-    view_res#.print_cli_truncation_notice(max_lines_opt, max_bytes_opt)
+    view_res#.print_cli_truncation_notice(max_lines_opt, max_bytes_opt, no_hints, hint_slot#)
     auto write_res# = 0
     match preview_proj_opt {
         auto Option<CliSymbolPreviewProjection>::Some(&proj) => {
@@ -6340,6 +6370,33 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
     }
     if write_res == 2 {
         return 2
+    }
+
+    if use_bounded_preview && hint_slot#.can_emit(no_hints) {
+        if view_res.target_symbol.len() > 0:usize {
+            auto &ts = view_res.target_symbol.borrow(0)
+            auto s_start = ts.range_start
+            auto s_end# = ts.line + 0:usize
+            match ts.range_end {
+                auto Option<usize>::Some(e) => {
+                    s_end = e + 0:usize
+                }
+                _ => {}
+            }
+            auto sym_hint_opt = build_symbol_preview_truncation_hint(
+                opts.file_path.as_str(),
+                ts.name.as_str(),
+                opts.symbol_scope,
+                s_start,
+                s_end
+            )
+            match sym_hint_opt {
+                auto Option<Hint>::Some(&h) => {
+                    hint_slot#.try_emit(no_hints, h.message.as_str(), Option<str>::Some(h.command.as_str()))
+                }
+                auto Option<Hint>::None => {}
+            }
+        }
     }
     return 0
 }
