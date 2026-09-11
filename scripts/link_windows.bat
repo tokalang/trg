@@ -1,11 +1,11 @@
 @echo off
-REM Reproducible native Windows linking script for trg 0.19.2
+REM Reproducible native Windows linking script for trg 0.19.3
 setlocal enabledelayedexpansion
 
 set ROOT=%~dp0..
 cd /d %ROOT%
 
-echo === Linking trg 0.19.2 on Windows ===
+echo === Linking trg 0.19.3 on Windows ===
 
 REM Compile UTF-8 and long-path manifest
 windres src\c\trg.rc -O coff -o target\trg_manifest.o

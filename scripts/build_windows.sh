@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Reproducible Windows cross-compilation script for trg 0.19.2
+# Reproducible Windows cross-compilation script for trg 0.19.3
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
@@ -10,7 +10,7 @@ TOKA_LIB="${TOKA_LIB:-/Users/zhyi/.toka-sdks/1.0.0-rc.11/lib}"
 
 export TOKA_LIB
 
-echo "=== Building trg 0.19.2 for Windows (x64 and ARM64) ==="
+echo "=== Building trg 0.19.3 for Windows (x64 and ARM64) ==="
 
 mkdir -p target/x86_64-pc-windows-gnu target/aarch64-pc-windows-gnu
 

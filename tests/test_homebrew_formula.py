@@ -21,7 +21,7 @@ class TestHomebrewFormulaGeneration(unittest.TestCase):
         self.linux_sha = hashlib.sha256(b"fake-linux-tar").hexdigest().lower()
         self.out_file = self.tmpdir / "Formula" / "trg.rb"
 
-    def run_generator(self, version="0.19.2", tag="v0.19.2"):
+    def run_generator(self, version="0.19.3", tag="v0.19.3"):
         cmd = [
             sys.executable,
             str(GENERATOR),
@@ -34,13 +34,13 @@ class TestHomebrewFormulaGeneration(unittest.TestCase):
         return subprocess.run(cmd, capture_output=True, text=True)
 
     def test_formula_structure_and_values(self):
-        r = self.run_generator("0.19.2", "v0.19.2")
+        r = self.run_generator("0.19.3", "v0.19.3")
         self.assertEqual(r.returncode, 0, f"Generator failed: {r.stderr}")
         self.assertTrue(self.out_file.is_file())
 
         content = self.out_file.read_text(encoding="utf-8")
         self.assertIn("class Trg < Formula", content)
-        self.assertIn('version "0.19.2"', content)
+        self.assertIn('version "0.19.3"', content)
         self.assertIn('license "Apache-2.0"', content)
         self.assertIn("depends_on arch: :arm64", content)
         self.assertIn("depends_on arch: :x86_64", content)
