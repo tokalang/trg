@@ -427,14 +427,14 @@ def test_backward_compatibility_when_continuation_disabled():
         create_sample_file(py_file, 50)
         py_path = str(py_file.resolve())
 
-        # 1. CLI without --continuation: legacy header format, no continuation token in stderr
+        # 1. CLI without --continuation: bounded symbol preview under explicit budget, no continuation token in stderr
         r_cli = subprocess.run(
             [TRG_BIN, "view", str(py_file), "--symbol", "long_computation", "--max-lines", "5"],
             capture_output=True, text=True
         )
         assert r_cli.returncode == 0
-        assert "[symbol: long_computation, lines: L1-L50]" in r_cli.stdout
-        assert "[file: " not in r_cli.stdout
+        assert "range: L1-L50, shown: L1-L5, truncated: max_lines" in r_cli.stdout
+        assert "[omitted: L6-L50]" in r_cli.stdout
         assert "continuation_token" not in r_cli.stderr
         assert "hint: continue reading:" not in r_cli.stderr
 

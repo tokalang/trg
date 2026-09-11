@@ -305,18 +305,22 @@ def test_budget_and_truncation():
             body.append(f"    v_{i} = {i}")
         py_file.write_text("\n".join(body) + "\n")
 
-        # 1. --max-lines truncation
+        # 1. --max-lines truncation: bounded preview format
         r_ml = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "big_function", "--max-lines", "10"], capture_output=True, text=True)
         assert r_ml.returncode == 0
         assert "[trg_view: truncated=true, reason=max_lines]" in r_ml.stderr
+        assert "range: L1-L51, shown: L1-L10, truncated: max_lines" in r_ml.stdout
+        assert "[omitted: L11-L51]" in r_ml.stdout
         out_lines = [l for l in r_ml.stdout.strip().split("\n") if l]
-        # header + 10 lines
-        assert len(out_lines) == 11
+        # header + 10 lines + 1 omitted marker = 12
+        assert len(out_lines) == 12
 
         # 2. --max-bytes truncation
-        r_mb = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "big_function", "--max-bytes", "250"], capture_output=True, text=True)
+        r_mb = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "big_function", "--max-bytes", "300"], capture_output=True, text=True)
         assert r_mb.returncode == 0
         assert "[trg_view: truncated=true, reason=max_result_bytes]" in r_mb.stderr
+        assert "truncated: max_result_bytes" in r_mb.stdout
+        assert "[omitted: L" in r_mb.stdout
 
         # 3. --max-block-lines for unclosed structure preview
         rs_file = tmp / "huge_unclosed.rs"
@@ -451,29 +455,45 @@ def test_target_preservation_with_decorators():
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = pathlib.Path(tmpdir)
         py_file = tmp / "decorated.py"
-        py_file.write_text("""@deco_one
-@deco_two
-@deco_three
-def target_func():
-    a = 1
-    b = 2
-    return a + b
-""")
+        lines = ["@deco_one", "@deco_two", "@deco_three", "def target_func():"]
+        for i in range(25):
+            lines.append(f"    v_{i} = {i}")
+        py_file.write_text("\n".join(lines) + "\n")
+
         # 1. --max-lines 1: Target declaration line MUST be preserved (NOT line 1 @deco_one)
         r_ml1 = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "target_func", "--max-lines", "1"], capture_output=True, text=True)
         assert r_ml1.returncode == 0, f"Expected 0, got {r_ml1.returncode}: {r_ml1.stderr}"
         assert "4:def target_func():" in r_ml1.stdout, f"Target declaration missing from output: {r_ml1.stdout}"
         assert "@deco_one" not in r_ml1.stdout
+        assert "[omitted: L1-L3]" in r_ml1.stdout
+        assert "[omitted: L5-L29]" in r_ml1.stdout
+        assert "shown: L4-L4" in r_ml1.stdout
         assert "reason=max_lines" in r_ml1.stderr
 
-        # 2. Tight max-bytes: should preserve target declaration line
-        # Header + "4:def target_func():\n" is ~60 bytes
-        r_tight = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "target_func", "--max-bytes", "80"], capture_output=True, text=True)
-        assert r_tight.returncode == 0
-        assert "4:def target_func():" in r_tight.stdout
-        assert "reason=max_result_bytes" in r_tight.stderr
+        # 2. Boundary testing: measure exact minimal preview size and test fit vs 1 byte less
+        min_bytes = len(r_ml1.stdout.replace("max_lines", "max_result_bytes").encode("utf-8"))
+        
+        # Exact minimal bytes must fit
+        r_exact = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "target_func", "--max-bytes", str(min_bytes)], capture_output=True, text=True)
+        assert r_exact.returncode == 0, f"Expected 0 for min_bytes={min_bytes}, got {r_exact.returncode}: {r_exact.stderr}"
+        assert "4:def target_func():" in r_exact.stdout
+        assert "reason=max_result_bytes" in r_exact.stderr
 
-        # 3. Impossible max-bytes: fail closed with target_exceeds_max_result_bytes
+        # One byte less than minimal preview must fail closed (cannot drop target declaration)
+        r_less = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "target_func", "--max-bytes", str(min_bytes - 1)], capture_output=True, text=True)
+        assert r_less.returncode == 2
+        assert r_less.stdout == ""
+        assert "target_exceeds_max_result_bytes" in r_less.stderr
+
+        # 3. Shrinking test: 1 byte less than multi-line preview shrinks lines instead of failing closed
+        r_5l = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "target_func", "--max-lines", "5"], capture_output=True, text=True)
+        bytes_5l = len(r_5l.stdout.replace("max_lines", "max_result_bytes").encode("utf-8"))
+        r_shrink = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "target_func", "--max-bytes", str(bytes_5l - 1)], capture_output=True, text=True)
+        assert r_shrink.returncode == 0, f"Expected 0 when shrinking, got {r_shrink.returncode}: {r_shrink.stderr}"
+        assert "reason=max_result_bytes" in r_shrink.stderr
+        assert "4:def target_func():" in r_shrink.stdout
+
+        # 4. Impossible max-bytes: fail closed with target_exceeds_max_result_bytes
         r_fail = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "target_func", "--max-bytes", "15"], capture_output=True, text=True)
         assert r_fail.returncode == 2, f"Expected exit code 2, got {r_fail.returncode}"
         assert r_fail.stdout == ""

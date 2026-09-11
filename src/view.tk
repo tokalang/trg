@@ -5417,6 +5417,345 @@ pub fn execute_view_operation(opts: ViewOptions) -> Result<ViewResult, string> {
     return execute_view_stream_point(opts, target_line)
 }
 
+pub shape CliSymbolPreviewProjection (
+    text: string,
+    shown_start: usize,
+    shown_end: usize,
+    has_front_omitted: bool,
+    front_omitted_start: usize,
+    front_omitted_end: usize,
+    has_rear_omitted: bool,
+    rear_omitted_start: usize,
+    rear_omitted_end: usize,
+    lines_emitted: usize,
+    bytes_emitted: usize
+)
+
+fn build_preview_header(
+    file_path: str,
+    sym_name: str,
+    sym_scope: str,
+    is_confirmed: bool,
+    sym_start: usize,
+    sym_end: usize,
+    shown_start: usize,
+    shown_end: usize,
+    reason: str
+) -> string {
+    auto h# = string::new()
+    h#.push_str("[file: ")
+    h#.push_str(file_path)
+    h#.push_str(", symbol: ")
+    h#.push_str(sym_name)
+    if sym_scope.len > 0:usize {
+        h#.push_str(", scope: ")
+        h#.push_str(sym_scope)
+    }
+    if is_confirmed {
+        h#.push_str(", range: L")
+        h#.push_str(u64_to_string(sym_start as u64).as_str())
+        h#.push_str("-L")
+        h#.push_str(u64_to_string(sym_end as u64).as_str())
+    } else {
+        h#.push_str(", preview: L")
+        h#.push_str(u64_to_string(sym_start as u64).as_str())
+        h#.push_str("-L")
+        h#.push_str(u64_to_string(sym_end as u64).as_str())
+        h#.push_str(" (unclosed structure), range_status: unknown")
+    }
+    h#.push_str(", shown: L")
+    h#.push_str(u64_to_string(shown_start as u64).as_str())
+    h#.push_str("-L")
+    h#.push_str(u64_to_string(shown_end as u64).as_str())
+    h#.push_str(", truncated: ")
+    h#.push_str(reason)
+    h#.push_str("]\n")
+    return cede h
+}
+
+impl ViewResult {
+    pub fn format_cli_symbol_preview(
+        self#,
+        max_lines_opt: Option<usize>,
+        max_bytes_opt: Option<usize>
+    ) -> Result<CliSymbolPreviewProjection, string> {
+        if self.records.len() == 0:usize {
+            return Result<CliSymbolPreviewProjection, string>::Err(string::from("view_preview: no records available"))
+        }
+        if self.target_symbol.len() == 0:usize {
+            return Result<CliSymbolPreviewProjection, string>::Err(string::from("view_preview: no target symbol available"))
+        }
+
+        auto &target_sym = self.target_symbol.borrow(0)
+        auto target_line = target_sym.line + 0:usize
+        auto sym_start = target_sym.range_start + 0:usize
+        auto sym_end# = target_sym.line + 0:usize
+        match target_sym.range_end {
+            auto Option<usize>::Some(re) => {
+                sym_end = re + 0:usize
+            }
+            auto Option<usize>::None => {}
+        }
+
+        auto is_confirmed = (target_sym.range_status == "confirmed")
+        if !is_confirmed {
+            match self.detected_block_range {
+                auto Option<BlockRange>::Some(&dr) => {
+                    sym_end = dr.end + 0:usize
+                }
+                auto Option<BlockRange>::None => {}
+            }
+        }
+        if sym_end < sym_start {
+            sym_end = sym_start + 0:usize
+        }
+
+        auto num_recs = self.records.len()
+        auto target_idx# = 0:usize
+        auto found_target# = false
+        auto ti# = 0:usize
+        loop ti < num_recs {
+            auto &r = self.records.borrow(ti)
+            if r.kind == "target" || r.line_number == target_line {
+                target_idx = ti
+                found_target = true
+                break
+            }
+            ti = ti + 1:usize
+        }
+        if !found_target {
+            target_idx = 0:usize
+        }
+
+        auto start_idx# = 0:usize
+        auto end_idx# = num_recs - 1:usize
+
+        match max_lines_opt {
+            auto Option<usize>::Some(ml) => {
+                if ml < 1:usize {
+                    return Result<CliSymbolPreviewProjection, string>::Err(string::from("target_exceeds_max_lines: Target line cannot fit within max_lines 0"))
+                }
+                loop true {
+                    auto cur_lines = end_idx - start_idx + 1:usize
+                    if cur_lines <= ml {
+                        break
+                    }
+                    auto lines_before = target_idx - start_idx
+                    auto lines_after = end_idx - target_idx
+                    if lines_after > lines_before {
+                        end_idx = end_idx - 1:usize
+                    } else if lines_before > lines_after {
+                        start_idx = start_idx + 1:usize
+                    } else if lines_after > 0:usize {
+                        end_idx = end_idx - 1:usize
+                    } else if lines_before > 0:usize {
+                        start_idx = start_idx + 1:usize
+                    } else {
+                        break
+                    }
+                }
+            }
+            auto Option<usize>::None => {}
+        }
+
+        auto line_texts# = Vec<string>::new()
+        auto prefix_sums# = Vec<usize>::new()
+        prefix_sums#.push(0:usize)
+
+        auto ri# = 0:usize
+        loop ri < num_recs {
+            auto &r = self.records.borrow(ri)
+            auto l_str# = string::new()
+            l_str#.push_str(u64_to_string(r.line_number as u64).as_str())
+            if r.kind == "target" {
+                l_str#.push_str(":")
+            } else {
+                l_str#.push_str("-")
+            }
+            l_str#.push_str(r.text.as_str())
+            l_str#.push_str("\n")
+
+            auto l_len = l_str.len()
+            auto cur_sum = prefix_sums.get(ri) + l_len
+            prefix_sums#.push(cur_sum)
+            line_texts#.push(cede l_str)
+            ri = ri + 1:usize
+        }
+
+        match max_bytes_opt {
+            auto Option<usize>::Some(max_b) => {
+                auto target_line_no = self.records.borrow(target_idx).line_number
+                auto min_hdr = build_preview_header(
+                    self.path.as_str(),
+                    target_sym.name.as_str(),
+                    target_sym.scope.as_str(),
+                    is_confirmed,
+                    sym_start,
+                    sym_end,
+                    target_line_no,
+                    target_line_no,
+                    "max_result_bytes"
+                )
+                auto min_bytes# = min_hdr.len()
+                if target_line_no > sym_start {
+                    auto min_front# = string::from("[omitted: L")
+                    min_front#.push_str(u64_to_string(sym_start as u64).as_str())
+                    min_front#.push_str("-L")
+                    min_front#.push_str(u64_to_string((target_line_no - 1:usize) as u64).as_str())
+                    min_front#.push_str("]\n")
+                    min_bytes = min_bytes + min_front.len()
+                }
+                min_bytes = min_bytes + (prefix_sums.get(target_idx + 1:usize) - prefix_sums.get(target_idx))
+                if target_line_no < sym_end {
+                    auto min_rear# = string::from("[omitted: L")
+                    min_rear#.push_str(u64_to_string((target_line_no + 1:usize) as u64).as_str())
+                    min_rear#.push_str("-L")
+                    min_rear#.push_str(u64_to_string(sym_end as u64).as_str())
+                    min_rear#.push_str("]\n")
+                    min_bytes = min_bytes + min_rear.len()
+                }
+
+                if min_bytes > max_b {
+                    auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record (")
+                    err#.push_str(u64_to_string(min_bytes as u64).as_str())
+                    err#.push_str(" bytes) exceeds max_result_bytes (")
+                    err#.push_str(u64_to_string(max_b as u64).as_str())
+                    err#.push_str(" bytes)")
+                    return Result<CliSymbolPreviewProjection, string>::Err(cede err)
+                }
+
+                loop true {
+                    auto s_line = self.records.borrow(start_idx).line_number
+                    auto e_line = self.records.borrow(end_idx).line_number
+                    auto cur_reason# = "max_lines"
+                    if self.reason == "max_result_bytes" || start_idx > 0:usize || end_idx < (num_recs - 1:usize) {
+                        cur_reason = "max_result_bytes"
+                    }
+                    auto chdr = build_preview_header(
+                        self.path.as_str(),
+                        target_sym.name.as_str(),
+                        target_sym.scope.as_str(),
+                        is_confirmed,
+                        sym_start,
+                        sym_end,
+                        s_line,
+                        e_line,
+                        cur_reason
+                    )
+                    auto cur_bytes# = chdr.len()
+                    if s_line > sym_start {
+                        auto f_om# = string::from("[omitted: L")
+                        f_om#.push_str(u64_to_string(sym_start as u64).as_str())
+                        f_om#.push_str("-L")
+                        f_om#.push_str(u64_to_string((s_line - 1:usize) as u64).as_str())
+                        f_om#.push_str("]\n")
+                        cur_bytes = cur_bytes + f_om.len()
+                    }
+                    cur_bytes = cur_bytes + (prefix_sums.get(end_idx + 1:usize) - prefix_sums.get(start_idx))
+                    if e_line < sym_end {
+                        auto r_om# = string::from("[omitted: L")
+                        r_om#.push_str(u64_to_string((e_line + 1:usize) as u64).as_str())
+                        r_om#.push_str("-L")
+                        r_om#.push_str(u64_to_string(sym_end as u64).as_str())
+                        r_om#.push_str("]\n")
+                        cur_bytes = cur_bytes + r_om.len()
+                    }
+
+                    if cur_bytes <= max_b {
+                        break
+                    }
+                    auto lines_before = target_idx - start_idx
+                    auto lines_after = end_idx - target_idx
+                    if lines_after > lines_before {
+                        end_idx = end_idx - 1:usize
+                    } else if lines_before > lines_after {
+                        start_idx = start_idx + 1:usize
+                    } else if lines_after > 0:usize {
+                        end_idx = end_idx - 1:usize
+                    } else if lines_before > 0:usize {
+                        start_idx = start_idx + 1:usize
+                    } else {
+                        break
+                    }
+                }
+            }
+            auto Option<usize>::None => {}
+        }
+
+        auto final_s_line = self.records.borrow(start_idx).line_number
+        auto final_e_line = self.records.borrow(end_idx).line_number
+        auto final_reason# = "max_lines"
+        if self.reason == "max_result_bytes" || (max_bytes_opt.is_some() && (start_idx > 0:usize || end_idx < (num_recs - 1:usize))) {
+            final_reason = "max_result_bytes"
+        }
+
+        auto final_text# = string::new()
+        auto hdr = build_preview_header(
+            self.path.as_str(),
+            target_sym.name.as_str(),
+            target_sym.scope.as_str(),
+            is_confirmed,
+            sym_start,
+            sym_end,
+            final_s_line,
+            final_e_line,
+            final_reason
+        )
+        final_text#.push_str(hdr.as_str())
+
+        auto has_front# = false
+        auto front_s# = 0:usize
+        auto front_e# = 0:usize
+        if final_s_line > sym_start {
+            has_front = true
+            front_s = sym_start
+            front_e = final_s_line - 1:usize
+            final_text#.push_str("[omitted: L")
+            final_text#.push_str(u64_to_string(front_s as u64).as_str())
+            final_text#.push_str("-L")
+            final_text#.push_str(u64_to_string(front_e as u64).as_str())
+            final_text#.push_str("]\n")
+        }
+
+        auto out_i# = start_idx
+        loop out_i <= end_idx {
+            final_text#.push_str(line_texts.borrow(out_i).as_str())
+            out_i = out_i + 1:usize
+        }
+
+        auto has_rear# = false
+        auto rear_s# = 0:usize
+        auto rear_e# = 0:usize
+        if final_e_line < sym_end {
+            has_rear = true
+            rear_s = final_e_line + 1:usize
+            rear_e = sym_end
+            final_text#.push_str("[omitted: L")
+            final_text#.push_str(u64_to_string(rear_s as u64).as_str())
+            final_text#.push_str("-L")
+            final_text#.push_str(u64_to_string(rear_e as u64).as_str())
+            final_text#.push_str("]\n")
+        }
+
+        auto lines_count = end_idx - start_idx + 1:usize
+        auto bytes_count = final_text.len()
+
+        return Result<CliSymbolPreviewProjection, string>::Ok(CliSymbolPreviewProjection(
+            text = cede final_text,
+            shown_start = final_s_line,
+            shown_end = final_e_line,
+            has_front_omitted = has_front,
+            front_omitted_start = front_s,
+            front_omitted_end = front_e,
+            has_rear_omitted = has_rear,
+            rear_omitted_start = rear_s,
+            rear_omitted_end = rear_e,
+            lines_emitted = lines_count,
+            bytes_emitted = bytes_count
+        ))
+    }
+}
+
 pub fn execute_view_cli(args: Vec<string>) -> i32 {
     auto num_args = args.len()
     if num_args < 3:usize {
@@ -5974,8 +6313,31 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
         }
     }
 
+    auto is_explicit_budget = max_lines_opt.is_some() || max_bytes_opt.is_some()
+    auto is_symbol_mode = (view_res.mode == "symbol") && (view_res.selection_status == "found")
+    auto is_budget_truncated = view_res.truncated && ((view_res.reason == "max_lines") || (view_res.reason == "max_result_bytes"))
+    auto use_bounded_preview = is_symbol_mode && is_explicit_budget && is_budget_truncated && !continuation_flag
+
+    auto preview_proj_opt# = Option<CliSymbolPreviewProjection>::None
+    if use_bounded_preview {
+        auto prev_res = view_res#.format_cli_symbol_preview(max_lines_opt, max_bytes_opt)
+        if prev_res.is_err() {
+            print_err(prev_res.unwrap_err().as_str())
+            return 2
+        }
+        preview_proj_opt = Option<CliSymbolPreviewProjection>::Some(prev_res.unwrap())
+    }
+
     view_res#.print_cli_truncation_notice(max_lines_opt, max_bytes_opt)
-    auto write_res = posix_write_stdout(view_res.text.as_str())
+    auto write_res# = 0
+    match preview_proj_opt {
+        auto Option<CliSymbolPreviewProjection>::Some(&proj) => {
+            write_res = posix_write_stdout(proj.text.as_str())
+        }
+        auto Option<CliSymbolPreviewProjection>::None => {
+            write_res = posix_write_stdout(view_res.text.as_str())
+        }
+    }
     if write_res == 2 {
         return 2
     }
