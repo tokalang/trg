@@ -518,12 +518,12 @@ pub fn run_mcp_server() -> i32 {
         auto root# = JsonNode::NullNode(0):JsonNode
         auto parse_err# = false
         match root#.parse_json(trimmed) {
-            auto Result<str, str>::Ok('rem) => {
-                if 'rem.trim().len > 0 {
+            auto Result<str, str>::Ok(rem) => {
+                if rem.trim().len > 0 {
                     parse_err = true
                 }
             }
-            auto Result<str, str>::Err('e) => {
+            auto Result<str, str>::Err(e) => {
                 parse_err = true
             }
         }

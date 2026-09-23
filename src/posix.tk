@@ -191,9 +191,9 @@ pub fn posix_readdir(dir: Addr) -> Result<Option<string>, i32> {
             posix_clear_crt_errno()
             auto entry_opt = sys_fs::readdir_impl(dir)
             match cede entry_opt {
-                auto Option<string>::Some('name) => {
-                    if 'name.as_str() != "." && 'name.as_str() != ".." {
-                        return Result<Option<string>, i32>::Ok(Option<string>::Some(cede 'name))
+                auto Option<string>::Some(name) => {
+                    if name.as_str() != "." && name.as_str() != ".." {
+                        return Result<Option<string>, i32>::Ok(Option<string>::Some(cede name))
                     }
                 }
                 Option<string>::None => {
@@ -371,4 +371,3 @@ pub fn posix_realpath(path: string) -> Option<string> {
         return Option<string>::Some(cede s)
     }
 }
-
