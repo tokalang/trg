@@ -1,0 +1,29 @@
+import std/vec::{Vec}
+import src/unsafe_owned_vec::{UnsafeOwnedVec}
+
+shape Holder(values: Vec<i32>, id: i32)
+
+fn main() -> i32 {
+    auto rows# = UnsafeOwnedVec<Holder>::new()
+    auto i# = 0:i32
+    loop i < 12:i32 {
+        auto values# = Vec<i32>::new()
+        values#.push(i)
+        rows#.push(Holder(values = cede values, id = i))
+        i += 1:i32
+    }
+    assert(rows.len() == 12:usize, "growth must retain every row")
+    assert(rows.borrow(11:usize).values.get(0:usize) == 11:i32, "nested payload must survive growth")
+    {
+        auto &last# = rows#.borrow_mut(11:usize)
+        last.id = 13:i32
+    }
+    assert(rows.borrow(11:usize).id == 13:i32, "mutable borrow must address live row")
+    rows#.clear()
+    assert(rows.len() == 0:usize, "clear must retire all rows")
+    auto fresh# = Vec<i32>::new()
+    fresh#.push(7:i32)
+    rows#.push(Holder(values = cede fresh, id = 7:i32))
+    assert(rows.borrow(0:usize).values.get(0:usize) == 7:i32, "push after clear must use new storage")
+    return 0
+}

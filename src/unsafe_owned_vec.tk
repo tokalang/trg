@@ -1,0 +1,91 @@
+// Application-internal sequence for records with nested owned storage.
+// These call sites append and borrow; RC13 std/vec eagerly instantiates its
+// generic pop raw_take bridge even when they do not call pop.
+import core/traits::{@Encap}
+import sys/libc::{libc_abort}
+
+pub shape UnsafeOwnedVec<T> (
+    nul *#buf#: [T] = null as nul *[T],
+    len#: usize = 0,
+    cap#: usize = 0
+)
+
+impl<T> UnsafeOwnedVec<T>@Encap {
+    pub buf, len, cap
+
+    fn drop(self#) {
+        unsafe {
+            if self.*buf != null {
+                unsafe free [self.len]self.*#buf
+                self.*buf = null
+            }
+        }
+    }
+}
+
+impl<T> UnsafeOwnedVec<T> {
+    pub fn new() -> UnsafeOwnedVec<T> {
+        return UnsafeOwnedVec<T>(*buf=null, len=0, cap=0)
+    }
+
+    pub fn with_capacity(capacity: usize) -> UnsafeOwnedVec<T> {
+        if capacity == 0:usize { return UnsafeOwnedVec<T>::new() }
+        unsafe {
+            auto *buffer# = alloc [capacity] T
+            return UnsafeOwnedVec<T>(*buf=*buffer, len=0, cap=capacity)
+        }
+    }
+
+    pub fn len(self) -> usize { return self.len }
+
+    pub fn borrow(self, index: usize) -> &item: T
+    effects:
+        &item <- self
+    {
+        if index >= self.len { unsafe { libc_abort() } }
+        unsafe { return &self.buf[index] }
+    }
+
+    pub fn borrow_mut(self#, index: usize) -> &item#: T
+    effects:
+        &item <- self
+    {
+        if index >= self.len { unsafe { libc_abort() } }
+        unsafe { return &self.buf[index] }
+    }
+
+    pub fn clear(self#) {
+        unsafe {
+            if self.*buf != null {
+                free [self.len]self.*#buf
+                self.*buf = null
+            }
+            self.len = 0:usize
+            self.cap = 0:usize
+        }
+    }
+
+    pub fn push(self#, cede val: T) {
+        unsafe {
+            if self.len == self.cap { self#.grow() }
+            self.buf[self.len] = cede val
+            self.len += 1:usize
+        }
+    }
+
+    fn grow(self#) {
+        unsafe {
+            auto new_cap# = self.cap * 2:usize
+            if new_cap == 0:usize { new_cap = 4:usize }
+            auto *new_buf# = alloc [new_cap] T
+            auto index# = 0:usize
+            loop index < self.len {
+                new_buf[index] = cede self.buf[index]
+                index += 1:usize
+            }
+            if self.*buf != null { free [0]self.*#buf }
+            self.*buf = *new_buf
+            self.cap = new_cap
+        }
+    }
+}

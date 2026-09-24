@@ -3,11 +3,12 @@ pub const PACKAGE = (
     version = "0.19.3",
     kind = "application",
     license = "Apache-2.0",
-    compiler = "1.0.0-rc.11",
+    compiler = "1.0.0-rc.13",
     entry_modules = ["src/main.tk"],
     targets = ["macos", "linux", "windows"],
     dependencies = (
-        regex = "regex:0.3.0",
+        // Local RC13 candidate: tokalang/regex impl/rc13-regex-adapt c3d70606097f8d158354e5ce481e4f0ef4e04846.
+        regex = "/Users/zhyi/GitDP/tokalang/regex",
     ),
     native = (required = false, libraries = [""])
 )

@@ -2,6 +2,7 @@
 import core/str::{str}
 import core/option::{Option}
 import std/vec::{Vec}
+import src/unsafe_owned_vec::{UnsafeOwnedVec}
 import std/hashmap::{HashMap}
 import src/types::{
     CliOptions,
@@ -95,13 +96,13 @@ impl FormatConfig {
 }
 
 pub shape OutputBatch (
-    records: Vec<InternedRecord>,
+    records: UnsafeOwnedVec<InternedRecord>,
     separator_needed: bool,
     is_payload: bool
 )
 
 impl OutputBatch {
-    pub fn new(cede records: Vec<InternedRecord>, separator_needed: bool) -> OutputBatch {
+    pub fn new(cede records: UnsafeOwnedVec<InternedRecord>, separator_needed: bool) -> OutputBatch {
         return OutputBatch(
             records = cede records,
             separator_needed = separator_needed,
@@ -439,7 +440,7 @@ fn render_batch_text(
     layout: TextLayout,
     fmt_cfg: FormatConfig,
     resolved_path: ResolvedPath,
-    records: Vec<InternedRecord>,
+    records: UnsafeOwnedVec<InternedRecord>,
     separator_needed: bool,
     needs_heading: bool,
     has_emitted_heading: bool,
@@ -812,7 +813,7 @@ pub shape OutputBudgetWriter (
     path_base: PathBase,
     files#: Vec<FileEntry>,
     file_lookup#: HashMap<string, usize>,
-    segments#: Vec<ResultSegment>,
+    segments#: UnsafeOwnedVec<ResultSegment>,
     active_segment_file_id#: Option<usize>,
     last_emitted_file_key#: string,
     projection#: ProjectionConfig,
@@ -843,7 +844,7 @@ impl OutputBudgetWriter {
             path_base = PathBase(kind = string::from("cwd"), path = string::new()),
             files = Vec<FileEntry>::new(),
             file_lookup = HashMap<string, usize>::new(),
-            segments = Vec<ResultSegment>::new(),
+            segments = UnsafeOwnedVec<ResultSegment>::new(),
             active_segment_file_id = Option<usize>::None,
             last_emitted_file_key = string::new(),
             projection = ProjectionConfig(path_style = style, text_layout = layout),
@@ -873,7 +874,7 @@ impl OutputBudgetWriter {
             path_base = PathBase(kind = string::from("cwd"), path = cede startup_cwd),
             files = Vec<FileEntry>::new(),
             file_lookup = HashMap<string, usize>::new(),
-            segments = Vec<ResultSegment>::new(),
+            segments = UnsafeOwnedVec<ResultSegment>::new(),
             active_segment_file_id = Option<usize>::None,
             last_emitted_file_key = string::new(),
             projection = ProjectionConfig(path_style = style, text_layout = layout),
@@ -1140,7 +1141,7 @@ impl OutputBudgetWriter {
                     self.segments#.push(ResultSegment(
                         file_id = target_file_id,
                         scan_pass = self.current_scan_pass,
-                        records = Vec<InternedRecord>::new()
+                        records = UnsafeOwnedVec<InternedRecord>::new()
                     ))
                     self.active_segment_file_id = Option<usize>::Some(target_file_id)
                 }

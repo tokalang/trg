@@ -1,6 +1,7 @@
 // Shared shapes and types for trg.
 import core/option::{Option}
 import std/vec::{Vec}
+import src/unsafe_owned_vec::{UnsafeOwnedVec}
 
 pub const BYTE_KIND_CODE: u8 = 0:u8
 pub const BYTE_KIND_STRING: u8 = 1:u8
@@ -474,7 +475,7 @@ impl InternedRecord {
 pub shape ResultSegment (
     file_id: usize,
     scan_pass: ScanPass,
-    records: Vec<InternedRecord>
+    records: UnsafeOwnedVec<InternedRecord>
 )
 
 impl ResultSegment {

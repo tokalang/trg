@@ -2,6 +2,7 @@ import core/str::{str}
 import core/types::{Addr, ADDR0}
 import core/option::{Option}
 import std/vec::{Vec}
+import src/unsafe_owned_vec::{UnsafeOwnedVec}
 import std/env
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread, libc_dup, libc_fdopen}
 import src/types::{
@@ -257,7 +258,7 @@ fn flush_block_window(
         actual_end = start_line
     }
 
-    auto recs# = Vec<InternedRecord>::new()
+    auto recs# = UnsafeOwnedVec<InternedRecord>::new()
     auto i# = 0:usize
     loop i < state.block_window.len() {
         auto rec# = state.block_window.borrow(i).clone()
@@ -569,7 +570,7 @@ fn process_logical_line(
             state.block_delim = opener_delim
         }
 
-        auto records# = Vec<InternedRecord>::new()
+        auto records# = UnsafeOwnedVec<InternedRecord>::new()
         auto r_idx# = emit_start_idx
         loop r_idx < num_ring {
             auto actual_idx = (state.ring.head + r_idx) % state.ring.capacity
@@ -856,7 +857,7 @@ fn process_logical_line(
     if state.pending_after > 0 {
         if line.line_number > state.last_emitted_line_num {
             auto target_gid = state.current_group_id
-            auto ctx_recs# = Vec<InternedRecord>::new()
+            auto ctx_recs# = UnsafeOwnedVec<InternedRecord>::new()
             ctx_recs#.push(InternedRecord(
                 kind = string::from("context"),
                 group_id = target_gid,

@@ -184,7 +184,7 @@ def main():
 
     r_tokac_ver = run_cmd([tokac_bin, "--version"])
     tokac_ver_str = r_tokac_ver.stdout + r_tokac_ver.stderr
-    assert "1.0.0-rc.11" in tokac_ver_str, f"Qualification requires Toka 1.0.0-rc.11, found: {tokac_ver_str.strip()}"
+    assert "1.0.0-rc.13" in tokac_ver_str, f"Qualification requires Toka 1.0.0-rc.13, found: {tokac_ver_str.strip()}"
     log(f"Verified Toka compiler version: {tokac_ver_str.strip()}")
 
     # Step 0: Package manifest check and build
@@ -208,8 +208,8 @@ def main():
     direct_bin_path.parent.mkdir(parents=True, exist_ok=True)
     log("Step 1: Compiling direct tokac binary...")
     regex_lib_candidates = [
-        repo_root / ".toka" / "packages" / "regex-0.3.0" / "lib",
         repo_root.parent / "regex" / "lib",
+        repo_root / ".toka" / "packages" / "regex-0.3.0" / "lib",
     ]
     regex_inc = next((p for p in regex_lib_candidates if p.exists()), repo_root.parent / "regex" / "lib")
     compile_cmd = [
