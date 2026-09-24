@@ -3,7 +3,7 @@ import core/str::{str}
 import std/vec::{Vec}
 import std/hashmap::{HashMap}
 import std/env as env
-import stdx/serde/json::{JsonNode}
+import stdx/serde/json::{Document, parse_document}
 import std/math::{is_finite, floor}
 import src/types::{CliOptions, OutputFormat, SearchReport, SearchDiagnostic, BudgetState, BlockRange}
 import src/path_norm::{normalize_cwd, resolves_to_root, compute_identity_key}
@@ -37,34 +37,26 @@ pub shape JsonIdResult (
     id_str: string
 )
 
-fn json_map_extract_id(map: HashMap<string, JsonNode>) -> JsonIdResult {
-    match map.try_borrow(string::from("id")) {
-        auto Option<&JsonNode>::Some(&node) => {
-            match node {
-                auto JsonNode::NumNode(n) => {
-                    if is_finite(n) && n == floor(n) && n >= -9007199254740991.0 && n <= 9007199254740991.0 {
-                        return JsonIdResult(has_id = true, is_valid = true, id_str = i64_to_string(n as i64))
-                    }
-                    return JsonIdResult(has_id = true, is_valid = false, id_str = string::from("null"))
-                }
-                auto JsonNode::StrNode(&s) => {
-                    auto out# = string::from("\"")
-                    out#.push_str(json_escape(s.as_str()).as_str())
-                    out#.push_str("\"")
-                    return JsonIdResult(has_id = true, is_valid = true, id_str = cede out)
-                }
-                auto JsonNode::NullNode(_) => {
-                    return JsonIdResult(has_id = true, is_valid = true, id_str = string::from("null"))
-                }
-                _ => {
-                    return JsonIdResult(has_id = true, is_valid = false, id_str = string::from("null"))
-                }
-            }
-        }
-        _ => {
-            return JsonIdResult(has_id = false, is_valid = true, id_str = string::from("null"))
-        }
+fn json_map_extract_id(document: Document, object: usize) -> JsonIdResult {
+    auto node = document.find(object, "id")
+    if node == 0:usize {
+        return JsonIdResult(has_id = false, is_valid = true, id_str = string::from("null"))
     }
+    auto kind = document.kind(node)
+    if kind == 2:i32 {
+        auto n = document.number(node).unwrap()
+        if is_finite(n) && n == floor(n) && n >= -9007199254740991.0 && n <= 9007199254740991.0 {
+            return JsonIdResult(has_id = true, is_valid = true, id_str = i64_to_string(n as i64))
+        }
+    } else if kind == 3:i32 {
+        auto out# = string::from("\"")
+        out#.push_str(json_escape(document.text(node)).as_str())
+        out#.push_str("\"")
+        return JsonIdResult(has_id = true, is_valid = true, id_str = cede out)
+    } else if kind == 0:i32 {
+        return JsonIdResult(has_id = true, is_valid = true, id_str = string::from("null"))
+    }
+    return JsonIdResult(has_id = true, is_valid = false, id_str = string::from("null"))
 }
 
 fn send_mcp_response(resp: str) -> bool {
@@ -116,22 +108,17 @@ fn is_strict_hex_digit(c: char) -> bool {
     return false
 }
 
-fn is_non_null_arg(node_opt: Option<&JsonNode>) -> bool {
-    match node_opt {
-        auto Option<&JsonNode>::Some(&n) => {
-            match n {
-                auto JsonNode::NullNode(_) => {
-                    return false
-                }
-                _ => {
-                    return true
-                }
-            }
-        }
-        auto Option<&JsonNode>::None => {
-            return false
-        }
+fn is_non_null_arg(document: Document, node: usize) -> bool {
+    return node != 0:usize && document.kind(node) != 0:i32
+}
+
+fn json_positive_usize(document: Document, node: usize) -> Option<usize> {
+    if document.kind(node) != 2:i32 { return Option<usize>::None }
+    auto n = document.number(node).unwrap()
+    if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
+        return Option<usize>::Some(n as usize)
     }
+    return Option<usize>::None
 }
 
 fn hex_char_to_val(c: char) -> usize {
@@ -515,26 +502,18 @@ pub fn run_mcp_server() -> i32 {
             continue
         }
 
-        auto root# = JsonNode::NullNode(0):JsonNode
-        auto parse_err# = false
-        match root#.parse_json(trimmed) {
-            auto Result<str, str>::Ok(rem) => {
-                if rem.trim().len > 0 {
-                    parse_err = true
-                }
-            }
-            auto Result<str, str>::Err(e) => {
-                parse_err = true
-            }
-        }
-        if parse_err {
+        auto parsed = parse_document(trimmed)
+        if parsed.is_err() {
             send_error("null", -32700, "Parse error")
             continue
         }
+        auto document = parsed.unwrap()
+        if document.kind(1:usize) != 5:i32 {
+            send_error("null", -32600, "Invalid Request")
+            continue
+        }
 
-        match root {
-            auto JsonNode::ObjectNode(&map) => {
-                auto id_res = json_map_extract_id(map)
+                auto id_res = json_map_extract_id(document, 1:usize)
                 auto has_id = id_res.has_id
                 auto id_str = id_res.id_str.clone()
 
@@ -544,44 +523,20 @@ pub fn run_mcp_server() -> i32 {
                 }
 
                 // Verify "jsonrpc" == "2.0"
-                auto valid_rpc# = false
-                match map.try_borrow(string::from("jsonrpc")) {
-                    auto Option<&JsonNode>::Some(&rpc_node) => {
-                        match rpc_node {
-                            auto JsonNode::StrNode(&rpc_s) => {
-                                if rpc_s.as_str() == "2.0" {
-                                    valid_rpc = true
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    _ => {}
-                }
+                auto rpc_node = document.find(1:usize, "jsonrpc")
+                auto valid_rpc = document.kind(rpc_node) == 3:i32 && document.text(rpc_node) == "2.0"
                 if !valid_rpc {
                     send_error(id_str.as_str(), -32600, "Invalid Request")
                     continue
                 }
 
                 // Verify "method" is string
-                auto method# = string::new()
-                match map.try_borrow(string::from("method")) {
-                    auto Option<&JsonNode>::Some(&m_node) => {
-                        match m_node {
-                            auto JsonNode::StrNode(&m_s) => {
-                                method = m_s.clone()
-                            }
-                            _ => {
-                                send_error(id_str.as_str(), -32600, "Invalid Request")
-                                continue
-                            }
-                        }
-                    }
-                    _ => {
-                        send_error(id_str.as_str(), -32600, "Invalid Request")
-                        continue
-                    }
+                auto m_node = document.find(1:usize, "method")
+                if document.kind(m_node) != 3:i32 {
+                    send_error(id_str.as_str(), -32600, "Invalid Request")
+                    continue
                 }
+                auto method = string::from(document.text(m_node))
 
                 // Notifications (no id) MUST NOT receive a response per JSON-RPC 2.0
                 if !has_id {
@@ -596,34 +551,13 @@ pub fn run_mcp_server() -> i32 {
                         send_error(id_str.as_str(), -32600, "Invalid Request: server already initialized")
                         continue
                     }
-                    auto req_ver# = string::new()
-                    auto valid_params# = false
-                    match map.try_borrow(string::from("params")) {
-                        auto Option<&JsonNode>::Some(&p_node) => {
-                            match p_node {
-                                auto JsonNode::ObjectNode(&p_map) => {
-                                    match p_map.try_borrow(string::from("protocolVersion")) {
-                                        auto Option<&JsonNode>::Some(&v_node) => {
-                                            match v_node {
-                                                auto JsonNode::StrNode(&v_s) => {
-                                                    req_ver = v_s.clone()
-                                                    valid_params = true
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                    if !valid_params {
+                    auto p_node = document.find(1:usize, "params")
+                    auto v_node = document.find(p_node, "protocolVersion")
+                    if document.kind(p_node) != 5:i32 || document.kind(v_node) != 3:i32 {
                         send_error(id_str.as_str(), -32602, "Invalid params: protocolVersion must be a string")
                         continue
                     }
+                    auto req_ver = string::from(document.text(v_node))
                     auto negotiated = server_state#.handle_initialize(req_ver.as_str())
                     auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")
                     resp#.push_str(id_str.as_str())
@@ -656,49 +590,37 @@ pub fn run_mcp_server() -> i32 {
                         send_error(id_str.as_str(), -32600, "Server not ready: 'notifications/initialized' expected")
                         continue
                     }
-                    match map.try_borrow(string::from("params")) {
-                        auto Option<&JsonNode>::Some(&p_val) => {
-                            match p_val {
-                                auto JsonNode::ObjectNode(&p_map) => {
-                                    auto tool_name# = string::new()
-                                    match p_map.try_borrow(string::from("name")) {
-                                        auto Option<&JsonNode>::Some(&name_node) => {
-                                            match name_node {
-                                                auto JsonNode::StrNode(&n_s) => {
-                                                    tool_name = n_s.clone()
-                                                }
-                                                _ => {
-                                                    send_error(id_str.as_str(), -32602, "Invalid params: 'name' must be a string")
-                                                    continue
-                                                }
-                                            }
-                                        }
-                                        _ => {
-                                            send_error(id_str.as_str(), -32602, "Invalid params: 'name' must be a string")
-                                            continue
-                                        }
+                    auto p_map = document.find(1:usize, "params")
+                    if document.kind(p_map) != 5:i32 {
+                        send_error(id_str.as_str(), -32602, "Invalid params: params must be an object")
+                        continue
+                    }
+                                    auto name_node = document.find(p_map, "name")
+                                    if document.kind(name_node) != 3:i32 {
+                                        send_error(id_str.as_str(), -32602, "Invalid params: 'name' must be a string")
+                                        continue
                                     }
+                                    auto tool_name = string::from(document.text(name_node))
                                     if tool_name.as_str() != "trg_search" && tool_name.as_str() != "trg_view" && tool_name.as_str() != "trg_symbols" {
                                         send_error(id_str.as_str(), -32602, "Invalid params: Unknown tool")
                                         continue
                                     }
 
                                     if tool_name.as_str() == "trg_view" {
-                                        match p_map.try_borrow(string::from("arguments")) {
-                                            auto Option<&JsonNode>::Some(&a_val) => {
-                                                match a_val {
-                                                    auto JsonNode::ObjectNode(&arg_map) => {
-                                                        auto iter# = arg_map.iter()
+                                        auto arg_map = document.find(p_map, "arguments")
+                                        if document.kind(arg_map) != 5:i32 {
+                                            send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
+                                            continue
+                                        }
+                                                        auto arg_node# = document.first(arg_map)
                                                         auto unexp_opt# = Option<string>::None
-                                                        loop true {
-                                                            auto nxt = iter#.next_ref()
-                                                            if nxt.is_none() { break }
-                                                            auto entry = nxt.unwrap()
-                                                            auto k = entry.key().as_str()
+                                                        loop arg_node != 0:usize {
+                                                            auto k = document.key(arg_node)
                                                             if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" && k != "symbol" && k != "scope" && k != "continuation" && k != "continuation_token" {
-                                                                unexp_opt = Option<string>::Some(entry.key().clone())
+                                                                unexp_opt = Option<string>::Some(string::from(k))
                                                                 break
                                                             }
+                                                            arg_node = document.next(arg_node)
                                                         }
                                                         if unexp_opt.is_some() {
                                                             auto err# = string::from("Invalid params: unexpected property '")
@@ -710,34 +632,30 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto cont_token_str# = string::new()
                                                         auto has_cont_token# = false
-                                                        match arg_map.try_borrow(string::from("continuation_token")) {
-                                                            auto Option<&JsonNode>::Some(&ctn) => {
-                                                                match ctn {
-                                                                    auto JsonNode::StrNode(&cts) => {
-                                                                        if cts.len() > 0 {
-                                                                            cont_token_str = cts.clone()
-                                                                            has_cont_token = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {}
-                                                                    _ => {
-                                                                        send_error(id_str.as_str(), -32602, "Invalid params: 'continuation_token' must be a string or null")
-                                                                        continue
-                                                                    }
+                                                        auto ctn = document.find(arg_map, "continuation_token")
+                                                        if ctn != 0:usize {
+                                                            auto kind = document.kind(ctn)
+                                                            if kind == 3:i32 {
+                                                                auto cts = document.text(ctn)
+                                                                if cts.len > 0:usize {
+                                                                    cont_token_str = string::from(cts)
+                                                                    has_cont_token = true
                                                                 }
+                                                            } else if kind != 0:i32 {
+                                                                send_error(id_str.as_str(), -32602, "Invalid params: 'continuation_token' must be a string or null")
+                                                                continue
                                                             }
-                                                            _ => {}
                                                         }
 
                                                         if has_cont_token {
-                                                            auto conflict = is_non_null_arg(arg_map.try_borrow(string::from("path"))) ||
-                                                                            is_non_null_arg(arg_map.try_borrow(string::from("line"))) ||
-                                                                            is_non_null_arg(arg_map.try_borrow(string::from("lines"))) ||
-                                                                            is_non_null_arg(arg_map.try_borrow(string::from("symbol"))) ||
-                                                                            is_non_null_arg(arg_map.try_borrow(string::from("scope"))) ||
-                                                                            is_non_null_arg(arg_map.try_borrow(string::from("block"))) ||
-                                                                            is_non_null_arg(arg_map.try_borrow(string::from("context"))) ||
-                                                                            is_non_null_arg(arg_map.try_borrow(string::from("continuation")))
+                                                            auto conflict = is_non_null_arg(document, document.find(arg_map, "path")) ||
+                                                                            is_non_null_arg(document, document.find(arg_map, "line")) ||
+                                                                            is_non_null_arg(document, document.find(arg_map, "lines")) ||
+                                                                            is_non_null_arg(document, document.find(arg_map, "symbol")) ||
+                                                                            is_non_null_arg(document, document.find(arg_map, "scope")) ||
+                                                                            is_non_null_arg(document, document.find(arg_map, "block")) ||
+                                                                            is_non_null_arg(document, document.find(arg_map, "context")) ||
+                                                                            is_non_null_arg(document, document.find(arg_map, "continuation"))
                                                             if conflict {
                                                                 send_error(id_str.as_str(), -32602, "Invalid params: 'continuation_token' cannot be used with path, line, lines, symbol, scope, block, context, or continuation")
                                                                 continue
@@ -746,19 +664,13 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto path_str# = string::new()
                                                         auto has_path# = false
-                                                        match arg_map.try_borrow(string::from("path")) {
-                                                            auto Option<&JsonNode>::Some(&pn) => {
-                                                                match pn {
-                                                                    auto JsonNode::StrNode(&ps) => {
-                                                                        if ps.len() > 0 {
-                                                                            path_str = ps.clone()
-                                                                            has_path = true
-                                                                        }
-                                                                    }
-                                                                    _ => {}
-                                                                }
+                                                        auto pn = document.find(arg_map, "path")
+                                                        if document.kind(pn) == 3:i32 {
+                                                            auto ps = document.text(pn)
+                                                            if ps.len > 0:usize {
+                                                                path_str = string::from(ps)
+                                                                has_path = true
                                                             }
-                                                            _ => {}
                                                         }
                                                         if !has_cont_token {
                                                             if !has_path {
@@ -778,23 +690,15 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto line_opt# = Option<usize>::None
                                                         auto line_err# = false
-                                                        match arg_map.try_borrow(string::from("line")) {
-                                                            auto Option<&JsonNode>::Some(&ln) => {
-                                                                match ln {
-                                                                    auto JsonNode::NumNode(n) => {
-                                                                        if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
-                                                                            line_opt = Option<usize>::Some(n as usize)
-                                                                        } else {
-                                                                            line_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {}
-                                                                    _ => {
-                                                                        line_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto ln = document.find(arg_map, "line")
+                                                        if ln != 0:usize {
+                                                            auto kind = document.kind(ln)
+                                                            if kind == 2:i32 {
+                                                                auto n = document.number(ln).unwrap()
+                                                                if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
+                                                                    line_opt = Option<usize>::Some(n as usize)
+                                                                } else { line_err = true }
+                                                            } else if kind != 0:i32 { line_err = true }
                                                         }
                                                         if line_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'line' must be an integer >= 1 or null")
@@ -803,25 +707,15 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto context_val# = 10:usize
                                                         auto context_err# = false
-                                                        match arg_map.try_borrow(string::from("context")) {
-                                                            auto Option<&JsonNode>::Some(&cn) => {
-                                                                match cn {
-                                                                    auto JsonNode::NumNode(n) => {
-                                                                        if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 1000.0 {
-                                                                            context_val = n as usize
-                                                                        } else {
-                                                                            context_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {
-                                                                        context_val = 10:usize
-                                                                    }
-                                                                    _ => {
-                                                                        context_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto cn = document.find(arg_map, "context")
+                                                        if cn != 0:usize {
+                                                            auto kind = document.kind(cn)
+                                                            if kind == 2:i32 {
+                                                                auto n = document.number(cn).unwrap()
+                                                                if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 1000.0 {
+                                                                    context_val = n as usize
+                                                                } else { context_err = true }
+                                                            } else if kind != 0:i32 { context_err = true }
                                                         }
                                                         if context_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'context' must be an integer between 0 and 1000")
@@ -830,18 +724,10 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto block_val# = false
                                                         auto block_err# = false
-                                                        match arg_map.try_borrow(string::from("block")) {
-                                                            auto Option<&JsonNode>::Some(&bn) => {
-                                                                match bn {
-                                                                    auto JsonNode::BoolNode(b) => {
-                                                                        block_val = b
-                                                                    }
-                                                                    _ => {
-                                                                        block_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto bn = document.find(arg_map, "block")
+                                                        if bn != 0:usize {
+                                                            if document.kind(bn) == 1:i32 { block_val = document.boolean(bn).unwrap() }
+                                                            else { block_err = true }
                                                         }
                                                         if block_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'block' must be a boolean")
@@ -850,18 +736,10 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto continuation_val# = false
                                                         auto continuation_err# = false
-                                                        match arg_map.try_borrow(string::from("continuation")) {
-                                                            auto Option<&JsonNode>::Some(&cn) => {
-                                                                match cn {
-                                                                    auto JsonNode::BoolNode(b) => {
-                                                                        continuation_val = b
-                                                                    }
-                                                                    _ => {
-                                                                        continuation_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto continuation_node = document.find(arg_map, "continuation")
+                                                        if continuation_node != 0:usize {
+                                                            if document.kind(continuation_node) == 1:i32 { continuation_val = document.boolean(continuation_node).unwrap() }
+                                                            else { continuation_err = true }
                                                         }
                                                         if continuation_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'continuation' must be a boolean")
@@ -871,63 +749,30 @@ pub fn run_mcp_server() -> i32 {
                                                         auto lines_range_opt# = Option<BlockRange>::None
                                                         auto lines_err# = false
                                                         auto lines_order_err# = false
-                                                        match arg_map.try_borrow(string::from("lines")) {
-                                                            auto Option<&JsonNode>::Some(&lsn) => {
-                                                                match lsn {
-                                                                    auto JsonNode::ArrayNode(&arr) => {
-                                                                        if arr.len() == 2:usize {
-                                                                            auto &item0 = arr.borrow(0)
-                                                                            auto &item1 = arr.borrow(1)
-                                                                            auto s_num# = 0:usize
-                                                                            auto e_num# = 0:usize
-                                                                            auto ok0# = false
-                                                                            auto ok1# = false
-                                                                            match item0 {
-                                                                                auto JsonNode::NumNode(n) => {
-                                                                                    if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
-                                                                                        s_num = n as usize
-                                                                                        ok0 = true
-                                                                                    }
-                                                                                }
-                                                                                _ => {}
-                                                                            }
-                                                                            match item1 {
-                                                                                auto JsonNode::NumNode(n) => {
-                                                                                    if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
-                                                                                        e_num = n as usize
-                                                                                        ok1 = true
-                                                                                    }
-                                                                                }
-                                                                                _ => {}
-                                                                            }
-                                                                            if ok0 && ok1 {
-                                                                                if s_num <= e_num {
-                                                                                    lines_range_opt = Option<BlockRange>::Some(BlockRange(start = s_num, end = e_num))
-                                                                                } else {
-                                                                                    lines_order_err = true
-                                                                                }
-                                                                            } else {
-                                                                                lines_err = true
-                                                                            }
-                                                                        } else {
-                                                                            lines_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::StrNode(&s) => {
-                                                                        auto pr = parse_range_spec(s.as_str())
-                                                                        if pr.is_ok() {
-                                                                            lines_range_opt = Option<BlockRange>::Some(pr.unwrap())
-                                                                        } else {
-                                                                            lines_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {}
-                                                                    _ => {
-                                                                        lines_err = true
+                                                        auto lsn = document.find(arg_map, "lines")
+                                                        if lsn != 0:usize {
+                                                            auto kind = document.kind(lsn)
+                                                            if kind == 4:i32 {
+                                                                auto item0 = document.first(lsn)
+                                                                auto item1 = document.next(item0)
+                                                                if item0 == 0:usize || item1 == 0:usize || document.next(item1) != 0:usize {
+                                                                    lines_err = true
+                                                                } else {
+                                                                    auto start_num = json_positive_usize(document, item0)
+                                                                    auto end_num = json_positive_usize(document, item1)
+                                                                    if start_num.is_none() || end_num.is_none() { lines_err = true }
+                                                                    else {
+                                                                        auto s_num = start_num.unwrap()
+                                                                        auto e_num = end_num.unwrap()
+                                                                        if s_num > e_num { lines_order_err = true }
+                                                                        else { lines_range_opt = Option<BlockRange>::Some(BlockRange(start = s_num, end = e_num)) }
                                                                     }
                                                                 }
-                                                            }
-                                                            _ => {}
+                                                            } else if kind == 3:i32 {
+                                                                auto pr = parse_range_spec(document.text(lsn))
+                                                                if pr.is_ok() { lines_range_opt = Option<BlockRange>::Some(pr.unwrap()) }
+                                                                else { lines_err = true }
+                                                            } else if kind != 0:i32 { lines_err = true }
                                                         }
                                                         if lines_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'lines' must be an array of two positive integers [start, end] or a range string '<start>-<end>'")
@@ -940,23 +785,14 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto symbol_raw_opt# = Option<string>::None
                                                         auto symbol_err# = false
-                                                        match arg_map.try_borrow(string::from("symbol")) {
-                                                            auto Option<&JsonNode>::Some(&sn) => {
-                                                                match sn {
-                                                                    auto JsonNode::StrNode(&s) => {
-                                                                        if s.len() > 0 {
-                                                                            symbol_raw_opt = Option<string>::Some(s.clone())
-                                                                        } else {
-                                                                            symbol_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {}
-                                                                    _ => {
-                                                                        symbol_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto sn = document.find(arg_map, "symbol")
+                                                        if sn != 0:usize {
+                                                            auto kind = document.kind(sn)
+                                                            if kind == 3:i32 {
+                                                                auto s = document.text(sn)
+                                                                if s.len > 0:usize { symbol_raw_opt = Option<string>::Some(string::from(s)) }
+                                                                else { symbol_err = true }
+                                                            } else if kind != 0:i32 { symbol_err = true }
                                                         }
                                                         if symbol_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'symbol' must be a non-empty string or null")
@@ -965,23 +801,14 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto scope_raw_opt# = Option<string>::None
                                                         auto scope_err# = false
-                                                        match arg_map.try_borrow(string::from("scope")) {
-                                                            auto Option<&JsonNode>::Some(&scn) => {
-                                                                match scn {
-                                                                    auto JsonNode::StrNode(&scs) => {
-                                                                        if scs.len() > 0 {
-                                                                            scope_raw_opt = Option<string>::Some(scs.clone())
-                                                                        } else {
-                                                                            scope_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {}
-                                                                    _ => {
-                                                                        scope_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto scn = document.find(arg_map, "scope")
+                                                        if scn != 0:usize {
+                                                            auto kind = document.kind(scn)
+                                                            if kind == 3:i32 {
+                                                                auto scs = document.text(scn)
+                                                                if scs.len > 0:usize { scope_raw_opt = Option<string>::Some(string::from(scs)) }
+                                                                else { scope_err = true }
+                                                            } else if kind != 0:i32 { scope_err = true }
                                                         }
                                                         if scope_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'scope' must be a non-empty string or null")
@@ -1053,7 +880,7 @@ pub fn run_mcp_server() -> i32 {
                                                             }
                                                         }
 
-                                                        auto has_explicit_context = arg_map.try_borrow(string::from("context")).is_some()
+                                                        auto has_explicit_context = document.find(arg_map, "context") != 0:usize
 
                                                         if !has_cont_token {
                                                             if parsed_symbol.is_some() {
@@ -1087,33 +914,24 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto max_lines_opt# = Option<usize>::Some(200:usize)
                                                         auto max_lines_err# = false
-                                                        match arg_map.try_borrow(string::from("max_lines")) {
-                                                            auto Option<&JsonNode>::Some(&mln) => {
-                                                                match mln {
-                                                                    auto JsonNode::NumNode(n) => {
-                                                                        if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 10000.0 {
-                                                                            max_lines_opt = Option<usize>::Some(n as usize)
-                                                                        } else {
-                                                                            max_lines_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {
-                                                                        max_lines_opt = Option<usize>::None
-                                                                    }
-                                                                    _ => {
-                                                                        max_lines_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto mln = document.find(arg_map, "max_lines")
+                                                        if mln != 0:usize {
+                                                            auto kind = document.kind(mln)
+                                                            if kind == 2:i32 {
+                                                                auto n = document.number(mln).unwrap()
+                                                                if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 10000.0 {
+                                                                    max_lines_opt = Option<usize>::Some(n as usize)
+                                                                } else { max_lines_err = true }
+                                                            } else if kind == 0:i32 { max_lines_opt = Option<usize>::None }
+                                                            else { max_lines_err = true }
                                                         }
                                                         if max_lines_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'max_lines' must be an integer between 1 and 10000 or null")
                                                             continue
                                                         }
 
-                                                        auto has_mrb = arg_map.try_borrow(string::from("max_result_bytes")).is_some()
-                                                        auto has_mb = arg_map.try_borrow(string::from("max_bytes")).is_some()
+                                                        auto has_mrb = document.find(arg_map, "max_result_bytes") != 0:usize
+                                                        auto has_mb = document.find(arg_map, "max_bytes") != 0:usize
                                                         if has_mrb && has_mb {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: Cannot provide both 'max_bytes' and 'max_result_bytes'")
                                                             continue
@@ -1123,44 +941,32 @@ pub fn run_mcp_server() -> i32 {
                                                         auto max_bytes_err# = false
                                                         auto max_bytes_err_msg# = string::from("Invalid params: 'max_result_bytes' must be a size string (e.g. '64K'), non-negative integer, or null")
 
-                                                        auto check_bytes_node# = Option<&JsonNode>::None
+                                                        auto check_bytes_node# = 0:usize
                                                         auto key_used# = "max_result_bytes"
                                                         if has_mrb {
-                                                            check_bytes_node = arg_map.try_borrow(string::from("max_result_bytes"))
+                                                            check_bytes_node = document.find(arg_map, "max_result_bytes")
                                                         } else if has_mb {
-                                                            check_bytes_node = arg_map.try_borrow(string::from("max_bytes"))
+                                                            check_bytes_node = document.find(arg_map, "max_bytes")
                                                             key_used = "max_bytes"
                                                         }
 
-                                                        match check_bytes_node {
-                                                            auto Option<&JsonNode>::Some(&mbn) => {
-                                                                match mbn {
-                                                                    auto JsonNode::NumNode(n) => {
-                                                                        if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
-                                                                            max_bytes_opt = Option<usize>::Some(n as usize)
-                                                                        } else {
-                                                                            max_bytes_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::StrNode(&s) => {
-                                                                        auto p_res = parse_size_bytes_strict(s.as_str(), key_used)
-                                                                        if p_res.is_ok() {
-                                                                            max_bytes_opt = Option<usize>::Some(p_res.unwrap())
-                                                                        } else {
-                                                                            max_bytes_err = true
-                                                                            max_bytes_err_msg = string::from("Invalid params: ")
-                                                                            max_bytes_err_msg#.push_str(p_res.unwrap_err().as_str())
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {
-                                                                        max_bytes_opt = Option<usize>::None
-                                                                    }
-                                                                    _ => {
-                                                                        max_bytes_err = true
-                                                                    }
+                                                        if check_bytes_node != 0:usize {
+                                                            auto kind = document.kind(check_bytes_node)
+                                                            if kind == 2:i32 {
+                                                                auto n = document.number(check_bytes_node).unwrap()
+                                                                if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
+                                                                    max_bytes_opt = Option<usize>::Some(n as usize)
+                                                                } else { max_bytes_err = true }
+                                                            } else if kind == 3:i32 {
+                                                                auto p_res = parse_size_bytes_strict(document.text(check_bytes_node), key_used)
+                                                                if p_res.is_ok() { max_bytes_opt = Option<usize>::Some(p_res.unwrap()) }
+                                                                else {
+                                                                    max_bytes_err = true
+                                                                    max_bytes_err_msg = string::from("Invalid params: ")
+                                                                    max_bytes_err_msg#.push_str(p_res.unwrap_err().as_str())
                                                                 }
-                                                            }
-                                                            _ => {}
+                                                            } else if kind == 0:i32 { max_bytes_opt = Option<usize>::None }
+                                                            else { max_bytes_err = true }
                                                         }
                                                         if max_bytes_err {
                                                             send_error(id_str.as_str(), -32602, max_bytes_err_msg.as_str())
@@ -1169,25 +975,15 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto max_columns_opt# = Option<usize>::None
                                                         auto max_columns_err# = false
-                                                        match arg_map.try_borrow(string::from("max_columns")) {
-                                                            auto Option<&JsonNode>::Some(&mcn) => {
-                                                                match mcn {
-                                                                    auto JsonNode::NumNode(n) => {
-                                                                        if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
-                                                                            max_columns_opt = Option<usize>::Some(n as usize)
-                                                                        } else {
-                                                                            max_columns_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {
-                                                                        max_columns_opt = Option<usize>::None
-                                                                    }
-                                                                    _ => {
-                                                                        max_columns_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto mcn = document.find(arg_map, "max_columns")
+                                                        if mcn != 0:usize {
+                                                            auto kind = document.kind(mcn)
+                                                            if kind == 2:i32 {
+                                                                auto n = document.number(mcn).unwrap()
+                                                                if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
+                                                                    max_columns_opt = Option<usize>::Some(n as usize)
+                                                                } else { max_columns_err = true }
+                                                            } else if kind != 0:i32 { max_columns_err = true }
                                                         }
                                                         if max_columns_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'max_columns' must be a non-negative integer or null")
@@ -1196,25 +992,15 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto max_block_lines_val# = 80:usize
                                                         auto max_block_lines_err# = false
-                                                        match arg_map.try_borrow(string::from("max_block_lines")) {
-                                                            auto Option<&JsonNode>::Some(&mbln) => {
-                                                                match mbln {
-                                                                    auto JsonNode::NumNode(n) => {
-                                                                        if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 1000.0 {
-                                                                            max_block_lines_val = n as usize
-                                                                        } else {
-                                                                            max_block_lines_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {
-                                                                        max_block_lines_val = 80:usize
-                                                                    }
-                                                                    _ => {
-                                                                        max_block_lines_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto mbln = document.find(arg_map, "max_block_lines")
+                                                        if mbln != 0:usize {
+                                                            auto kind = document.kind(mbln)
+                                                            if kind == 2:i32 {
+                                                                auto n = document.number(mbln).unwrap()
+                                                                if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 1000.0 {
+                                                                    max_block_lines_val = n as usize
+                                                                } else { max_block_lines_err = true }
+                                                            } else if kind != 0:i32 { max_block_lines_err = true }
                                                         }
                                                         if max_block_lines_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'max_block_lines' must be an integer between 1 and 1000 or null")
@@ -1223,24 +1009,13 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto format_is_json# = false
                                                         auto format_err# = false
-                                                        match arg_map.try_borrow(string::from("format")) {
-                                                            auto Option<&JsonNode>::Some(&fmn) => {
-                                                                match fmn {
-                                                                    auto JsonNode::StrNode(&fms) => {
-                                                                        if fms.as_str() == "json" {
-                                                                            format_is_json = true
-                                                                        } else if fms.as_str() == "text" {
-                                                                            format_is_json = false
-                                                                        } else {
-                                                                            format_err = true
-                                                                        }
-                                                                    }
-                                                                    _ => {
-                                                                        format_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto fmn = document.find(arg_map, "format")
+                                                        if fmn != 0:usize {
+                                                            if document.kind(fmn) == 3:i32 {
+                                                                auto fms = document.text(fmn)
+                                                                if fms == "json" { format_is_json = true }
+                                                                else if fms != "text" { format_err = true }
+                                                            } else { format_err = true }
                                                         }
                                                         if format_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'format' must be one of [\"text\", \"json\"]")
@@ -1437,36 +1212,23 @@ pub fn run_mcp_server() -> i32 {
                                                         resp#.push_str("\n")
                                                         send_mcp_response(resp.as_str())
                                                         continue
-                                                    }
-                                                    _ => {
-                                                        send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
-                                                        continue
-                                                    }
-                                                }
-                                            }
-                                            _ => {
-                                                send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
-                                                continue
-                                            }
-                                        }
                                     }
 
                                     if tool_name.as_str() == "trg_symbols" {
-                                        match p_map.try_borrow(string::from("arguments")) {
-                                            auto Option<&JsonNode>::Some(&a_val) => {
-                                                match a_val {
-                                                    auto JsonNode::ObjectNode(&arg_map) => {
-                                                        auto iter# = arg_map.iter()
+                                        auto arg_map = document.find(p_map, "arguments")
+                                        if document.kind(arg_map) != 5:i32 {
+                                            send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
+                                            continue
+                                        }
+                                                        auto arg_node# = document.first(arg_map)
                                                         auto unexp_opt# = Option<string>::None
-                                                        loop true {
-                                                            auto nxt = iter#.next_ref()
-                                                            if nxt.is_none() { break }
-                                                            auto entry = nxt.unwrap()
-                                                            auto k = entry.key().as_str()
+                                                        loop arg_node != 0:usize {
+                                                            auto k = document.key(arg_node)
                                                             if k != "path" && k != "kinds" && k != "max_symbols" && k != "max_result_bytes" && k != "max_bytes" && k != "format" {
-                                                                unexp_opt = Option<string>::Some(entry.key().clone())
+                                                                unexp_opt = Option<string>::Some(string::from(k))
                                                                 break
                                                             }
+                                                            arg_node = document.next(arg_node)
                                                         }
                                                         if unexp_opt.is_some() {
                                                             auto err# = string::from("Invalid params: unexpected property '")
@@ -1478,19 +1240,13 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto path_str# = string::new()
                                                         auto has_path# = false
-                                                        match arg_map.try_borrow(string::from("path")) {
-                                                            auto Option<&JsonNode>::Some(&pn) => {
-                                                                match pn {
-                                                                    auto JsonNode::StrNode(&ps) => {
-                                                                        if ps.len() > 0 {
-                                                                            path_str = ps.clone()
-                                                                            has_path = true
-                                                                        }
-                                                                    }
-                                                                    _ => {}
-                                                                }
+                                                        auto pn = document.find(arg_map, "path")
+                                                        if document.kind(pn) == 3:i32 {
+                                                            auto ps = document.text(pn)
+                                                            if ps.len > 0:usize {
+                                                                path_str = string::from(ps)
+                                                                has_path = true
                                                             }
-                                                            _ => {}
                                                         }
                                                         if !has_path {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'path' is required and must be a non-empty string")
@@ -1508,40 +1264,25 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto kinds_opt# = Option<Vec<string>>::None
                                                         auto kinds_err# = false
-                                                        match arg_map.try_borrow(string::from("kinds")) {
-                                                            auto Option<&JsonNode>::Some(&kn) => {
-                                                                match kn {
-                                                                    auto JsonNode::ArrayNode(&k_arr) => {
-                                                                        if k_arr.len() == 0 {
+                                                        auto kn = document.find(arg_map, "kinds")
+                                                        if kn != 0:usize {
+                                                            auto kind = document.kind(kn)
+                                                            if kind == 4:i32 {
+                                                                auto elem# = document.first(kn)
+                                                                if elem == 0:usize { kinds_err = true }
+                                                                else {
+                                                                    auto k_vec# = Vec<string>::new()
+                                                                    loop elem != 0:usize {
+                                                                        if document.kind(elem) != 3:i32 {
                                                                             kinds_err = true
-                                                                        } else {
-                                                                            auto k_vec# = Vec<string>::new()
-                                                                            auto ki# = 0:usize
-                                                                            loop ki < k_arr.len() {
-                                                                                auto &k_elem = k_arr.borrow(ki)
-                                                                                match k_elem {
-                                                                                    auto JsonNode::StrNode(&ks) => {
-                                                                                        k_vec#.push(ks.clone())
-                                                                                    }
-                                                                                    _ => {
-                                                                                        kinds_err = true
-                                                                                        break
-                                                                                    }
-                                                                                }
-                                                                                ki = ki + 1
-                                                                            }
-                                                                            if !kinds_err {
-                                                                                kinds_opt = Option<Vec<string>>::Some(cede k_vec)
-                                                                            }
+                                                                            break
                                                                         }
+                                                                        k_vec#.push(string::from(document.text(elem)))
+                                                                        elem = document.next(elem)
                                                                     }
-                                                                    auto JsonNode::NullNode(_) => {}
-                                                                    _ => {
-                                                                        kinds_err = true
-                                                                    }
+                                                                    if !kinds_err { kinds_opt = Option<Vec<string>>::Some(cede k_vec) }
                                                                 }
-                                                            }
-                                                            _ => {}
+                                                            } else if kind != 0:i32 { kinds_err = true }
                                                         }
                                                         if kinds_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'kinds' must be a non-empty array of strings or null")
@@ -1550,31 +1291,23 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto max_symbols_opt# = Option<usize>::None
                                                         auto max_symbols_err# = false
-                                                        match arg_map.try_borrow(string::from("max_symbols")) {
-                                                            auto Option<&JsonNode>::Some(&ms_node) => {
-                                                                match ms_node {
-                                                                    auto JsonNode::NumNode(n) => {
-                                                                        if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 10000.0 {
-                                                                            max_symbols_opt = Option<usize>::Some(n as usize)
-                                                                        } else {
-                                                                            max_symbols_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {}
-                                                                    _ => {
-                                                                        max_symbols_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto ms_node = document.find(arg_map, "max_symbols")
+                                                        if ms_node != 0:usize {
+                                                            auto kind = document.kind(ms_node)
+                                                            if kind == 2:i32 {
+                                                                auto n = document.number(ms_node).unwrap()
+                                                                if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 10000.0 {
+                                                                    max_symbols_opt = Option<usize>::Some(n as usize)
+                                                                } else { max_symbols_err = true }
+                                                            } else if kind != 0:i32 { max_symbols_err = true }
                                                         }
                                                         if max_symbols_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'max_symbols' must be an integer between 1 and 10000 or null")
                                                             continue
                                                         }
 
-                                                        auto has_mrb = arg_map.try_borrow(string::from("max_result_bytes")).is_some()
-                                                        auto has_mb = arg_map.try_borrow(string::from("max_bytes")).is_some()
+                                                        auto has_mrb = document.find(arg_map, "max_result_bytes") != 0:usize
+                                                        auto has_mb = document.find(arg_map, "max_bytes") != 0:usize
                                                         if has_mrb && has_mb {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: Cannot provide both 'max_bytes' and 'max_result_bytes'")
                                                             continue
@@ -1584,44 +1317,32 @@ pub fn run_mcp_server() -> i32 {
                                                         auto max_bytes_err# = false
                                                         auto max_bytes_err_msg# = string::from("Invalid params: 'max_result_bytes' must be a size string (e.g. '64K'), non-negative integer, or null")
 
-                                                        auto check_bytes_node# = Option<&JsonNode>::None
+                                                        auto check_bytes_node# = 0:usize
                                                         auto key_used# = "max_result_bytes"
                                                         if has_mrb {
-                                                            check_bytes_node = arg_map.try_borrow(string::from("max_result_bytes"))
+                                                            check_bytes_node = document.find(arg_map, "max_result_bytes")
                                                         } else if has_mb {
-                                                            check_bytes_node = arg_map.try_borrow(string::from("max_bytes"))
+                                                            check_bytes_node = document.find(arg_map, "max_bytes")
                                                             key_used = "max_bytes"
                                                         }
 
-                                                        match check_bytes_node {
-                                                            auto Option<&JsonNode>::Some(&mbn) => {
-                                                                match mbn {
-                                                                    auto JsonNode::NumNode(n) => {
-                                                                        if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
-                                                                            max_bytes_opt = Option<usize>::Some(n as usize)
-                                                                        } else {
-                                                                            max_bytes_err = true
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::StrNode(&s) => {
-                                                                        auto p_res = parse_size_bytes_strict(s.as_str(), key_used)
-                                                                        if p_res.is_ok() {
-                                                                            max_bytes_opt = Option<usize>::Some(p_res.unwrap())
-                                                                        } else {
-                                                                            max_bytes_err = true
-                                                                            max_bytes_err_msg = string::from("Invalid params: ")
-                                                                            max_bytes_err_msg#.push_str(p_res.unwrap_err().as_str())
-                                                                        }
-                                                                    }
-                                                                    auto JsonNode::NullNode(_) => {
-                                                                        max_bytes_opt = Option<usize>::None
-                                                                    }
-                                                                    _ => {
-                                                                        max_bytes_err = true
-                                                                    }
+                                                        if check_bytes_node != 0:usize {
+                                                            auto kind = document.kind(check_bytes_node)
+                                                            if kind == 2:i32 {
+                                                                auto n = document.number(check_bytes_node).unwrap()
+                                                                if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
+                                                                    max_bytes_opt = Option<usize>::Some(n as usize)
+                                                                } else { max_bytes_err = true }
+                                                            } else if kind == 3:i32 {
+                                                                auto p_res = parse_size_bytes_strict(document.text(check_bytes_node), key_used)
+                                                                if p_res.is_ok() { max_bytes_opt = Option<usize>::Some(p_res.unwrap()) }
+                                                                else {
+                                                                    max_bytes_err = true
+                                                                    max_bytes_err_msg = string::from("Invalid params: ")
+                                                                    max_bytes_err_msg#.push_str(p_res.unwrap_err().as_str())
                                                                 }
-                                                            }
-                                                            _ => {}
+                                                            } else if kind == 0:i32 { max_bytes_opt = Option<usize>::None }
+                                                            else { max_bytes_err = true }
                                                         }
                                                         if max_bytes_err {
                                                             send_error(id_str.as_str(), -32602, max_bytes_err_msg.as_str())
@@ -1630,24 +1351,13 @@ pub fn run_mcp_server() -> i32 {
 
                                                         auto format_is_json# = false
                                                         auto format_err# = false
-                                                        match arg_map.try_borrow(string::from("format")) {
-                                                            auto Option<&JsonNode>::Some(&fmn) => {
-                                                                match fmn {
-                                                                    auto JsonNode::StrNode(&fms) => {
-                                                                        if fms.as_str() == "json" {
-                                                                            format_is_json = true
-                                                                        } else if fms.as_str() == "text" {
-                                                                            format_is_json = false
-                                                                        } else {
-                                                                            format_err = true
-                                                                        }
-                                                                    }
-                                                                    _ => {
-                                                                        format_err = true
-                                                                    }
-                                                                }
-                                                            }
-                                                            _ => {}
+                                                        auto fmn = document.find(arg_map, "format")
+                                                        if fmn != 0:usize {
+                                                            if document.kind(fmn) == 3:i32 {
+                                                                auto fms = document.text(fmn)
+                                                                if fms == "json" { format_is_json = true }
+                                                                else if fms != "text" { format_err = true }
+                                                            } else { format_err = true }
                                                         }
                                                         if format_err {
                                                             send_error(id_str.as_str(), -32602, "Invalid params: 'format' must be one of [\"text\", \"json\"]")
@@ -1732,42 +1442,16 @@ pub fn run_mcp_server() -> i32 {
                                                         resp#.push_str("\n")
                                                         send_mcp_response(resp.as_str())
                                                         continue
-                                                    }
-                                                    _ => {
-                                                        send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
-                                                        continue
-                                                    }
-                                                }
-                                            }
-                                            _ => {
-                                                send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
-                                                continue
-                                            }
-                                        }
                                     }
 
-                                    match p_map.try_borrow(string::from("arguments")) {
-                                        auto Option<&JsonNode>::Some(&a_val) => {
-                                            auto is_format_json# = false
-                                            match a_val {
-                                                auto JsonNode::ObjectNode(&arg_map) => {
-                                                    match arg_map.try_borrow(string::from("format")) {
-                                                        auto Option<&JsonNode>::Some(&fn_node) => {
-                                                            match fn_node {
-                                                                auto JsonNode::StrNode(&fs) => {
-                                                                    if fs.as_str() == "json" {
-                                                                        is_format_json = true
-                                                                    }
-                                                                }
-                                                                _ => {}
-                                                            }
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                                _ => {}
-                                            }
-                                            auto build_res = build_mcp_cli_args(a_val, startup_cwd.as_str())
+                                    auto arg_map = document.find(p_map, "arguments")
+                                    if document.kind(arg_map) != 5:i32 {
+                                        send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
+                                        continue
+                                    }
+                                    auto format_node = document.find(arg_map, "format")
+                                    auto is_format_json = document.kind(format_node) == 3:i32 && document.text(format_node) == "json"
+                                            auto build_res = build_mcp_cli_args(document, arg_map, startup_cwd.as_str())
                                             if build_res.is_err() {
                                                 send_error(id_str.as_str(), -32602, build_res.unwrap_err().as_str())
                                                 continue
@@ -1819,29 +1503,9 @@ pub fn run_mcp_server() -> i32 {
                                                     }
                                                     auto resp = format_tool_call_response(id_str, report, search_opts, writer, server_state.negotiated_version.as_str(), is_format_json)
                                                     send_mcp_response(resp.as_str())
-                                        }
-                                        _ => {
-                                            send_error(id_str.as_str(), -32602, "Invalid params: arguments must be an object")
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    send_error(id_str.as_str(), -32602, "Invalid params: params must be an object")
-                                }
-                            }
-                        }
-                        _ => {
-                            send_error(id_str.as_str(), -32602, "Invalid params: params must be an object")
-                        }
-                    }
                 } else {
                     send_error(id_str.as_str(), -32601, "Method not found")
                 }
-            }
-            _ => {
-                send_error("null", -32600, "Invalid Request")
-            }
-        }
     }
     return 0
 }
