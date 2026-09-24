@@ -1,0 +1,3 @@
+import src/file_types::{print_type_list}
+
+fn main() -> i32 { return print_type_list() }

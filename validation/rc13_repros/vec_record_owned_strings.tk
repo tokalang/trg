@@ -1,0 +1,12 @@
+import std/vec::{Vec}
+
+shape Item(name: string, extension: string)
+
+fn main() -> i32 {
+    auto values# = Vec<Item>::new()
+    values#.push(Item(name = string::from("cpp"), extension = string::from("h")))
+    auto taken = values#.pop().unwrap()
+    if !taken.name.as_str().equals("cpp") { return 1 }
+    if !taken.extension.as_str().equals("h") { return 2 }
+    return 0
+}

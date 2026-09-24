@@ -1,0 +1,21 @@
+import src/file_types::{lookup_type_extensions, extract_file_extension}
+
+fn main() -> i32 {
+    auto cpp_result = lookup_type_extensions("c++")
+    if cpp_result.is_err() { return 1 }
+    auto cpp = cpp_result.unwrap()
+    if cpp.len() != 6:usize || !cpp.get(0:usize).as_str().equals("cc") ||
+       !cpp.get(5:usize).as_str().equals("hxx") { return 2 }
+
+    auto py_result = lookup_type_extensions("py")
+    if py_result.is_err() { return 3 }
+    auto py = py_result.unwrap()
+    if py.len() != 2:usize || !py.get(0:usize).as_str().equals("py") ||
+       !py.get(1:usize).as_str().equals("pyi") { return 4 }
+
+    if lookup_type_extensions("not-a-type").is_ok() { return 5 }
+    if !extract_file_extension("src/header.cpp").equals("cpp") { return 6 }
+    if extract_file_extension("src/.hidden").len != 0:usize { return 7 }
+    if extract_file_extension("src/").len != 0:usize { return 8 }
+    return 0
+}

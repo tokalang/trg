@@ -445,6 +445,8 @@ int trg_win_is_readable_stdin(void) {
 
 #else // !_WIN32
 
+#include <stddef.h>
+
 void trg_win_init_platform(void) {}
 void trg_win_clear_last_error(void) {}
 int trg_win_get_last_error(void) { return 0; }
@@ -461,4 +463,3 @@ int trg_win_is_readable_stdin(void) {
 }
 
 #endif // _WIN32
-

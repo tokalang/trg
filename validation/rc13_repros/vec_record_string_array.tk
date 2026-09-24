@@ -1,0 +1,13 @@
+import std/vec::{Vec}
+
+shape Item(name: string, tags: [string; 2])
+
+fn main() -> i32 {
+    auto values# = Vec<Item>::new()
+    values#.push(Item(name = string::from("cpp"),
+                      tags = [string::from("cc"), string::from("cxx")]))
+    auto taken = values#.pop().unwrap()
+    if !taken.name.as_str().equals("cpp") { return 1 }
+    if !taken.tags[1].as_str().equals("cxx") { return 2 }
+    return 0
+}

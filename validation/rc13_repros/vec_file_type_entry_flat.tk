@@ -1,0 +1,24 @@
+import std/vec::{Vec}
+
+shape FileTypeEntry(
+    canonical_name: string,
+    alias_count: usize,
+    aliases: [string; 3],
+    extension_count: usize,
+    extensions: [string; 6]
+)
+
+fn main() -> i32 {
+    auto types# = Vec<FileTypeEntry>::new()
+    types#.push(FileTypeEntry(
+        canonical_name = string::from("cpp"),
+        alias_count = 1:usize,
+        aliases = [string::from("c++"), string::from(""), string::from("")],
+        extension_count = 2:usize,
+        extensions = [string::from("cpp"), string::from("hpp"), string::from(""),
+                      string::from(""), string::from(""), string::from("")]
+    ))
+    auto value = types#.pop().unwrap()
+    if !value.canonical_name.as_str().equals("cpp") { return 1 }
+    return 0
+}
