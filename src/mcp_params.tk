@@ -4,7 +4,7 @@ import core/option::{Option}
 import core/result::{Result}
 import std/vec::{Vec}
 import std/hashmap::{HashMap}
-import stdx/serde/json::{JsonNode}
+import stdx/serde/json::{Document}
 import std/math::{is_finite, floor}
 import src/parse::{parse_size_bytes_strict}
 import src/printer::{u64_to_string}
@@ -578,150 +578,138 @@ pub fn has_family(tokens: Vec<OptionToken>, target: OptionFamily) -> bool {
     return find_family_token(tokens, target).is_some()
 }
 
-fn parse_string_param(node: JsonNode, key: str) -> Result<ParamStringState, string> {
-    match node {
-        auto JsonNode::StrNode(&s) => {
-            return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = s.clone()))
-        }
-        _ => {
-            auto err# = string::from("Invalid params: '")
-            err#.push_str(key)
-            err#.push_str("' must be a string")
-            return Result<ParamStringState, string>::Err(cede err)
-        }
+fn parse_string_param(document: Document, node: usize, key: str) -> Result<ParamStringState, string> {
+    if document.kind(node) == 3:i32 {
+        return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = string::from(document.text(node))))
     }
+    auto err# = string::from("Invalid params: '")
+    err#.push_str(key)
+    err#.push_str("' must be a string")
+    return Result<ParamStringState, string>::Err(cede err)
 }
 
-fn parse_nullable_usize_param(node: JsonNode, key: str, min_val: usize, max_val: usize) -> Result<ParamUsizeState, string> {
-    match node {
-        auto JsonNode::NullNode(_) => {
-            return Result<ParamUsizeState, string>::Ok(ParamUsizeState(state = 1:u8, value = 0:usize))
-        }
-        auto JsonNode::NumNode(f) => {
-            if is_finite(f) && f >= (min_val as f64) && f == floor(f) && (f as usize) <= max_val {
-                return Result<ParamUsizeState, string>::Ok(ParamUsizeState(state = 2:u8, value = f as usize))
-            }
-            auto err# = string::from("Invalid params: '")
-            err#.push_str(key)
-            if min_val > 0 {
-                err#.push_str("' must be an integer >= ")
-                err#.push_str(u64_to_string(min_val as u64).as_str())
-                err#.push_str(" and <= ")
-            } else {
-                err#.push_str("' must be a non-negative integer <= ")
-            }
-            err#.push_str(u64_to_string(max_val as u64).as_str())
-            return Result<ParamUsizeState, string>::Err(cede err)
-        }
-        _ => {
-            auto err# = string::from("Invalid params: '")
-            err#.push_str(key)
-            err#.push_str("' must be an integer or null")
-            return Result<ParamUsizeState, string>::Err(cede err)
-        }
+fn parse_nullable_usize_param(document: Document, node: usize, key: str, min_val: usize, max_val: usize) -> Result<ParamUsizeState, string> {
+    auto kind = document.kind(node)
+    if kind == 0:i32 {
+        return Result<ParamUsizeState, string>::Ok(ParamUsizeState(state = 1:u8, value = 0:usize))
     }
+    if kind == 2:i32 {
+        auto f = document.number(node).unwrap()
+        if is_finite(f) && f >= (min_val as f64) && f == floor(f) && (f as usize) <= max_val {
+            return Result<ParamUsizeState, string>::Ok(ParamUsizeState(state = 2:u8, value = f as usize))
+        }
+        auto err# = string::from("Invalid params: '")
+        err#.push_str(key)
+        if min_val > 0:usize {
+            err#.push_str("' must be an integer >= ")
+            err#.push_str(u64_to_string(min_val as u64).as_str())
+            err#.push_str(" and <= ")
+        } else {
+            err#.push_str("' must be a non-negative integer <= ")
+        }
+        err#.push_str(u64_to_string(max_val as u64).as_str())
+        return Result<ParamUsizeState, string>::Err(cede err)
+    }
+    auto err# = string::from("Invalid params: '")
+    err#.push_str(key)
+    err#.push_str("' must be an integer or null")
+    return Result<ParamUsizeState, string>::Err(cede err)
 }
 
-fn parse_bool_param(node: JsonNode, key: str) -> Result<ParamBoolState, string> {
-    match node {
-        auto JsonNode::BoolNode(b) => {
-            return Result<ParamBoolState, string>::Ok(ParamBoolState(state = 2:u8, value = b))
-        }
-        _ => {
-            auto err# = string::from("Invalid params: '")
-            err#.push_str(key)
-            err#.push_str("' must be a boolean")
-            return Result<ParamBoolState, string>::Err(cede err)
-        }
+fn parse_bool_param(document: Document, node: usize, key: str) -> Result<ParamBoolState, string> {
+    if document.kind(node) == 1:i32 {
+        return Result<ParamBoolState, string>::Ok(ParamBoolState(state = 2:u8, value = document.boolean(node).unwrap()))
     }
+    auto err# = string::from("Invalid params: '")
+    err#.push_str(key)
+    err#.push_str("' must be a boolean")
+    return Result<ParamBoolState, string>::Err(cede err)
 }
 
-fn parse_vec_string_param(node: JsonNode, key: str, min_items: usize) -> Result<ParamVecState, string> {
-    match node {
-        auto JsonNode::ArrayNode(&arr) => {
-            if min_items > 0 && arr.len() < min_items {
-                auto err# = string::from("Invalid params: '")
-                err#.push_str(key)
-                err#.push_str("' must have at least ")
-                err#.push_str(u64_to_string(min_items as u64).as_str())
-                err#.push_str(" item(s)")
-                return Result<ParamVecState, string>::Err(cede err)
-            }
-            auto res# = Vec<string>::new()
-            auto i# = 0:usize
-            loop i < arr.len() {
-                auto &item = arr.borrow(i)
-                match item {
-                    auto JsonNode::StrNode(&s) => {
-                        if s.len() == 0 {
-                            auto err# = string::from("Invalid params: '")
-                            err#.push_str(key)
-                            err#.push_str("' items must be non-empty strings")
-                            return Result<ParamVecState, string>::Err(cede err)
-                        }
-                        res#.push(s.clone())
-                    }
-                    _ => {
-                        auto err# = string::from("Invalid params: '")
-                        err#.push_str(key)
-                        err#.push_str("' items must be strings")
-                        return Result<ParamVecState, string>::Err(cede err)
-                    }
-                }
-                i = i + 1
-            }
-            return Result<ParamVecState, string>::Ok(ParamVecState(state = 2:u8, value = cede res))
-        }
-        _ => {
+fn parse_vec_string_param(document: Document, node: usize, key: str, min_items: usize) -> Result<ParamVecState, string> {
+    if document.kind(node) != 4:i32 {
             auto err# = string::from("Invalid params: '")
             err#.push_str(key)
             err#.push_str("' must be an array of strings")
             return Result<ParamVecState, string>::Err(cede err)
-        }
     }
-}
-
-fn parse_nullable_size_param(node: JsonNode, key: str) -> Result<ParamStringState, string> {
-    match node {
-        auto JsonNode::NullNode(_) => {
-            return Result<ParamStringState, string>::Ok(ParamStringState(state = 1:u8, value = string::new()))
-        }
-        auto JsonNode::StrNode(&s) => {
-            auto p_res = parse_size_bytes_strict(s.as_str(), key)
-            if p_res.is_err() {
-                auto err# = string::from("Invalid params: ")
-                err#.push_str(p_res.unwrap_err().as_str())
-                return Result<ParamStringState, string>::Err(cede err)
-            }
-            if p_res.unwrap() > MCP_MAX_SAFE_INTEGER {
-                auto err# = string::from("Invalid params: '")
-                err#.push_str(key)
-                err#.push_str("' exceeds MCP maximum safe integer (9007199254740991)")
-                return Result<ParamStringState, string>::Err(cede err)
-            }
-            return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = s.clone()))
-        }
-        auto JsonNode::NumNode(f) => {
-            if is_finite(f) && f >= 0.0 && f == floor(f) && f <= 9007199254740991.0 {
-                return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = u64_to_string(f as u64)))
-            }
+    auto count# = 0:usize
+    auto item# = document.first(node)
+    loop item != 0:usize {
+        count += 1:usize
+        item = document.next(item)
+    }
+    if count < min_items {
+        auto err# = string::from("Invalid params: '")
+        err#.push_str(key)
+        err#.push_str("' must have at least ")
+        err#.push_str(u64_to_string(min_items as u64).as_str())
+        err#.push_str(" item(s)")
+        return Result<ParamVecState, string>::Err(cede err)
+    }
+    auto res# = Vec<string>::new()
+    item = document.first(node)
+    loop item != 0:usize {
+        if document.kind(item) != 3:i32 {
             auto err# = string::from("Invalid params: '")
             err#.push_str(key)
-            err#.push_str("' must be a non-negative integer or valid size string")
-            return Result<ParamStringState, string>::Err(cede err)
+            err#.push_str("' items must be strings")
+            return Result<ParamVecState, string>::Err(cede err)
         }
-        _ => {
+        auto value = document.text(item)
+        if value.len == 0:usize {
             auto err# = string::from("Invalid params: '")
             err#.push_str(key)
-            err#.push_str("' must be a string, integer, or null")
-            return Result<ParamStringState, string>::Err(cede err)
+            err#.push_str("' items must be non-empty strings")
+            return Result<ParamVecState, string>::Err(cede err)
         }
+        res#.push(string::from(value))
+        item = document.next(item)
     }
+    return Result<ParamVecState, string>::Ok(ParamVecState(state = 2:u8, value = cede res))
 }
 
-pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<string>, string> {
-    match args_node {
-        auto JsonNode::ObjectNode(&map) => {
+fn parse_nullable_size_param(document: Document, node: usize, key: str) -> Result<ParamStringState, string> {
+    auto kind = document.kind(node)
+    if kind == 0:i32 {
+        return Result<ParamStringState, string>::Ok(ParamStringState(state = 1:u8, value = string::new()))
+    }
+    if kind == 3:i32 {
+        auto value = document.text(node)
+        auto p_res = parse_size_bytes_strict(value, key)
+        if p_res.is_err() {
+            auto err# = string::from("Invalid params: ")
+            err#.push_str(p_res.unwrap_err().as_str())
+            return Result<ParamStringState, string>::Err(cede err)
+        }
+        if p_res.unwrap() > MCP_MAX_SAFE_INTEGER {
+            auto err# = string::from("Invalid params: '")
+            err#.push_str(key)
+            err#.push_str("' exceeds MCP maximum safe integer (9007199254740991)")
+            return Result<ParamStringState, string>::Err(cede err)
+        }
+        return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = string::from(value)))
+    }
+    if kind == 2:i32 {
+        auto f = document.number(node).unwrap()
+        if is_finite(f) && f >= 0.0 && f == floor(f) && f <= 9007199254740991.0 {
+            return Result<ParamStringState, string>::Ok(ParamStringState(state = 2:u8, value = u64_to_string(f as u64)))
+        }
+        auto err# = string::from("Invalid params: '")
+        err#.push_str(key)
+        err#.push_str("' must be a non-negative integer or valid size string")
+        return Result<ParamStringState, string>::Err(cede err)
+    }
+    auto err# = string::from("Invalid params: '")
+    err#.push_str(key)
+    err#.push_str("' must be a string, integer, or null")
+    return Result<ParamStringState, string>::Err(cede err)
+}
+
+pub fn build_mcp_cli_args(document: Document, args_node: usize, startup_cwd: str) -> Result<Vec<string>, string> {
+    if document.kind(args_node) != 5:i32 {
+        return Result<Vec<string>, string>::Err(string::from("Invalid params: arguments must be an object"))
+    }
             auto pattern# = ParamStringState(state = 0:u8, value = string::new())
             auto patterns# = ParamVecState(state = 0:u8, value = Vec<string>::new())
             auto mode# = ParamStringState(state = 0:u8, value = string::new())
@@ -754,133 +742,128 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
             auto format_val# = ParamStringState(state = 0:u8, value = string::new())
             auto raw_args_state# = ParamVecState(state = 0:u8, value = Vec<string>::new())
 
-            auto iter# = map.iter()
-            loop true {
-                auto opt = iter#.next_ref()
-                if opt.is_none() { break }
-                auto entry = opt.unwrap()
-                auto &k_str = entry.key()
-                auto k = k_str.as_str()
-                auto &node = entry.val()
+            auto node# = document.first(args_node)
+            loop node != 0:usize {
+                auto k = document.key(node)
 
                 if k == "pattern" {
-                    auto r = parse_string_param(node, "pattern")
+                    auto r = parse_string_param(document, node, "pattern")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     pattern = r.unwrap()
                 } else if k == "patterns" {
-                    auto r = parse_vec_string_param(node, "patterns", 1:usize)
+                    auto r = parse_vec_string_param(document, node, "patterns", 1:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     patterns = r.unwrap()
                 } else if k == "mode" {
-                    auto r = parse_string_param(node, "mode")
+                    auto r = parse_string_param(document, node, "mode")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     mode = r.unwrap()
                 } else if k == "match_boundary" {
-                    auto r = parse_string_param(node, "match_boundary")
+                    auto r = parse_string_param(document, node, "match_boundary")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     match_boundary = r.unwrap()
                 } else if k == "case_mode" {
-                    auto r = parse_string_param(node, "case_mode")
+                    auto r = parse_string_param(document, node, "case_mode")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     case_mode = r.unwrap()
                 } else if k == "paths" {
-                    auto r = parse_vec_string_param(node, "paths", 1:usize)
+                    auto r = parse_vec_string_param(document, node, "paths", 1:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     paths = r.unwrap()
                 } else if k == "path" {
-                    auto r = parse_string_param(node, "path")
+                    auto r = parse_string_param(document, node, "path")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     path = r.unwrap()
                 } else if k == "globs" {
-                    auto r = parse_vec_string_param(node, "globs", 1:usize)
+                    auto r = parse_vec_string_param(document, node, "globs", 1:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     globs = r.unwrap()
                 } else if k == "types" {
-                    auto r = parse_vec_string_param(node, "types", 1:usize)
+                    auto r = parse_vec_string_param(document, node, "types", 1:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     types = r.unwrap()
                 } else if k == "type" {
-                    auto r = parse_string_param(node, "type")
+                    auto r = parse_string_param(document, node, "type")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     type_val = r.unwrap()
                 } else if k == "sort" {
-                    auto r = parse_string_param(node, "sort")
+                    auto r = parse_string_param(document, node, "sort")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     sort = r.unwrap()
                 } else if k == "context" {
-                    auto r = parse_nullable_usize_param(node, "context", 0:usize, 1000:usize)
+                    auto r = parse_nullable_usize_param(document, node, "context", 0:usize, 1000:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     context = r.unwrap()
                 } else if k == "def_first" {
-                    auto r = parse_bool_param(node, "def_first")
+                    auto r = parse_bool_param(document, node, "def_first")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     def_first = r.unwrap()
                 } else if k == "block" {
-                    auto r = parse_bool_param(node, "block")
+                    auto r = parse_bool_param(document, node, "block")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     block = r.unwrap()
                 } else if k == "max_block_lines" {
-                    auto r = parse_nullable_usize_param(node, "max_block_lines", 1:usize, 1000:usize)
+                    auto r = parse_nullable_usize_param(document, node, "max_block_lines", 1:usize, 1000:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     max_block_lines = r.unwrap()
                 } else if k == "scope" {
-                    auto r = parse_bool_param(node, "scope")
+                    auto r = parse_bool_param(document, node, "scope")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     scope = r.unwrap()
                 } else if k == "group_by_scope" {
-                    auto r = parse_bool_param(node, "group_by_scope")
+                    auto r = parse_bool_param(document, node, "group_by_scope")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     group_by_scope = r.unwrap()
                 } else if k == "symbol_variants" {
-                    auto r = parse_bool_param(node, "symbol_variants")
+                    auto r = parse_bool_param(document, node, "symbol_variants")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     symbol_variants = r.unwrap()
                 } else if k == "snippet" {
-                    auto r = parse_bool_param(node, "snippet")
+                    auto r = parse_bool_param(document, node, "snippet")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     snippet = r.unwrap()
                 } else if k == "snippet_chars" {
-                    auto r = parse_nullable_usize_param(node, "snippet_chars", 5:usize, 500:usize)
+                    auto r = parse_nullable_usize_param(document, node, "snippet_chars", 5:usize, 500:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     snippet_chars = r.unwrap()
                 } else if k == "max_total_matches" {
-                    auto r = parse_nullable_usize_param(node, "max_total_matches", 0:usize, 9007199254740991:usize)
+                    auto r = parse_nullable_usize_param(document, node, "max_total_matches", 0:usize, 9007199254740991:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     max_total_matches = r.unwrap()
                 } else if k == "max_matches" {
-                    auto r = parse_nullable_usize_param(node, "max_matches", 0:usize, 9007199254740991:usize)
+                    auto r = parse_nullable_usize_param(document, node, "max_matches", 0:usize, 9007199254740991:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     max_matches = r.unwrap()
                 } else if k == "max_result_bytes" {
-                    auto r = parse_nullable_size_param(node, "max_result_bytes")
+                    auto r = parse_nullable_size_param(document, node, "max_result_bytes")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     max_result_bytes = r.unwrap()
                 } else if k == "max_bytes" {
-                    auto r = parse_nullable_size_param(node, "max_bytes")
+                    auto r = parse_nullable_size_param(document, node, "max_bytes")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     max_bytes = r.unwrap()
                 } else if k == "max_per_file" {
-                    auto r = parse_nullable_usize_param(node, "max_per_file", 0:usize, 9007199254740991:usize)
+                    auto r = parse_nullable_usize_param(document, node, "max_per_file", 0:usize, 9007199254740991:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     max_per_file = r.unwrap()
                 } else if k == "max_files_with_matches" {
-                    auto r = parse_nullable_usize_param(node, "max_files_with_matches", 0:usize, 9007199254740991:usize)
+                    auto r = parse_nullable_usize_param(document, node, "max_files_with_matches", 0:usize, 9007199254740991:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     max_files_with_matches = r.unwrap()
                 } else if k == "path_style" {
-                    auto r = parse_string_param(node, "path_style")
+                    auto r = parse_string_param(document, node, "path_style")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     path_style = r.unwrap()
                 } else if k == "text_layout" {
-                    auto r = parse_string_param(node, "text_layout")
+                    auto r = parse_string_param(document, node, "text_layout")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     text_layout = r.unwrap()
                 } else if k == "code_only" {
-                    auto r = parse_bool_param(node, "code_only")
+                    auto r = parse_bool_param(document, node, "code_only")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     code_only = r.unwrap()
                 } else if k == "format" {
-                    auto r = parse_string_param(node, "format")
+                    auto r = parse_string_param(document, node, "format")
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     format_val = r.unwrap()
                     if format_val.state == 2:u8 {
@@ -889,7 +872,7 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
                         }
                     }
                 } else if k == "args" {
-                    auto r = parse_vec_string_param(node, "args", 0:usize)
+                    auto r = parse_vec_string_param(document, node, "args", 0:usize)
                     if r.is_err() { return Result<Vec<string>, string>::Err(r.unwrap_err()) }
                     raw_args_state = r.unwrap()
                 } else {
@@ -898,6 +881,7 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
                     err#.push_str("'")
                     return Result<Vec<string>, string>::Err(cede err)
                 }
+                node = document.next(node)
             }
 
             auto raw_args# = Vec<string>::new()
@@ -1503,11 +1487,6 @@ pub fn build_mcp_cli_args(args_node: JsonNode, startup_cwd: str) -> Result<Vec<s
             }
 
             return Result<Vec<string>, string>::Ok(cede cli_args)
-        }
-        _ => {
-            return Result<Vec<string>, string>::Err(string::from("Invalid params: arguments must be an object"))
-        }
-    }
 }
 
 pub fn validate_mcp_cli_options(opts: CliOptions, startup_cwd: str) -> Result<(), string> {
