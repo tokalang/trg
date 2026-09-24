@@ -63,7 +63,7 @@ fn split_and_normalize_components(path: str) -> Vec<string> {
     auto parts# = Vec<string>::new()
     auto len = path.len
     if len == 0 {
-        return parts
+        return cede parts
     }
 
     auto i# = 0:usize
@@ -92,7 +92,7 @@ fn split_and_normalize_components(path: str) -> Vec<string> {
             parts#.push(string::from(comp))
         }
     }
-    return parts
+    return cede parts
 }
 
 fn normalize_path_string(path: str) -> string {

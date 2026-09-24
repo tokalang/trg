@@ -584,7 +584,7 @@ pub fn index_of_arrow(s: str) -> Option<usize> {
     return Option<usize>::None
 }
 
-pub fn strip_declaration_modifiers(line: str) -> str {
+pub fn strip_declaration_modifiers(line: str) -> str <- line {
     auto trimmed = line.trim()
     auto s# = trimmed
     if s.starts_with("pub ") {
@@ -1134,7 +1134,7 @@ pub fn detect_declaration_scope(line: str) -> string {
         }
         auto res# = string::from(prefix)
         res#.push_str("()")
-        return res
+        return cede res
     } else {
         auto cut_idx# = trimmed.len
         auto i# = start_search_idx

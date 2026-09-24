@@ -422,13 +422,18 @@ impl SearchPlan {
             auto compile_res = Regex::compile_with_options(combined_regex_str.as_str(), regex_opts)
             if compile_res.is_err() {
                 auto err = compile_res.unwrap_err()
+                auto kind = string::from("regex")
+                auto path = Option<string>::None
+                auto message = err.message()
+                auto code = Option<string>::Some(string::from("INVALID_REGEX"))
+                auto hint = Option<string>::Some(string::from("fix the regex syntax; if literal text was intended, use -F (--fixed-strings)"))
                 return Result<SearchPlan, SearchDiagnostic>::Err(SearchDiagnostic::with_code_hint(
-                    string::from("regex"),
-                    Option<string>::None,
-                    err.message(),
+                    cede kind,
+                    cede path,
+                    cede message,
                     Option<i32>::None,
-                    Option<string>::Some(string::from("INVALID_REGEX")),
-                    Option<string>::Some(string::from("fix the regex syntax; if literal text was intended, use -F (--fixed-strings)"))
+                    cede code,
+                    cede hint
                 ))
             }
             auto compiled = compile_res.unwrap()

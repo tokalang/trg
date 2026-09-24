@@ -27,7 +27,7 @@ import src/printer::{u64_to_string, json_escape}
 import src/parse::{parse_size_bytes_strict}
 import std/env as env
 import src/path_norm::{normalize_cwd, compute_identity_key, resolves_to_root}
-import stdx/serde/json::{JsonNode}
+import stdx/serde/json::{Document, parse_document}
 import stdx/crypto/sha256::{Sha256}
 import stdx/encoding/base64
 
@@ -666,7 +666,7 @@ impl ViewResult {
         if !self.continuation_active {
             auto init_conv = self#.converge_structured()
             if init_conv.is_err() {
-                return init_conv
+                return cede init_conv
             }
             auto init_json = init_conv.unwrap()
             if init_json.len() <= limit {
@@ -852,7 +852,7 @@ impl ViewResult {
             )
             auto to_conv = target_only_vr#.converge_structured()
             if to_conv.is_err() {
-                return to_conv
+                return cede to_conv
             }
             auto to_json = to_conv.unwrap()
             if to_json.len() > limit {
@@ -972,7 +972,7 @@ impl ViewResult {
         // 5. Converge byte count and final assertion
         auto conv_res = self#.converge_structured()
         if conv_res.is_err() {
-            return conv_res
+            return cede conv_res
         }
         auto final_json = conv_res.unwrap()
         if final_json.len() > limit {
@@ -1142,32 +1142,28 @@ fn is_hex_char(c: char) -> bool {
     return false
 }
 
-fn parse_token_positive_int(node: JsonNode) -> Option<usize> {
-    match node {
-        auto JsonNode::NumNode(n) => {
-            if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
-                return Option<usize>::Some(n as usize)
-            }
-            return Option<usize>::None
-        }
-        _ => {
-            return Option<usize>::None
-        }
-    }
+fn token_field(document: Document, object: usize, long_name: str, short_name: str) -> usize {
+    auto id# = document.find(object, long_name)
+    if id == 0:usize { id = document.find(object, short_name) }
+    return id
 }
 
-fn parse_token_non_neg_int(node: JsonNode) -> Option<usize> {
-    match node {
-        auto JsonNode::NumNode(n) => {
-            if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
-                return Option<usize>::Some(n as usize)
-            }
-            return Option<usize>::None
-        }
-        _ => {
-            return Option<usize>::None
-        }
+fn parse_token_positive_int(document: Document, id: usize) -> Option<usize> {
+    if document.kind(id) != 2:i32 { return Option<usize>::None }
+    auto n = document.number(id).unwrap()
+    if is_finite(n) && n == floor(n) && n >= 1.0 && n <= 9007199254740991.0 {
+        return Option<usize>::Some(n as usize)
     }
+    return Option<usize>::None
+}
+
+fn parse_token_non_neg_int(document: Document, id: usize) -> Option<usize> {
+    if document.kind(id) != 2:i32 { return Option<usize>::None }
+    auto n = document.number(id).unwrap()
+    if is_finite(n) && n == floor(n) && n >= 0.0 && n <= 9007199254740991.0 {
+        return Option<usize>::Some(n as usize)
+    }
+    return Option<usize>::None
 }
 
 pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, string> {
@@ -1213,148 +1209,91 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
         bi = bi + 1:usize
     }
 
-    auto root# = JsonNode::NullNode(0):JsonNode
-    auto parse_res = root#.parse_json(json_raw.as_str().trim())
+    auto parse_res = parse_document(json_raw.as_str().trim())
     if parse_res.is_err() {
         return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: malformed JSON payload"))
     }
+    auto document = parse_res.unwrap()
+    if document.kind(1:usize) != 5:i32 {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: expected JSON object"))
+    }
 
-    match root {
-        auto JsonNode::ObjectNode(&map) => {
-            // Check version
-            auto v_opt# = map.try_borrow(string::from("version"))
-            if v_opt.is_none() {
-                v_opt = map.try_borrow(string::from("v"))
-            }
-            match v_opt {
-                auto Option<&JsonNode>::Some(&v_node) => {
-                    match v_node {
-                        auto JsonNode::NumNode(n) => {
-                            if n != 1.0 {
-                                return Result<ContinuationToken, string>::Err(string::from("Unsupported continuation token version"))
-                            }
-                        }
-                        _ => {
-                            return Result<ContinuationToken, string>::Err(string::from("Invalid version in continuation token"))
-                        }
-                    }
-                }
-                auto Option<&JsonNode>::None => {
-                    return Result<ContinuationToken, string>::Err(string::from("Missing version in continuation token"))
-                }
-            }
+    // Check version
+    auto v_id = token_field(document, 1:usize, "version", "v")
+    if v_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing version in continuation token"))
+    }
+    if document.kind(v_id) != 2:i32 {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid version in continuation token"))
+    }
+    if document.number(v_id).unwrap() != 1.0 {
+        return Result<ContinuationToken, string>::Err(string::from("Unsupported continuation token version"))
+    }
 
-            // Path
-            auto path_val# = string::new()
-            auto p_opt# = map.try_borrow(string::from("path"))
-            if p_opt.is_none() {
-                p_opt = map.try_borrow(string::from("p"))
-            }
-            match p_opt {
-                auto Option<&JsonNode>::Some(&p_node) => {
-                    match p_node {
-                        auto JsonNode::StrNode(&s) => {
-                            if s.len() == 0:usize {
-                                return Result<ContinuationToken, string>::Err(string::from("Empty path in continuation token"))
-                            }
-                            auto s_view = s.as_str()
-                            auto is_abs# = s_view.starts_with("/")
-                            if !is_abs && s_view.len >= 3:usize && s_view.byte_at(1) == (':' as char) && (s_view.byte_at(2) == ('/' as char) || s_view.byte_at(2) == ('\\' as char)) {
-                                is_abs = true
-                            }
-                            if !is_abs {
-                                return Result<ContinuationToken, string>::Err(string::from("Continuation token path must be absolute"))
-                            }
-                            if resolves_to_root("/", s_view) {
-                                return Result<ContinuationToken, string>::Err(string::from("Continuation token path cannot be filesystem root"))
-                            }
-                            path_val = s.clone()
-                        }
-                        _ => {
-                            return Result<ContinuationToken, string>::Err(string::from("Invalid path in continuation token"))
-                        }
-                    }
-                }
-                auto Option<&JsonNode>::None => {
-                    return Result<ContinuationToken, string>::Err(string::from("Missing path in continuation token"))
-                }
-            }
+    // Path
+    auto p_id = token_field(document, 1:usize, "path", "p")
+    if p_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing path in continuation token"))
+    }
+    if document.kind(p_id) != 3:i32 {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid path in continuation token"))
+    }
+    auto path_view = document.text(p_id)
+    if path_view.len == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Empty path in continuation token"))
+    }
+    auto is_abs# = path_view.starts_with("/")
+    if !is_abs && path_view.len >= 3:usize && path_view.byte_at(1) == (':' as char) && (path_view.byte_at(2) == ('/' as char) || path_view.byte_at(2) == ('\\' as char)) {
+        is_abs = true
+    }
+    if !is_abs {
+        return Result<ContinuationToken, string>::Err(string::from("Continuation token path must be absolute"))
+    }
+    if resolves_to_root("/", path_view) {
+        return Result<ContinuationToken, string>::Err(string::from("Continuation token path cannot be filesystem root"))
+    }
+    auto path_val = string::from(path_view)
 
-            // req_start
-            auto rs_val# = 0:usize
-            auto rs_opt# = map.try_borrow(string::from("req_start"))
-            if rs_opt.is_none() {
-                rs_opt = map.try_borrow(string::from("rs"))
-            }
-            match rs_opt {
-                auto Option<&JsonNode>::Some(&n_node) => {
-                    auto parsed = parse_token_positive_int(n_node)
-                    if parsed.is_none() {
-                        return Result<ContinuationToken, string>::Err(string::from("Invalid req_start in continuation token: must be positive integer"))
-                    }
-                    rs_val = parsed.unwrap()
-                }
-                auto Option<&JsonNode>::None => {
-                    return Result<ContinuationToken, string>::Err(string::from("Missing req_start in continuation token"))
-                }
-            }
+    // Required positive integer fields
+    auto rs_id = token_field(document, 1:usize, "req_start", "rs")
+    if rs_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing req_start in continuation token"))
+    }
+    auto rs_parsed = parse_token_positive_int(document, rs_id)
+    if rs_parsed.is_none() {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid req_start in continuation token: must be positive integer"))
+    }
+    auto rs_val = rs_parsed.unwrap()
 
-            // req_end
-            auto re_val# = 0:usize
-            auto re_opt# = map.try_borrow(string::from("req_end"))
-            if re_opt.is_none() {
-                re_opt = map.try_borrow(string::from("re"))
-            }
-            match re_opt {
-                auto Option<&JsonNode>::Some(&n_node) => {
-                    auto parsed = parse_token_positive_int(n_node)
-                    if parsed.is_none() {
-                        return Result<ContinuationToken, string>::Err(string::from("Invalid req_end in continuation token: must be positive integer"))
-                    }
-                    re_val = parsed.unwrap()
-                }
-                auto Option<&JsonNode>::None => {
-                    return Result<ContinuationToken, string>::Err(string::from("Missing req_end in continuation token"))
-                }
-            }
+    auto re_id = token_field(document, 1:usize, "req_end", "re")
+    if re_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing req_end in continuation token"))
+    }
+    auto re_parsed = parse_token_positive_int(document, re_id)
+    if re_parsed.is_none() {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid req_end in continuation token: must be positive integer"))
+    }
+    auto re_val = re_parsed.unwrap()
 
-            // next_line
-            auto nl_val# = 0:usize
-            auto nl_opt# = map.try_borrow(string::from("next_line"))
-            if nl_opt.is_none() {
-                nl_opt = map.try_borrow(string::from("nl"))
-            }
-            match nl_opt {
-                auto Option<&JsonNode>::Some(&n_node) => {
-                    auto parsed = parse_token_positive_int(n_node)
-                    if parsed.is_none() {
-                        return Result<ContinuationToken, string>::Err(string::from("Invalid next_line in continuation token: must be positive integer"))
-                    }
-                    nl_val = parsed.unwrap()
-                }
-                auto Option<&JsonNode>::None => {
-                    return Result<ContinuationToken, string>::Err(string::from("Missing next_line in continuation token"))
-                }
-            }
+    auto nl_id = token_field(document, 1:usize, "next_line", "nl")
+    if nl_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing next_line in continuation token"))
+    }
+    auto nl_parsed = parse_token_positive_int(document, nl_id)
+    if nl_parsed.is_none() {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid next_line in continuation token: must be positive integer"))
+    }
+    auto nl_val = nl_parsed.unwrap()
 
-            // end_line
-            auto el_val# = 0:usize
-            auto el_opt# = map.try_borrow(string::from("end_line"))
-            if el_opt.is_none() {
-                el_opt = map.try_borrow(string::from("el"))
-            }
-            match el_opt {
-                auto Option<&JsonNode>::Some(&n_node) => {
-                    auto parsed = parse_token_positive_int(n_node)
-                    if parsed.is_none() {
-                        return Result<ContinuationToken, string>::Err(string::from("Invalid end_line in continuation token: must be positive integer"))
-                    }
-                    el_val = parsed.unwrap()
-                }
-                auto Option<&JsonNode>::None => {
-                    return Result<ContinuationToken, string>::Err(string::from("Missing end_line in continuation token"))
-                }
-            }
+    auto el_id = token_field(document, 1:usize, "end_line", "el")
+    if el_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing end_line in continuation token"))
+    }
+    auto el_parsed = parse_token_positive_int(document, el_id)
+    if el_parsed.is_none() {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid end_line in continuation token: must be positive integer"))
+    }
+    auto el_val = el_parsed.unwrap()
 
             if re_val < rs_val {
                 return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: req_end < req_start"))
@@ -1369,157 +1308,101 @@ pub fn decode_continuation_token(token_str: str) -> Result<ContinuationToken, st
                 return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: end_line > req_end"))
             }
 
-            // sha256 hex
-            auto h_val# = string::new()
-            auto h_opt# = map.try_borrow(string::from("sha256"))
-            if h_opt.is_none() {
-                h_opt = map.try_borrow(string::from("h"))
-            }
-            match h_opt {
-                auto Option<&JsonNode>::Some(&h_node) => {
-                    match h_node {
-                        auto JsonNode::StrNode(&s) => {
-                            if s.len() != 64:usize {
-                                return Result<ContinuationToken, string>::Err(string::from("Invalid sha256 length in continuation token"))
-                            }
-                            auto hi# = 0:usize
-                            loop hi < 64:usize {
-                                auto c = s.as_str().byte_at(hi)
-                                if !is_hex_char(c) {
-                                    return Result<ContinuationToken, string>::Err(string::from("Invalid hex character in sha256"))
-                                }
-                                hi = hi + 1:usize
-                            }
-                            h_val = s.clone()
-                        }
-                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid sha256 in continuation token")) }
-                    }
-                }
-                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing sha256 in continuation token")) }
-            }
-
-            // mode
-            auto m_val# = string::new()
-            auto m_opt# = map.try_borrow(string::from("mode"))
-            if m_opt.is_none() {
-                m_opt = map.try_borrow(string::from("m"))
-            }
-            match m_opt {
-                auto Option<&JsonNode>::Some(&m_node) => {
-                    match m_node {
-                        auto JsonNode::StrNode(&s) => {
-                            if s.as_str() != "symbol" && s.as_str() != "lines" && s.as_str() != "block" && s.as_str() != "point" && s.as_str() != "range" {
-                                return Result<ContinuationToken, string>::Err(string::from("Invalid mode in continuation token"))
-                            }
-                            if s.as_str() == "lines" {
-                                m_val = string::from("range")
-                            } else {
-                                m_val = s.clone()
-                            }
-                        }
-                        _ => { return Result<ContinuationToken, string>::Err(string::from("Invalid mode in continuation token")) }
-                    }
-                }
-                auto Option<&JsonNode>::None => { return Result<ContinuationToken, string>::Err(string::from("Missing mode in continuation token")) }
-            }
-
-            // range_status
-            auto st_val# = string::from("confirmed")
-            auto st_opt# = map.try_borrow(string::from("range_status"))
-            if st_opt.is_none() {
-                st_opt = map.try_borrow(string::from("st"))
-            }
-            match st_opt {
-                auto Option<&JsonNode>::Some(&st_node) => {
-                    match st_node {
-                        auto JsonNode::StrNode(&s) => {
-                            if s.as_str() != "confirmed" && s.as_str() != "unknown" {
-                                return Result<ContinuationToken, string>::Err(string::from("Invalid range_status in continuation token"))
-                            }
-                            st_val = s.clone()
-                        }
-                        _ => {
-                            return Result<ContinuationToken, string>::Err(string::from("Invalid range_status in continuation token: must be string"))
-                        }
-                    }
-                }
-                auto Option<&JsonNode>::None => {
-                    return Result<ContinuationToken, string>::Err(string::from("Missing range_status in continuation token"))
-                }
-            }
-
-            // symbol
-            auto s_val# = Option<string>::None
-            auto s_opt# = map.try_borrow(string::from("symbol"))
-            if s_opt.is_none() {
-                s_opt = map.try_borrow(string::from("s"))
-            }
-            match s_opt {
-                auto Option<&JsonNode>::Some(&s_node) => {
-                    match s_node {
-                        auto JsonNode::StrNode(&s) => { s_val = Option<string>::Some(s.clone()) }
-                        _ => {
-                            return Result<ContinuationToken, string>::Err(string::from("Invalid symbol in continuation token: must be string"))
-                        }
-                    }
-                }
-                auto Option<&JsonNode>::None => {}
-            }
-
-            // scope
-            auto c_val# = Option<string>::None
-            auto c_opt# = map.try_borrow(string::from("scope"))
-            if c_opt.is_none() {
-                c_opt = map.try_borrow(string::from("c"))
-            }
-            match c_opt {
-                auto Option<&JsonNode>::Some(&c_node) => {
-                    match c_node {
-                        auto JsonNode::StrNode(&c) => { c_val = Option<string>::Some(c.clone()) }
-                        _ => {
-                            return Result<ContinuationToken, string>::Err(string::from("Invalid scope in continuation token: must be string"))
-                        }
-                    }
-                }
-                auto Option<&JsonNode>::None => {}
-            }
-
-            // max_columns
-            auto mc_val# = Option<usize>::None
-            auto mc_opt# = map.try_borrow(string::from("max_columns"))
-            if mc_opt.is_none() {
-                mc_opt = map.try_borrow(string::from("mc"))
-            }
-            match mc_opt {
-                auto Option<&JsonNode>::Some(&mc_node) => {
-                    auto parsed_mc = parse_token_non_neg_int(mc_node)
-                    if parsed_mc.is_none() {
-                        return Result<ContinuationToken, string>::Err(string::from("Invalid max_columns in continuation token: must be non-negative integer"))
-                    }
-                    mc_val = parsed_mc
-                }
-                auto Option<&JsonNode>::None => {}
-            }
-
-            return Result<ContinuationToken, string>::Ok(ContinuationToken(
-                version = 1:usize,
-                path = cede path_val,
-                req_start = rs_val,
-                req_end = re_val,
-                next_line = nl_val,
-                end_line = el_val,
-                sha256_hex = cede h_val,
-                mode = cede m_val,
-                symbol = cede s_val,
-                scope = cede c_val,
-                range_status = cede st_val,
-                max_columns = mc_val
-            ))
-        }
-        _ => {
-            return Result<ContinuationToken, string>::Err(string::from("Invalid continuation token: expected JSON object"))
-        }
+    // sha256 hex
+    auto h_id = token_field(document, 1:usize, "sha256", "h")
+    if h_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing sha256 in continuation token"))
     }
+    if document.kind(h_id) != 3:i32 {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid sha256 in continuation token"))
+    }
+    auto h_view = document.text(h_id)
+    if h_view.len != 64:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid sha256 length in continuation token"))
+    }
+    auto hi# = 0:usize
+    loop hi < 64:usize {
+        if !is_hex_char(h_view.byte_at(hi)) {
+            return Result<ContinuationToken, string>::Err(string::from("Invalid hex character in sha256"))
+        }
+        hi += 1:usize
+    }
+    auto h_val = string::from(h_view)
+
+    // mode
+    auto m_id = token_field(document, 1:usize, "mode", "m")
+    if m_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing mode in continuation token"))
+    }
+    if document.kind(m_id) != 3:i32 {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid mode in continuation token"))
+    }
+    auto m_view = document.text(m_id)
+    if m_view != "symbol" && m_view != "lines" && m_view != "block" && m_view != "point" && m_view != "range" {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid mode in continuation token"))
+    }
+    auto m_val# = string::from(m_view)
+    if m_view == "lines" { m_val = string::from("range") }
+
+    // range_status
+    auto st_id = token_field(document, 1:usize, "range_status", "st")
+    if st_id == 0:usize {
+        return Result<ContinuationToken, string>::Err(string::from("Missing range_status in continuation token"))
+    }
+    if document.kind(st_id) != 3:i32 {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid range_status in continuation token: must be string"))
+    }
+    auto st_view = document.text(st_id)
+    if st_view != "confirmed" && st_view != "unknown" {
+        return Result<ContinuationToken, string>::Err(string::from("Invalid range_status in continuation token"))
+    }
+    auto st_val = string::from(st_view)
+
+    // symbol
+    auto s_val# = Option<string>::None
+    auto s_id = token_field(document, 1:usize, "symbol", "s")
+    if s_id != 0:usize {
+        if document.kind(s_id) != 3:i32 {
+            return Result<ContinuationToken, string>::Err(string::from("Invalid symbol in continuation token: must be string"))
+        }
+        s_val = Option<string>::Some(string::from(document.text(s_id)))
+    }
+
+    // scope
+    auto c_val# = Option<string>::None
+    auto c_id = token_field(document, 1:usize, "scope", "c")
+    if c_id != 0:usize {
+        if document.kind(c_id) != 3:i32 {
+            return Result<ContinuationToken, string>::Err(string::from("Invalid scope in continuation token: must be string"))
+        }
+        c_val = Option<string>::Some(string::from(document.text(c_id)))
+    }
+
+    // max_columns
+    auto mc_val# = Option<usize>::None
+    auto mc_id = token_field(document, 1:usize, "max_columns", "mc")
+    if mc_id != 0:usize {
+        auto parsed_mc = parse_token_non_neg_int(document, mc_id)
+        if parsed_mc.is_none() {
+            return Result<ContinuationToken, string>::Err(string::from("Invalid max_columns in continuation token: must be non-negative integer"))
+        }
+        mc_val = parsed_mc
+    }
+
+    return Result<ContinuationToken, string>::Ok(ContinuationToken(
+        version = 1:usize,
+        path = cede path_val,
+        req_start = rs_val,
+        req_end = re_val,
+        next_line = nl_val,
+        end_line = el_val,
+        sha256_hex = cede h_val,
+        mode = cede m_val,
+        symbol = cede s_val,
+        scope = cede c_val,
+        range_status = cede st_val,
+        max_columns = mc_val
+    ))
 }
 
 pub fn capture_file_bounded(path: str, max_bytes: usize) -> FileCapture {

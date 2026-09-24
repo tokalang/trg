@@ -112,7 +112,8 @@ pub fn classify_args(args: Vec<string>, has_typed_pattern: bool) -> Result<Vec<O
 
     loop i < num_args {
         auto &arg_str = args.borrow(i)
-        auto view = arg_str.as_str()
+        auto arg_owned = arg_str.clone()
+        auto view = arg_owned.as_str()
 
         if end_of_options {
             if view == "-" {

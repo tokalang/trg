@@ -19,6 +19,9 @@ fn main() -> i32 {
         last.id = 13:i32
     }
     assert(rows.borrow(11:usize).id == 13:i32, "mutable borrow must address live row")
+    rows#.pop_discard()
+    assert(rows.len() == 11:usize, "pop must retire only the last row")
+    assert(rows.borrow(10:usize).values.get(0:usize) == 10:i32, "pop must preserve earlier rows")
     rows#.clear()
     assert(rows.len() == 0:usize, "clear must retire all rows")
     auto fresh# = Vec<i32>::new()

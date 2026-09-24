@@ -150,5 +150,5 @@ pub fn compute_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars:
 
 pub fn format_kwic_snippet(line: str, submatches: Vec<SubMatch>, snippet_chars: usize) -> string {
     auto res = compute_kwic_snippet(line, submatches, snippet_chars)
-    return res.text
+    return cede res.text
 }

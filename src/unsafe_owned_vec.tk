@@ -2,6 +2,7 @@
 // These call sites append and borrow; RC13 std/vec eagerly instantiates its
 // generic pop raw_take bridge even when they do not call pop.
 import core/traits::{@Encap}
+import core/option::{Option}
 import sys/libc::{libc_abort}
 
 pub shape UnsafeOwnedVec<T> (
@@ -62,6 +63,14 @@ impl<T> UnsafeOwnedVec<T> {
             }
             self.len = 0:usize
             self.cap = 0:usize
+        }
+    }
+
+    pub fn pop_discard(self#) {
+        if self.len == 0:usize { return }
+        unsafe {
+            self.len -= 1:usize
+            auto retired = Option<T>::Some(cede self.buf[self.len])
         }
     }
 

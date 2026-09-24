@@ -1,6 +1,7 @@
 // Bounded .gitignore stack evaluator for trg.
 import core/types::{usize}
 import std/vec::{Vec}
+import src/unsafe_owned_vec::{UnsafeOwnedVec}
 import std/io::{File}
 import src/types::{GlobRule}
 import src/glob::{parse_glob_rule, match_glob_pat}
@@ -11,12 +12,12 @@ pub shape IgnoreLayer (
 )
 
 pub shape IgnoreStack (
-    layers#: Vec<IgnoreLayer>
+    layers#: UnsafeOwnedVec<IgnoreLayer>
 )
 
 impl IgnoreStack {
     pub fn new() -> IgnoreStack {
-        return IgnoreStack(layers = Vec<IgnoreLayer>::new())
+        return IgnoreStack(layers = UnsafeOwnedVec<IgnoreLayer>::new())
     }
 
     pub fn push_dir(self#, dir_path: string) {
@@ -77,7 +78,7 @@ impl IgnoreStack {
 
     pub fn pop_dir(self#) {
         if self.layers.len() > 0 {
-            self.layers#.pop()
+            self.layers#.pop_discard()
         }
     }
 
