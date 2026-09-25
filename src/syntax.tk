@@ -529,9 +529,9 @@ pub fn scan_line_lexical_with_mask(
         }
     }
 
-    auto is_scope_decl = is_scope_declaration(out.as_str())
-    auto starts_block = is_block_construct(out.as_str())
-    auto delimiter = detect_block_delimiter(out.as_str())
+    auto is_scope_decl = is_scope_declaration_with_dialect(out.as_str(), dialect)
+    auto starts_block = is_block_construct_with_dialect(out.as_str(), dialect)
+    auto delimiter = detect_block_delimiter_with_dialect(out.as_str(), dialect)
 
     auto mask_opt# = Option<Vec<u8>>::None
     if with_mask {
@@ -719,6 +719,10 @@ pub fn find_arrow_function_pos(line: str) -> Option<usize> {
 }
 
 pub fn extract_declared_identifier(line: str) -> string {
+    return extract_declared_identifier_with_dialect(line, LexicalDialect::Toka)
+}
+
+pub fn extract_declared_identifier_with_dialect(line: str, dialect: LexicalDialect) -> string {
     auto trimmed = line.trim()
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return string::from("")
@@ -733,6 +737,8 @@ pub fn extract_declared_identifier(line: str) -> string {
             is_arrow = true
         }
     }
+    auto is_toka_shape = dialect == LexicalDialect::Toka && s.starts_with("shape ")
+
     if is_arrow {
         if s.starts_with("const ") { kw_len = 6:usize }
         else if s.starts_with("let ") { kw_len = 4:usize }
@@ -744,7 +750,7 @@ pub fn extract_declared_identifier(line: str) -> string {
     else if s.starts_with("function ") { kw_len = 9:usize }
     else if s.starts_with("class ") { kw_len = 6:usize }
     else if s.starts_with("struct ") { kw_len = 7:usize }
-    else if s.starts_with("shape ") { kw_len = 6:usize }
+    else if is_toka_shape { kw_len = 6:usize }
     else if s.starts_with("interface ") { kw_len = 10:usize }
     else if s.starts_with("type ") { kw_len = 5:usize }
     else if s.starts_with("enum ") { kw_len = 5:usize }
@@ -753,6 +759,9 @@ pub fn extract_declared_identifier(line: str) -> string {
     else { return string::from("") }
 
     auto rem# = s.substr(kw_len, s.len - kw_len).trim()
+    if rem.len == 0 || rem.starts_with("=") || rem.starts_with(";") || rem.starts_with(",") || rem.starts_with(".") {
+        return string::from("")
+    }
 
     if s.starts_with("func ") && rem.starts_with("(") {
         auto p_depth# = 0:usize
@@ -853,18 +862,46 @@ pub fn is_defining_symbol(line: str, plan: SearchPlan) -> bool {
 }
 
 pub fn is_scope_declaration(line: str) -> bool {
+    return is_scope_declaration_with_dialect(line, LexicalDialect::Generic)
+}
+
+pub fn is_scope_declaration_with_dialect(line: str, dialect: LexicalDialect) -> bool {
     auto trimmed = line.trim()
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return false
     }
     auto s# = strip_declaration_modifiers(trimmed)
 
-    if s.starts_with("fn ") || s.starts_with("def ") || s.starts_with("func ") || s.starts_with("function ") ||
-       s.starts_with("class ") || s.starts_with("struct ") || s.starts_with("shape ") ||
-       s.starts_with("interface ") || s.starts_with("trait ") || s.starts_with("type ") ||
-       s.starts_with("enum ") || s.starts_with("impl ") {
+    auto kw_len# = 0:usize
+    auto is_toka_shape = dialect == LexicalDialect::Toka && s.starts_with("shape ")
+
+    if s.starts_with("fn ") { kw_len = 3:usize }
+    else if s.starts_with("def ") { kw_len = 4:usize }
+    else if s.starts_with("func ") { kw_len = 5:usize }
+    else if s.starts_with("function ") { kw_len = 9:usize }
+    else if s.starts_with("class ") { kw_len = 6:usize }
+    else if s.starts_with("struct ") { kw_len = 7:usize }
+    else if is_toka_shape { kw_len = 6:usize }
+    else if s.starts_with("interface ") { kw_len = 10:usize }
+    else if s.starts_with("trait ") { kw_len = 6:usize }
+    else if s.starts_with("type ") { kw_len = 5:usize }
+    else if s.starts_with("enum ") { kw_len = 5:usize }
+    else if s.starts_with("impl ") { kw_len = 5:usize }
+
+    if kw_len > 0:usize {
+        auto after_kw = s.substr(kw_len, s.len - kw_len).trim()
+        if after_kw.len == 0 {
+            return false
+        }
+        auto first_c = after_kw.byte_at(0)
+        if first_c == ('=' as char) || first_c == (';' as char) || first_c == (',' as char) ||
+           first_c == ('.' as char) || first_c == (')' as char) || first_c == ('}' as char) ||
+           first_c == (']' as char) {
+            return false
+        }
         return true
     }
+
     if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
         auto arr_opt = find_arrow_function_pos(line)
         if arr_opt.is_some() {
@@ -879,7 +916,11 @@ pub fn is_scope_declaration(line: str) -> bool {
 }
 
 pub fn is_block_construct(line: str) -> bool {
-    if is_scope_declaration(line) {
+    return is_block_construct_with_dialect(line, LexicalDialect::Generic)
+}
+
+pub fn is_block_construct_with_dialect(line: str, dialect: LexicalDialect) -> bool {
+    if is_scope_declaration_with_dialect(line, dialect) {
         return true
     }
     auto trimmed = line.trim()
@@ -906,6 +947,10 @@ pub fn is_definition_line(line: str) -> bool {
 }
 
 pub fn detect_block_delimiter(line: str) -> BlockDelimiter {
+    return detect_block_delimiter_with_dialect(line, LexicalDialect::Generic)
+}
+
+pub fn detect_block_delimiter_with_dialect(line: str, dialect: LexicalDialect) -> BlockDelimiter {
     auto trimmed = line.trim()
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return BlockDelimiter::Brace
@@ -920,7 +965,7 @@ pub fn detect_block_delimiter(line: str) -> BlockDelimiter {
     }
 
     // Explicit Paren-bound keywords: Toka shape or tuple/record const
-    if s.starts_with("shape ") {
+    if dialect == LexicalDialect::Toka && s.starts_with("shape ") {
         return BlockDelimiter::Paren
     }
     if s.starts_with("const ") || s.starts_with("let ") || s.starts_with("auto ") {
@@ -1052,6 +1097,10 @@ pub fn is_multiline_decorator_closer(line: str) -> bool {
 }
 
 pub fn classify_symbol_kind(line: str) -> string {
+    return classify_symbol_kind_with_dialect(line, LexicalDialect::Toka)
+}
+
+pub fn classify_symbol_kind_with_dialect(line: str, dialect: LexicalDialect) -> string {
     auto trimmed = line.trim()
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return string::from("symbol")
@@ -1060,7 +1109,7 @@ pub fn classify_symbol_kind(line: str) -> string {
 
     if s.starts_with("class ") { return string::from("class") }
     if s.starts_with("struct ") { return string::from("struct") }
-    if s.starts_with("shape ") { return string::from("shape") }
+    if dialect == LexicalDialect::Toka && s.starts_with("shape ") { return string::from("shape") }
     if s.starts_with("interface ") { return string::from("interface") }
     if s.starts_with("trait ") { return string::from("trait") }
     if s.starts_with("enum ") { return string::from("enum") }
@@ -1085,8 +1134,12 @@ pub fn classify_symbol_kind(line: str) -> string {
 }
 
 pub fn detect_declaration_scope(line: str) -> string {
+    return detect_declaration_scope_with_dialect(line, LexicalDialect::Generic)
+}
+
+pub fn detect_declaration_scope_with_dialect(line: str, dialect: LexicalDialect) -> string {
     auto trimmed = line.trim()
-    if !is_scope_declaration(trimmed) {
+    if !is_scope_declaration_with_dialect(trimmed, dialect) {
         return string::from("")
     }
 
@@ -1156,19 +1209,24 @@ pub fn detect_declaration_scope(line: str) -> string {
 }
 
 pub shape ScopeTracker (
-    frames: Vec<ScopeFrame>
+    frames#: Vec<ScopeFrame>,
+    dialect: LexicalDialect
 )
 
 impl ScopeTracker {
-    pub fn new() -> ScopeTracker {
-        return ScopeTracker(frames = Vec<ScopeFrame>::new())
+    pub fn new(dialect: LexicalDialect) -> ScopeTracker {
+        return ScopeTracker(frames = Vec<ScopeFrame>::new(), dialect = dialect)
     }
 
     pub fn update(
         self#,
         code_text: str,
-        brace_depth: usize,
-        paren_depth: usize,
+        depth_before_brace: usize,
+        depth_after_brace: usize,
+        depth_before_paren: usize,
+        depth_after_paren: usize,
+        has_code_brace_closer: bool,
+        has_code_paren_closer: bool,
         participates_in_indent: bool,
         statement_indent: usize,
         family: SyntaxFamily
@@ -1190,12 +1248,12 @@ impl ScopeTracker {
                     auto SyntaxFamily::Brace => {
                         match top.delimiter {
                             auto BlockDelimiter::Paren => {
-                                if paren_depth < top.depth {
+                                if top.depth == 0 || depth_after_paren < top.depth || (depth_after_paren <= top.depth && has_code_paren_closer) {
                                     should_pop = true
                                 }
                             }
                             auto BlockDelimiter::Brace => {
-                                if brace_depth < top.depth {
+                                if top.depth == 0 || depth_after_brace < top.depth || (depth_after_brace <= top.depth && has_code_brace_closer) {
                                     should_pop = true
                                 }
                             }
@@ -1210,21 +1268,37 @@ impl ScopeTracker {
             break
         }
 
-        auto scope_decl = detect_declaration_scope(code_text)
+        auto scope_decl = detect_declaration_scope_with_dialect(code_text, self.dialect)
         if scope_decl.len() > 0 {
-            auto delim = detect_block_delimiter(code_text)
-            auto decl_depth# = brace_depth
-            match family {
-                auto SyntaxFamily::Indent => {
-                    decl_depth = statement_indent
-                }
-                auto SyntaxFamily::Brace => {
-                    if delim == BlockDelimiter::Paren {
-                        decl_depth = paren_depth
+            auto delim = detect_block_delimiter_with_dialect(code_text, self.dialect)
+            auto target_d# = depth_before_brace
+            if delim == BlockDelimiter::Paren {
+                target_d = depth_before_paren
+            }
+            auto is_self_closed = check_is_self_closed_structured(
+                delim,
+                depth_after_brace,
+                depth_after_paren,
+                target_d,
+                has_code_brace_closer,
+                has_code_paren_closer
+            )
+            if !is_self_closed {
+                auto decl_depth# = depth_after_brace
+                match family {
+                    auto SyntaxFamily::Indent => {
+                        decl_depth = statement_indent
+                    }
+                    auto SyntaxFamily::Brace => {
+                        if delim == BlockDelimiter::Paren {
+                            decl_depth = depth_after_paren
+                        }
                     }
                 }
+                if family == SyntaxFamily::Indent || decl_depth > 0 {
+                    self.frames#.push(ScopeFrame(name = cede scope_decl, delimiter = delim, depth = decl_depth))
+                }
             }
-            self.frames#.push(ScopeFrame(name = cede scope_decl, delimiter = delim, depth = decl_depth))
         }
     }
 

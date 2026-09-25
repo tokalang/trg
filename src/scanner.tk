@@ -1327,7 +1327,7 @@ pub fn scan_file_stream_with_pass(
             before_cap = opts.max_block_lines
         }
         auto context_state# = make_context_state(before_cap, family)
-        auto scope_tracker# = ScopeTracker::new()
+        auto scope_tracker# = ScopeTracker::new(dialect)
         auto scope_enabled = opts.scope && !opts.quiet && !opts.files_with_matches && !opts.count
         auto scope_resolver# = FileScopeResolver::new(target_path.clone(), scope_enabled)
         auto cur_depths# = DelimiterDepths::new()
@@ -1393,7 +1393,18 @@ pub fn scan_file_stream_with_pass(
 
                         auto line_indent = compute_line_indent(line_text)
                         auto lex = scan_line_lexical_with_mask(line_text, cur_depths#, dialect, opts.code_only)
-                        scope_tracker#.update(lex.code_text.as_str(), lex.depth_after_brace, lex.depth_after_paren, lex.participates_in_indent, lex.statement_indent, family)
+                        scope_tracker#.update(
+                            lex.code_text.as_str(),
+                            lex.depth_before_brace,
+                            lex.depth_after_brace,
+                            lex.depth_before_paren,
+                            lex.depth_after_paren,
+                            lex.has_code_brace_closer,
+                            lex.has_code_paren_closer,
+                            lex.participates_in_indent,
+                            lex.statement_indent,
+                            family
+                        )
 
                         outcome = scan_and_process_line(
                             plan, opts, context_state#, resolved_path, multiple_files,
@@ -1418,7 +1429,18 @@ pub fn scan_file_stream_with_pass(
 
                             auto line_indent = compute_line_indent(line_text)
                             auto lex = scan_line_lexical_with_mask(line_text, cur_depths#, dialect, opts.code_only)
-                            scope_tracker#.update(lex.code_text.as_str(), lex.depth_after_brace, lex.depth_after_paren, lex.participates_in_indent, lex.statement_indent, family)
+                            scope_tracker#.update(
+                                lex.code_text.as_str(),
+                                lex.depth_before_brace,
+                                lex.depth_after_brace,
+                                lex.depth_before_paren,
+                                lex.depth_after_paren,
+                                lex.has_code_brace_closer,
+                                lex.has_code_paren_closer,
+                                lex.participates_in_indent,
+                                lex.statement_indent,
+                                family
+                            )
 
                             outcome = scan_and_process_line(
                                 plan, opts, context_state#, resolved_path, multiple_files,
@@ -1484,7 +1506,18 @@ pub fn scan_file_stream_with_pass(
 
                     auto line_indent = compute_line_indent(line_text)
                     auto lex = scan_line_lexical_with_mask(line_text, cur_depths#, dialect, opts.code_only)
-                    scope_tracker#.update(lex.code_text.as_str(), lex.depth_after_brace, lex.depth_after_paren, lex.participates_in_indent, lex.statement_indent, family)
+                    scope_tracker#.update(
+                        lex.code_text.as_str(),
+                        lex.depth_before_brace,
+                        lex.depth_after_brace,
+                        lex.depth_before_paren,
+                        lex.depth_after_paren,
+                        lex.has_code_brace_closer,
+                        lex.has_code_paren_closer,
+                        lex.participates_in_indent,
+                        lex.statement_indent,
+                        family
+                    )
 
                     outcome = scan_and_process_line(
                         plan, opts, context_state#, resolved_path, multiple_files,

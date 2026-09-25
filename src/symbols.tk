@@ -14,9 +14,13 @@ import src/syntax::{
     scan_line_lexical,
     DelimiterDepths,
     extract_declared_identifier,
+    extract_declared_identifier_with_dialect,
     classify_symbol_kind,
+    classify_symbol_kind_with_dialect,
     detect_block_delimiter,
+    detect_block_delimiter_with_dialect,
     is_scope_declaration,
+    is_scope_declaration_with_dialect,
     is_decorator_or_attr_line,
     is_multiline_decorator_closer,
     check_is_self_closed_structured,
@@ -354,9 +358,9 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                 }
 
                 // 2. Identify declarations on this line
-                auto ident = extract_declared_identifier(pat_text)
+                auto ident = extract_declared_identifier_with_dialect(pat_text, dialect)
                 if ident.len() > 0 {
-                    auto kind_raw = classify_symbol_kind(pat_text)
+                    auto kind_raw = classify_symbol_kind_with_dialect(pat_text, dialect)
                     auto kind# = cede kind_raw
                     auto scope_name# = string::new()
 
@@ -376,7 +380,7 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                         }
                     }
 
-                    auto delim = detect_block_delimiter(pat_text)
+                    auto delim = detect_block_delimiter_with_dialect(pat_text, dialect)
                     auto is_self_closed# = false
                     if check_is_self_closed_structured(delim, lex.depth_after_brace, lex.depth_after_paren, lex.depth_before_brace, lex.has_code_brace_closer, lex.has_code_paren_closer) {
                         is_self_closed = true
@@ -462,7 +466,7 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                         }
                     }
 
-                    if !is_self_closed && is_scope_declaration(pat_text) {
+                    if !is_self_closed && is_scope_declaration_with_dialect(pat_text, dialect) {
                         auto d_val# = lex.depth_before_brace
                         if delim == BlockDelimiter::Paren {
                             d_val = lex.depth_before_paren
@@ -638,9 +642,9 @@ pub fn outline_symbols_lines(
         }
 
         // 2. Identify declarations on this line
-        auto ident = extract_declared_identifier(pat_text)
+        auto ident = extract_declared_identifier_with_dialect(pat_text, dialect)
         if ident.len() > 0 {
-            auto kind_raw = classify_symbol_kind(pat_text)
+            auto kind_raw = classify_symbol_kind_with_dialect(pat_text, dialect)
             auto kind# = cede kind_raw
             auto scope_name# = string::new()
 
@@ -660,7 +664,7 @@ pub fn outline_symbols_lines(
                 }
             }
 
-            auto delim = detect_block_delimiter(pat_text)
+            auto delim = detect_block_delimiter_with_dialect(pat_text, dialect)
             auto is_self_closed# = false
             if check_is_self_closed_structured(delim, lex.depth_after_brace, lex.depth_after_paren, lex.depth_before_brace, lex.has_code_brace_closer, lex.has_code_paren_closer) {
                 is_self_closed = true
@@ -739,7 +743,7 @@ pub fn outline_symbols_lines(
                 }
             }
 
-            if !is_self_closed && is_scope_declaration(pat_text) {
+            if !is_self_closed && is_scope_declaration_with_dialect(pat_text, dialect) {
                 auto d_val# = lex.depth_before_brace
                 if delim == BlockDelimiter::Paren {
                     d_val = lex.depth_before_paren

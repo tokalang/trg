@@ -448,6 +448,53 @@ def test_mcp_structured_content_scope_range():
         p.terminate()
 
 
+def test_cpp_assignment_not_scope_and_cross_file_isolation():
+    """C++ variable assignments like 'shape = find...' must not be treated as scope declarations,
+    and scopes must never leak across files."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        f1 = tmp_path / "a.cpp"
+        f1.write_text(
+            "void setup() {\n"
+            "    shape = findVisibleShapeDecl(name);\n"
+            "    target();\n"
+            "}\n"
+        )
+        f2 = tmp_path / "b.cpp"
+        f2.write_text(
+            "// standalone line in b.cpp\n"
+            "target();\n"
+        )
+
+        res = run_cmd(["--scope", "--sort", "path", "target", str(f1), str(f2)])
+        assert res.returncode == 0, res.stderr
+        output = res.stdout
+        assert "findVisibleShapeDecl" not in output, f"Bogus scope found in output:\n{output}"
+
+        # In b.cpp, target() has no enclosing function, so no scope tag should be present
+        lines = [l for l in output.strip().split("\n") if "target()" in l]
+        assert len(lines) == 2, f"Expected 2 lines, got:\n{output}"
+        # Line from b.cpp should NOT have any scope bracket
+        b_lines = [l for l in lines if "b.cpp" in l or not l.startswith("/")]
+        assert "[" not in lines[1], f"Scope leaked into b.cpp: {lines[1]}"
+
+
+def test_toka_shape_scope_preserved():
+    """Toka shape declarations in .tk files are still correctly recognized as scope."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        f = tmp_path / "sample.tk"
+        f.write_text(
+            "shape MyConfig (\n"
+            "    pub host: string,\n"
+            "    pub port: usize\n"
+            ")\n"
+        )
+        res = run_cmd(["--scope", "port", str(f)])
+        assert res.returncode == 0, res.stderr
+        assert "[MyConfig 1-4; confirmed]" in res.stdout, f"Expected MyConfig in scope:\n{res.stdout}"
+
+
 if __name__ == "__main__":
     print(f"Running scope test suite using binary: {TRG_BIN}...")
     test_single_hit_confirmed_scope()
@@ -465,4 +512,6 @@ if __name__ == "__main__":
     test_symbol_count_cap_over_2048()
     test_long_signature_preserves_scope_text()
     test_mcp_structured_content_scope_range()
+    test_cpp_assignment_not_scope_and_cross_file_isolation()
+    test_toka_shape_scope_preserved()
     print("ALL SCOPE SUITE TESTS PASSED!")

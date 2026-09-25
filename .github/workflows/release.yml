@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 env:
-  TOKA_VERSION: v1.0.0-rc.11
+  TOKA_VERSION: v1.0.0-rc.13
 
 jobs:
   build-source:
@@ -32,15 +32,15 @@ jobs:
           sudo -E apt-get update -o Acquire::Retries=5
           sudo apt-get install -y libssl3 zlib1g libzstd1 libstdc++6 libgcc-s1 ripgrep
 
-      - name: Install Toka SDK (RC11)
+      - name: Install Toka SDK (RC13)
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64.tar.gz"
+          archive="$RUNNER_TEMP/toka-v1.0.0-rc.13-linux-x64.tar.gz"
           curl --fail --location --retry 3 --output "$archive" \
-            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/toka-v1.0.0-rc.11-linux-x64.tar.gz"
-          echo "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917  $archive" | shasum -a 256 --check
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/toka-v1.0.0-rc.13-linux-x64.tar.gz"
+          echo "c59687caadbcb126f7594d0d069f794b717b67981405e1181537cf45dd7e208d  $archive" | shasum -a 256 --check
           tar -xzf "$archive" -C "$RUNNER_TEMP"
-          sdk="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64"
+          sdk="$RUNNER_TEMP/toka-v1.0.0-rc.13-linux-x64"
           echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
           echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
           echo "TOKA_COMPILER=$sdk/bin/tokac" >> "$GITHUB_ENV"
@@ -71,12 +71,12 @@ jobs:
         include:
           - name: linux-x64
             runner: ubuntu-22.04
-            asset: toka-v1.0.0-rc.11-linux-x64.tar.gz
-            sha256: 24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917
+            asset: toka-v1.0.0-rc.13-linux-x64.tar.gz
+            sha256: c59687caadbcb126f7594d0d069f794b717b67981405e1181537cf45dd7e208d
           - name: macos-arm64
             runner: macos-15
-            asset: toka-v1.0.0-rc.11-macos-arm64.tar.gz
-            sha256: 20e32db7246f75fb59bc452c411e59ab5df8b4ecbd3dbc4beb9b2d6e4532d07b
+            asset: toka-v1.0.0-rc.13-macos-arm64.tar.gz
+            sha256: 0185cc78f1e38d4f182b9e73f90e329753735e935ea6ddface67a6f854794e9c
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
@@ -93,7 +93,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install lld@20 zstd openssl@3 ripgrep
 
-      - name: Install Toka SDK (RC11)
+      - name: Install Toka SDK (RC13)
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/${{ matrix.asset }}"
@@ -145,15 +145,15 @@ jobs:
       - name: Check out repo
         uses: actions/checkout@v4
 
-      - name: Install locked Toka SDK (RC11)
+      - name: Install locked Toka SDK (RC13)
         run: |
           set -euo pipefail
-          archive="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64.tar.gz"
+          archive="$RUNNER_TEMP/toka-v1.0.0-rc.13-linux-x64.tar.gz"
           curl --fail --location --retry 3 --output "$archive" \
-            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/toka-v1.0.0-rc.11-linux-x64.tar.gz"
-          echo "24169a99aba87fd94f16699eadd2a7623d8862a3fe27dec06c46f95b53346917  $archive" | shasum -a 256 --check
+            "https://github.com/tokalang/toka/releases/download/$TOKA_VERSION/toka-v1.0.0-rc.13-linux-x64.tar.gz"
+          echo "c59687caadbcb126f7594d0d069f794b717b67981405e1181537cf45dd7e208d  $archive" | shasum -a 256 --check
           tar -xzf "$archive" -C "$RUNNER_TEMP"
-          sdk="$RUNNER_TEMP/toka-v1.0.0-rc.11-linux-x64"
+          sdk="$RUNNER_TEMP/toka-v1.0.0-rc.13-linux-x64"
           echo "TOKA=$sdk/bin/toka" >> "$GITHUB_ENV"
           echo "TOKAC=$sdk/bin/tokac" >> "$GITHUB_ENV"
           echo "TOKA_LIB=$sdk/lib" >> "$GITHUB_ENV"
@@ -168,8 +168,8 @@ jobs:
           set -euo pipefail
           mkdir -p build_win
           export TOKA_LIB
-          "$TOKAC" --target x86_64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.0/lib src/main.tk -o build_win/trg_x64.o
-          "$TOKAC" --target aarch64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.0/lib src/main.tk -o build_win/trg_arm64.o
+          "$TOKAC" --target x86_64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.1/lib src/main.tk -o build_win/trg_x64.o
+          "$TOKAC" --target aarch64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.1/lib src/main.tk -o build_win/trg_arm64.o
           cp "$TOKA_LIB/sys/toka_rt.c" build_win/
           cp src/c/trg_win_compat.c build_win/
           cp src/c/trg.manifest build_win/
