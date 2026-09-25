@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Tag name to build binaries for'
         required: true
-        default: 'v0.19.3'
+        default: 'v0.19.4'
 
 permissions:
   contents: write
@@ -170,7 +170,7 @@ jobs:
           export TOKA_LIB
           "$TOKAC" --target x86_64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.1/lib src/main.tk -o build_win/trg_x64.o
           "$TOKAC" --target aarch64-pc-windows-gnu -c -I . -I .toka/packages/regex-0.3.1/lib src/main.tk -o build_win/trg_arm64.o
-          cp "$TOKA_LIB/sys/toka_rt.c" build_win/
+          cp "$TOKA_LIB/sys/toka_rt.c" "$TOKA_LIB/sys/toka_thread_handoff_v1."* "$TOKA_LIB/sys/toka_native_sync_layout.h" build_win/
           cp src/c/trg_win_compat.c build_win/
           cp src/c/trg.manifest build_win/
           cp src/c/trg.rc build_win/
@@ -232,7 +232,7 @@ jobs:
 
           windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
           clang -c build_win/trg_win_compat.c -O2 -o build_win/trg_win_compat.o
-          clang -c build_win/toka_rt.c -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
+          clang -c build_win/toka_rt.c -I build_win -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
           clang build_win/trg_x64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o "$arch_dir/trg.exe" -lbcrypt -lws2_32 -lshell32
           
@@ -304,7 +304,7 @@ jobs:
 
           windres build_win/trg.rc -O coff -o build_win/trg_manifest.o
           clang -c build_win/trg_win_compat.c -O2 -o build_win/trg_win_compat.o
-          clang -c build_win/toka_rt.c -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
+          clang -c build_win/toka_rt.c -I build_win -O2 -DENOSYS=40 -DWIN32_LEAN_AND_MEAN -o build_win/toka_rt.o
           clang build_win/trg_arm64.o build_win/trg_win_compat.o build_win/trg_manifest.o build_win/toka_rt.o \
             -o "$arch_dir/trg.exe" -lbcrypt -lws2_32 -lshell32
           
