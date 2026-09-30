@@ -1,9 +1,11 @@
-// Bounded .gitignore stack evaluator for trg.
+// Bounded .gitignore stack evaluator for trg with hierarchical Git root inheritance.
 import core/types::{usize}
+import core/option::{Option}
 import std/vec::{Vec}
 import src/unsafe_owned_vec::{UnsafeOwnedVec}
 import std/io::{File}
 import src/types::{GlobRule}
+import src/posix::{posix_stat}
 import src/glob::{parse_glob_rule, match_glob_pat}
 
 pub shape IgnoreLayer (
@@ -15,12 +17,74 @@ pub shape IgnoreStack (
     layers#: UnsafeOwnedVec<IgnoreLayer>
 )
 
+
+fn path_contains_git_segment(path: str) -> bool {
+    if path == ".git" || path.starts_with(".git/") || path.ends_with("/.git") {
+        return true
+    }
+    if path.len >= 6 {
+        auto i# = 0:usize
+        auto max_i = path.len - 6
+        loop i <= max_i {
+            if path.byte_at(i) == ('/' as char) &&
+               path.byte_at(i + 1:usize) == ('.' as char) &&
+               path.byte_at(i + 2:usize) == ('g' as char) &&
+               path.byte_at(i + 3:usize) == ('i' as char) &&
+               path.byte_at(i + 4:usize) == ('t' as char) &&
+               path.byte_at(i + 5:usize) == ('/' as char) {
+                return true
+            }
+            i = i + 1:usize
+        }
+    }
+    return false
+}
+
 impl IgnoreStack {
     pub fn new() -> IgnoreStack {
         return IgnoreStack(layers = UnsafeOwnedVec<IgnoreLayer>::new())
     }
 
-    pub fn push_dir(self#, dir_path: string) {
+    pub fn push_file_rules(self#, file_path: string, dir_prefix: string) {
+        auto file_res = File::try_open(file_path, "r")
+        if file_res.is_err() {
+            return
+        }
+
+        auto file# = file_res.unwrap()
+        auto content_res = file.read_to_string()
+        file#.close()
+
+        if content_res.is_err() {
+            return
+        }
+
+        auto content = content_res.unwrap()
+        auto rules# = Vec<GlobRule>::new()
+        auto lines_iter# = content.as_str().lines()
+
+        loop true {
+            auto line_opt = lines_iter#.next()
+            if line_opt.is_none() { break }
+            auto raw_line = line_opt.unwrap()
+            auto trimmed = raw_line.trim()
+            if trimmed.len == 0 { continue }
+            if trimmed.starts_with("#") { continue }
+
+            auto rule = parse_glob_rule(string::from(trimmed))
+            rules#.push(cede rule)
+        }
+
+        if rules.len() > 0 {
+            auto layer = IgnoreLayer(
+                dir_prefix = dir_prefix.clone(),
+                rules = cede rules
+            )
+            self.layers#.push(cede layer)
+        }
+    }
+
+    pub fn push_dir(self#, dir_path: string, dir_prefix: string) {
         auto gitignore_path# = string::from("")
         if dir_path.as_str() == "." || dir_path.as_str() == "" {
             gitignore_path = string::from(".gitignore")
@@ -33,7 +97,7 @@ impl IgnoreStack {
         if file_res.is_err() {
             // Push empty layer for scope balance
             auto layer = IgnoreLayer(
-                dir_prefix = dir_path.clone(),
+                dir_prefix = dir_prefix.clone(),
                 rules = Vec<GlobRule>::new()
             )
             self.layers#.push(cede layer)
@@ -46,7 +110,7 @@ impl IgnoreStack {
 
         if content_res.is_err() {
             auto layer = IgnoreLayer(
-                dir_prefix = dir_path.clone(),
+                dir_prefix = dir_prefix.clone(),
                 rules = Vec<GlobRule>::new()
             )
             self.layers#.push(cede layer)
@@ -70,7 +134,7 @@ impl IgnoreStack {
         }
 
         auto layer = IgnoreLayer(
-            dir_prefix = dir_path.clone(),
+            dir_prefix = dir_prefix.clone(),
             rules = cede rules
         )
         self.layers#.push(cede layer)
@@ -83,8 +147,8 @@ impl IgnoreStack {
     }
 
     pub fn is_ignored(self, rel_path: str, is_dir: bool) -> bool {
-        // Built-in hardcoded ignores
-        if rel_path == ".git" || rel_path.starts_with(".git/") || rel_path.ends_with("/.git") {
+        // Built-in hardcoded ignores for .git
+        if path_contains_git_segment(rel_path) {
             return true
         }
 
@@ -105,16 +169,15 @@ impl IgnoreStack {
             loop r_idx > 0 {
                 r_idx = r_idx - 1
                 auto &rule = layer.rules.borrow(r_idx)
-                
+
                 // If layer has dir_prefix, strip prefix from rel_path for local evaluation
                 auto test_path# = rel_path
                 auto prefix = layer.dir_prefix.as_str()
                 if prefix != "." && prefix != "" {
-                    if rel_path.starts_with(prefix) {
-                        auto rest_len = rel_path.len - prefix.len
-                        if rest_len > 1 && rel_path.byte_at(prefix.len) == ('/' as char) {
-                            test_path = rel_path.substr(prefix.len + 1, rest_len - 1)
-                        }
+                    if rel_path.starts_with(prefix) && rel_path.len > prefix.len && rel_path.byte_at(prefix.len) == ('/' as char) {
+                        test_path = rel_path.substr(prefix.len + 1:usize, rel_path.len - prefix.len - 1:usize)
+                    } else {
+                        continue
                     }
                 }
 
@@ -129,4 +192,130 @@ impl IgnoreStack {
 
         return false
     }
+}
+
+pub fn find_git_root(target_abs: str) -> Option<string> {
+    if target_abs.len == 0 {
+        return Option<string>::None
+    }
+
+    auto curr# = string::from(target_abs)
+    loop true {
+        auto git_probe# = curr.clone()
+        if curr.as_str() != "/" && !curr.as_str().ends_with("/") {
+            git_probe#.push_str("/.git")
+        } else {
+            git_probe#.push_str(".git")
+        }
+
+        auto stat_res = posix_stat(git_probe)
+        if stat_res.is_ok() {
+            return Option<string>::Some(cede curr)
+        }
+
+        auto should_break# = false
+        auto next_curr# = string::new()
+        {
+            auto curr_str = curr.as_str()
+            if curr_str == "/" {
+                should_break = true
+            } else if curr_str.len <= 3 && curr_str.index_of(':' as char).is_some() {
+                should_break = true
+            } else {
+                auto last_slash = curr_str.last_index_of('/' as char)
+                if last_slash.is_none() {
+                    should_break = true
+                } else {
+                    auto idx = last_slash.unwrap()
+                    if idx == 0:usize {
+                        next_curr = string::from("/")
+                    } else if idx == 2:usize && curr_str.index_of(':' as char).is_some() {
+                        next_curr = string::from(curr_str.substr(0, 3:usize))
+                    } else {
+                        next_curr = string::from(curr_str.substr(0, idx))
+                    }
+                }
+            }
+        }
+
+        if should_break {
+            break
+        }
+        curr = cede next_curr
+    }
+
+    return Option<string>::None
+}
+
+pub fn populate_initial_ignore_stack(target_abs: str, stack#: IgnoreStack) -> string {
+    auto git_root_opt = find_git_root(target_abs)
+    if git_root_opt.is_none() {
+        return string::from("")
+    }
+
+    auto git_root = git_root_opt.unwrap()
+
+    // 1. Try to load .git/info/exclude if present
+    auto exclude_path# = git_root.clone()
+    if git_root.as_str() != "/" && !git_root.as_str().ends_with("/") {
+        exclude_path#.push_str("/.git/info/exclude")
+    } else {
+        exclude_path#.push_str(".git/info/exclude")
+    }
+    stack#.push_file_rules(exclude_path, string::from(""))
+
+    if target_abs == git_root.as_str() {
+        return string::from("")
+    }
+
+    // Determine the relative path from git_root to target_abs:
+    auto r_len = git_root.len()
+    auto rel_sub# = ""
+    if target_abs.len > r_len {
+        if target_abs.byte_at(r_len) == ('/' as char) {
+            rel_sub = target_abs.substr(r_len + 1:usize, target_abs.len - r_len - 1:usize)
+        } else {
+            rel_sub = target_abs.substr(r_len, target_abs.len - r_len)
+        }
+    }
+
+    // 2. Load root .gitignore
+    auto root_gitignore# = git_root.clone()
+    if git_root.as_str() != "/" && !git_root.as_str().ends_with("/") {
+        root_gitignore#.push_str("/.gitignore")
+    } else {
+        root_gitignore#.push_str(".gitignore")
+    }
+    stack#.push_file_rules(root_gitignore, string::from(""))
+
+    // 3. Load any intermediate .gitignore between git_root and target_abs
+    if rel_sub.len > 0 {
+        auto i# = 0:usize
+        auto last_comp_start# = 0:usize
+        auto curr_rel# = string::new()
+        loop i < rel_sub.len {
+            if rel_sub.byte_at(i) == ('/' as char) {
+                auto comp = rel_sub.substr(last_comp_start, i - last_comp_start)
+                if comp.len > 0 && comp != "." {
+                    if curr_rel.len() > 0 {
+                        curr_rel#.push_str("/")
+                    }
+                    curr_rel#.push_str(comp)
+
+                    auto inter_gitignore# = git_root.clone()
+                    if git_root.as_str() != "/" && !git_root.as_str().ends_with("/") {
+                        inter_gitignore#.push_str("/")
+                    }
+                    inter_gitignore#.push_str(curr_rel.as_str())
+                    inter_gitignore#.push_str("/.gitignore")
+
+                    stack#.push_file_rules(inter_gitignore, curr_rel.clone())
+                }
+                last_comp_start = i + 1:usize
+            }
+            i = i + 1:usize
+        }
+    }
+
+    return string::from(rel_sub)
 }

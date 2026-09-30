@@ -5,7 +5,7 @@ import core/option::{Option}
 import std/vec::{Vec}
 import src/types::{CliOptions, GlobRule, SortMode, SearchDiagnostic}
 import src/posix::{posix_stat, posix_opendir, posix_readdir, posix_closedir, posix_get_errno, is_windows_target}
-import src/ignore::{IgnoreStack}
+import src/ignore::{IgnoreStack, populate_initial_ignore_stack}
 import src/glob::{is_glob_allowed}
 import src/file_types::{match_type_filter}
 import std/env as env
@@ -162,6 +162,7 @@ fn build_child_path(parent: str, child: str) -> string {
 
 fn walk_dir_recursive(
     dir_path: string,
+    git_rel_dir: string,
     opts: CliOptions,
     ignore_stack#: IgnoreStack,
     collected#: Vec<string>,
@@ -169,7 +170,7 @@ fn walk_dir_recursive(
     diagnostics#: Vec<SearchDiagnostic>
 ) {
     if !opts.no_ignore {
-        ignore_stack#.push_dir(dir_path.clone())
+        ignore_stack#.push_dir(dir_path.clone(), git_rel_dir.clone())
     }
 
     auto dir_res = posix_opendir(dir_path.clone())
@@ -242,9 +243,21 @@ fn walk_dir_recursive(
             continue
         }
 
+        // Compute child_git_rel for ignore matching
+        auto child_git_rel# = string::new()
+        if git_rel_dir.len() == 0 || git_rel_dir.as_str() == "." {
+            child_git_rel = string::from(entry_str)
+        } else {
+            child_git_rel = git_rel_dir.clone()
+            if !child_git_rel.as_str().ends_with("/") {
+                child_git_rel#.push_str("/")
+            }
+            child_git_rel#.push_str(entry_str)
+        }
+
         if stat.is_dir {
             // Check directory ignore rule for pruning
-            if !opts.no_ignore && ignore_stack.is_ignored(full_path.as_str(), true) {
+            if !opts.no_ignore && ignore_stack.is_ignored(child_git_rel.as_str(), true) {
                 continue
             }
 
@@ -254,10 +267,10 @@ fn walk_dir_recursive(
             }
 
             // Recurse into directory
-            walk_dir_recursive(full_path, opts, ignore_stack#, collected#, had_error#, diagnostics#)
+            walk_dir_recursive(full_path, child_git_rel, opts, ignore_stack#, collected#, had_error#, diagnostics#)
         } else if stat.is_file {
             // Check file ignore rule
-            if !opts.no_ignore && ignore_stack.is_ignored(full_path.as_str(), false) {
+            if !opts.no_ignore && ignore_stack.is_ignored(child_git_rel.as_str(), false) {
                 continue
             }
 
@@ -340,8 +353,13 @@ pub fn collect_search_targets(opts: CliOptions) -> WalkResult {
                 files#.push(path_arg.clone())
             }
         } else if stat.is_dir {
+            auto target_abs = id_res.unwrap()
             auto ignore_stack# = IgnoreStack::new()
-            walk_dir_recursive(path_arg.clone(), opts, ignore_stack#, files#, had_error#, diagnostics#)
+            auto git_rel_dir# = string::new()
+            if !opts.no_ignore {
+                git_rel_dir = populate_initial_ignore_stack(target_abs.as_str(), ignore_stack#)
+            }
+            walk_dir_recursive(path_arg.clone(), git_rel_dir, opts, ignore_stack#, files#, had_error#, diagnostics#)
         } else {
             // If it's a symlink at the root argument level, do not follow by default
             if !stat.is_symlink {
