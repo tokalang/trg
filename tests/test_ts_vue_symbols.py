@@ -204,6 +204,105 @@ const { name } = Astro.props;
         assert "interface Props" in res.stdout
 
 
+def test_vue_multiline_nested_generics():
+    """TRG-001: Vue multiline type with nested generics should span exactly L144-L146 and not swallow L147."""
+    code = """<template><div>Viewer</div></template>
+<script setup lang="ts">
+// Some leading comments
+type PreviewPdfPage = Awaited<
+  ReturnType<Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>['getPage']>
+>
+
+type PreviewPdfRenderTask = ReturnType<PreviewPdfPage['render']>
+</script>
+"""
+    with tempfile.NamedTemporaryFile(suffix=".vue", mode="w", delete=False) as f:
+        f.write(code)
+        f.flush()
+
+        res_json = run_trg(["symbols", f.name, "--json"])
+        assert res_json.returncode == 0, f"trg symbols --json failed: {res_json.stderr}"
+        symbols = json.loads(res_json.stdout)
+
+        assert len(symbols) == 2, f"Expected 2 symbols, got {len(symbols)}: {symbols}"
+        s0 = symbols[0]
+        assert s0["name"] == "PreviewPdfPage"
+        assert s0["range"] == [4, 6], f"Expected [4, 6] for PreviewPdfPage, got {s0['range']}"
+        assert s0["scope"] == ""
+
+        s1 = symbols[1]
+        assert s1["name"] == "PreviewPdfRenderTask"
+        assert s1["range"] == [8, 8], f"Expected [8, 8] for PreviewPdfRenderTask, got {s1['range']}"
+        assert s1["scope"] == ""
+
+        # Test view on PreviewPdfPage
+        res_view0 = run_trg(["view", f.name, "--symbol", "PreviewPdfPage", "--no-hints"])
+        assert res_view0.returncode == 0
+        assert "type PreviewPdfPage = Awaited<" in res_view0.stdout
+        assert "PreviewPdfRenderTask" not in res_view0.stdout
+        assert "lines: L4-L6" in res_view0.stdout
+
+        # Test view on PreviewPdfRenderTask
+        res_view1 = run_trg(["view", f.name, "--symbol", "PreviewPdfRenderTask", "--no-hints"])
+        assert res_view1.returncode == 0
+        assert "type PreviewPdfRenderTask = ReturnType" in res_view1.stdout
+        assert "lines: L8-L8" in res_view1.stdout
+
+
+def test_ts_multiline_variations():
+    """TRG-001: Multiline union, object, and function types with and without semicolons."""
+    code = """type UnionType =
+  | { kind: "a"; value: number }
+  | { kind: "b"; value: string };
+
+type ObjectType = {
+  foo: string;
+  bar: number;
+}
+
+type FuncType = (
+  x: number,
+  y: string
+) => boolean
+
+interface ViewerConfig {
+  scale: number;
+}
+
+export function openViewer(cfg: ViewerConfig): void {
+  const x = 1;
+}
+"""
+    with tempfile.NamedTemporaryFile(suffix=".ts", mode="w", delete=False) as f:
+        f.write(code)
+        f.flush()
+
+        res_json = run_trg(["symbols", f.name, "--json"])
+        assert res_json.returncode == 0
+        symbols = json.loads(res_json.stdout)
+
+        assert len(symbols) == 5, f"Expected 5 symbols, got {len(symbols)}: {symbols}"
+        assert symbols[0]["name"] == "UnionType"
+        assert symbols[0]["range"] == [1, 3]
+        assert symbols[0]["scope"] == ""
+
+        assert symbols[1]["name"] == "ObjectType"
+        assert symbols[1]["range"] == [5, 8]
+        assert symbols[1]["scope"] == ""
+
+        assert symbols[2]["name"] == "FuncType"
+        assert symbols[2]["range"] == [10, 13]
+        assert symbols[2]["scope"] == ""
+
+        assert symbols[3]["name"] == "ViewerConfig"
+        assert symbols[3]["range"] == [15, 17]
+        assert symbols[3]["scope"] == ""
+
+        assert symbols[4]["name"] == "openViewer"
+        assert symbols[4]["range"] == [19, 21]
+        assert symbols[4]["scope"] == ""
+
+
 def main():
     print("Testing TS inline type import defense...")
     test_ts_inline_type_import_defense()
@@ -215,6 +314,14 @@ def main():
 
     print("Testing TS multiline block type...")
     test_ts_multiline_block_type()
+    print("  Passed.")
+
+    print("Testing Vue multiline nested generics...")
+    test_vue_multiline_nested_generics()
+    print("  Passed.")
+
+    print("Testing TS multiline variations...")
+    test_ts_multiline_variations()
     print("  Passed.")
 
     print("Testing Vue SFC symbol view...")
@@ -230,3 +337,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

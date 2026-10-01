@@ -15,6 +15,7 @@ pub shape LiteralMatcher (
 pub shape RegexMatcher (
     compiled: CompiledRegex,
     required_literal: Option<string>,
+    alternation_literals: Option<Vec<string>>,
     no_prefilter: bool,
     is_empty_plan: bool
 )
@@ -23,6 +24,85 @@ pub shape SearchPlan (
     Literal(LiteralMatcher) = 0 |
     RegexPlan(RegexMatcher) = 1
 )
+
+fn is_pure_regex_literal(s: str) -> bool {
+    if s.len == 0 { return false }
+    auto i# = 0:usize
+    loop i < s.len {
+        auto c = s.byte_at(i)
+        if c == ('\\' as char) || c == ('.' as char) || c == ('*' as char) ||
+           c == ('+' as char) || c == ('?' as char) || c == ('(' as char) ||
+           c == (')' as char) || c == ('[' as char) || c == (']' as char) ||
+           c == ('{' as char) || c == ('}' as char) || c == ('^' as char) ||
+           c == ('$' as char) || c == ('|' as char) {
+            return false
+        }
+        i = i + 1:usize
+    }
+    return true
+}
+
+fn extract_alternation_literals(pattern: str) -> Option<Vec<string>> {
+    auto pat# = pattern.trim()
+    if pat.len == 0 { return Option<Vec<string>>::None }
+
+    if pat.starts_with("(") && pat.ends_with(")") {
+        auto depth# = 0:usize
+        auto all_enclosed# = true
+        auto k# = 0:usize
+        loop k < pat.len - 1:usize {
+            auto c = pat.byte_at(k)
+            if c == ('(' as char) { depth = depth + 1:usize }
+            else if c == (')' as char) {
+                if depth > 0:usize { depth = depth - 1:usize }
+                if depth == 0:usize {
+                    all_enclosed = false
+                    break
+                }
+            }
+            k = k + 1:usize
+        }
+        if all_enclosed {
+            pat = pat.substr(1:usize, pat.len - 2:usize).trim()
+        }
+    }
+
+    auto alts# = Vec<string>::new()
+    auto cur_part# = string::new()
+    auto p_depth# = 0:usize
+    auto i# = 0:usize
+    loop i < pat.len {
+        auto c = pat.byte_at(i)
+        if c == ('\\' as char) && i + 1:usize < pat.len {
+            return Option<Vec<string>>::None
+        }
+        if c == ('(' as char) {
+            p_depth = p_depth + 1:usize
+        } else if c == (')' as char) {
+            if p_depth > 0:usize { p_depth = p_depth - 1:usize }
+        } else if c == ('|' as char) && p_depth == 0:usize {
+            if !is_pure_regex_literal(cur_part.as_str()) {
+                return Option<Vec<string>>::None
+            }
+            alts#.push(cur_part.clone())
+            cur_part#.clear()
+            i = i + 1:usize
+            continue
+        }
+        cur_part#.push_char(c)
+        i = i + 1:usize
+    }
+
+    if !is_pure_regex_literal(cur_part.as_str()) {
+        return Option<Vec<string>>::None
+    }
+    alts#.push(cur_part.clone())
+
+    if alts.len() > 1:usize {
+        return Option<Vec<string>>::Some(cede alts)
+    }
+    return Option<Vec<string>>::None
+}
 
 fn is_ascii_word_byte(b: u8) -> bool {
     return (b >= 'a' as u8 && b <= 'z' as u8) ||
@@ -251,7 +331,32 @@ impl RegexMatcher {
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    match self.alternation_literals {
+                        auto Option<Vec<string>>::Some(&alts) => {
+                            auto any_hit# = false
+                            auto ai# = 0:usize
+                            loop ai < alts.len() {
+                                auto alt_str = alts.borrow(ai).as_str()
+                                auto hit# = false
+                                if self.compiled.options().ignore_ascii_case {
+                                    hit = index_of_str_ascii_case(line, alt_str).is_some()
+                                } else {
+                                    hit = line.index_of_str(alt_str).is_some()
+                                }
+                                if hit {
+                                    any_hit = true
+                                    break
+                                }
+                                ai = ai + 1
+                            }
+                            if !any_hit {
+                                return false
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -280,7 +385,32 @@ impl RegexMatcher {
                         }
                     }
                 }
-                _ => {}
+                _ => {
+                    match self.alternation_literals {
+                        auto Option<Vec<string>>::Some(&alts) => {
+                            auto any_hit# = false
+                            auto ai# = 0:usize
+                            loop ai < alts.len() {
+                                auto alt_str = alts.borrow(ai).as_str()
+                                auto hit# = false
+                                if self.compiled.options().ignore_ascii_case {
+                                    hit = index_of_str_ascii_case(line, alt_str).is_some()
+                                } else {
+                                    hit = line.index_of_str(alt_str).is_some()
+                                }
+                                if hit {
+                                    any_hit = true
+                                    break
+                                }
+                                ai = ai + 1
+                            }
+                            if !any_hit {
+                                return MatchDecision(matched = false, ranges = Vec<MatchRange>::new())
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -398,6 +528,7 @@ impl SearchPlan {
                 return Result<SearchPlan, SearchDiagnostic>::Ok(SearchPlan::RegexPlan(RegexMatcher(
                     compiled = cede dummy_regex,
                     required_literal = Option<string>::None,
+                    alternation_literals = Option<Vec<string>>::None,
                     no_prefilter = opts.no_prefilter,
                     is_empty_plan = true
                 )))
@@ -441,9 +572,33 @@ impl SearchPlan {
             if num_pats == 1 {
                 required = compiled.required_literal()
             }
+            auto alts_opt# = Option<Vec<string>>::None
+            if required.is_none() {
+                if num_pats == 1 {
+                    alts_opt = extract_alternation_literals(opts.patterns.borrow(0).as_str())
+                } else {
+                    auto all_lits# = true
+                    auto multi_alts# = Vec<string>::new()
+                    auto pi# = 0:usize
+                    loop pi < num_pats {
+                        auto p_str = opts.patterns.borrow(pi).as_str()
+                        if is_pure_regex_literal(p_str) {
+                            multi_alts#.push(string::from(p_str))
+                        } else {
+                            all_lits = false
+                            break
+                        }
+                        pi = pi + 1
+                    }
+                    if all_lits && multi_alts.len() > 1:usize {
+                        alts_opt = Option<Vec<string>>::Some(cede multi_alts)
+                    }
+                }
+            }
             return Result<SearchPlan, SearchDiagnostic>::Ok(SearchPlan::RegexPlan(RegexMatcher(
                 compiled = cede compiled,
                 required_literal = cede required,
+                alternation_literals = cede alts_opt,
                 no_prefilter = opts.no_prefilter,
                 is_empty_plan = false
             )))

@@ -26,7 +26,12 @@ import src/syntax::{
     check_is_self_closed_structured,
     find_arrow_function_pos,
     strip_declaration_modifiers,
-    is_single_line_type_alias
+    is_single_line_type_alias,
+    TypeDelimiters,
+    update_type_delimiters,
+    line_has_trailing_type_continuation,
+    line_has_leading_type_continuation,
+    is_declaration_or_boundary_line
 }
 import src/printer::{u64_to_string, json_escape}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
@@ -214,6 +219,11 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
     auto all_symbols# = Vec<SymbolRecord>::new()
     auto recent_lines# = Vec<string>::new()
     auto first_stored_line# = 1:usize
+    auto has_active_type# = false
+    auto active_type_sym_idx# = 0:usize
+    auto active_type_delims# = TypeDelimiters::new()
+    auto active_type_last_line# = 0:usize
+    auto active_type_cand_end# = 0:usize
 
     auto read_err# = false
     auto truncated# = false
@@ -305,6 +315,37 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
 
                 total_lines = cur_line
 
+                if has_active_type {
+                    auto is_boundary = is_declaration_or_boundary_line(pat_text)
+                    if is_boundary {
+                        auto close_line# = active_type_cand_end
+                        if close_line == 0:usize {
+                            close_line = active_type_last_line
+                        }
+                        auto &prev_sym# = all_symbols#.borrow_mut(active_type_sym_idx)
+                        prev_sym.range_end = Option<usize>::Some(close_line)
+                        prev_sym.range_reliability = string::from("observed_close")
+                        has_active_type = false
+                    } else {
+                        auto trimmed = pat_text.trim()
+                        if trimmed.len > 0 {
+                            if line_has_leading_type_continuation(pat_text) {
+                                active_type_cand_end = 0:usize
+                            }
+                            update_type_delimiters(pat_text, active_type_delims#)
+                            active_type_last_line = cur_line
+                            if trimmed.ends_with(";") && active_type_delims.is_all_zero() {
+                                auto &prev_sym# = all_symbols#.borrow_mut(active_type_sym_idx)
+                                prev_sym.range_end = Option<usize>::Some(cur_line)
+                                prev_sym.range_reliability = string::from("observed_close")
+                                has_active_type = false
+                            } else if active_type_delims.is_all_zero() && !line_has_trailing_type_continuation(pat_text) {
+                                active_type_cand_end = cur_line
+                            }
+                        }
+                    }
+                }
+
                 auto lex = scan_line_lexical(pat_text, d#, dialect)
 
                 // 1. Pop closed symbols from open_stack
@@ -359,7 +400,10 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                 }
 
                 // 2. Identify declarations on this line
-                auto ident = extract_declared_identifier_with_dialect(pat_text, dialect)
+                auto ident# = string::new()
+                if !d.in_heredoc {
+                    ident = extract_declared_identifier_with_dialect(pat_text, dialect)
+                }
                 if ident.len() > 0 {
                     auto kind_raw = classify_symbol_kind_with_dialect(pat_text, dialect)
                     auto kind# = cede kind_raw
@@ -397,6 +441,9 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                     if is_single_line_type_alias(pat_text) {
                         is_self_closed = true
                     }
+                    if kind == "type" {
+                        is_self_closed = is_single_line_type_alias(pat_text)
+                    }
 
                     auto sym_idx_opt# = Option<usize>::None
                     auto is_kind_match# = true
@@ -428,13 +475,20 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                         auto range_s = snap_symbol_start_decorators(cur_line, first_stored_line, recent_lines)
                         auto r_end# = Option<usize>::None
                         auto r_rel# = string::from("unknown")
-                        if is_self_closed {
-                            r_end = Option<usize>::Some(cur_line)
-                            r_rel = string::from("single_line")
-                        } else if pat_text.trim().ends_with(";") && pat_text.index_of('{' as char).is_none() {
-                            is_self_closed = true
-                            r_end = Option<usize>::Some(cur_line)
-                            r_rel = string::from("single_line")
+                        if kind == "type" {
+                            if is_self_closed {
+                                r_end = Option<usize>::Some(cur_line)
+                                r_rel = string::from("single_line")
+                            }
+                        } else {
+                            if is_self_closed {
+                                r_end = Option<usize>::Some(cur_line)
+                                r_rel = string::from("single_line")
+                            } else if pat_text.trim().ends_with(";") && pat_text.index_of('{' as char).is_none() {
+                                is_self_closed = true
+                                r_end = Option<usize>::Some(cur_line)
+                                r_rel = string::from("single_line")
+                            }
                         }
 
                         auto detail_str# = string::from(pat_text.trim())
@@ -458,6 +512,15 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                             detail = cede detail_str,
                             range_reliability = cede r_rel
                         ))
+
+                        if kind == "type" && !is_self_closed {
+                            has_active_type = true
+                            active_type_sym_idx = sym_idx
+                            active_type_delims = TypeDelimiters::new()
+                            update_type_delimiters(pat_text, active_type_delims#)
+                            active_type_last_line = cur_line
+                            active_type_cand_end = 0:usize
+                        }
 
                         // Approximate byte budget tracking
                         approx_bytes_accum = approx_bytes_accum + 120:usize + ident.len() + scope_name.len()
@@ -511,6 +574,16 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
 
     // Seal unclosed symbols at EOF only if NOT truncated early
     if !truncated {
+        if has_active_type {
+            auto close_line# = active_type_cand_end
+            if close_line == 0:usize {
+                close_line = active_type_last_line
+            }
+            auto &prev_sym# = all_symbols#.borrow_mut(active_type_sym_idx)
+            prev_sym.range_end = Option<usize>::Some(close_line)
+            prev_sym.range_reliability = string::from("observed_close")
+            has_active_type = false
+        }
         loop open_stack.len() > 0:usize {
             auto top_entry = open_stack#.pop().unwrap()
             match top_entry.symbol_index {
@@ -576,6 +649,11 @@ pub fn outline_symbols_lines(
     auto all_symbols# = Vec<SymbolRecord>::new()
     auto recent_lines# = Vec<string>::new()
     auto first_stored_line# = 1:usize
+    auto has_active_type# = false
+    auto active_type_sym_idx# = 0:usize
+    auto active_type_delims# = TypeDelimiters::new()
+    auto active_type_last_line# = 0:usize
+    auto active_type_cand_end# = 0:usize
 
     auto truncated# = false
     auto term_reason# = string::from("completed")
@@ -590,6 +668,37 @@ pub fn outline_symbols_lines(
         auto pat_text# = full_view
         if full_view.len > 0 && full_view.byte_at(full_view.len - 1) == ('\r' as char) {
             pat_text = full_view.substr(0, full_view.len - 1)
+        }
+
+        if has_active_type {
+            auto is_boundary = is_declaration_or_boundary_line(pat_text)
+            if is_boundary {
+                auto close_line# = active_type_cand_end
+                if close_line == 0:usize {
+                    close_line = active_type_last_line
+                }
+                auto &prev_sym# = all_symbols#.borrow_mut(active_type_sym_idx)
+                prev_sym.range_end = Option<usize>::Some(close_line)
+                prev_sym.range_reliability = string::from("observed_close")
+                has_active_type = false
+            } else {
+                auto trimmed = pat_text.trim()
+                if trimmed.len > 0 {
+                    if line_has_leading_type_continuation(pat_text) {
+                        active_type_cand_end = 0:usize
+                    }
+                    update_type_delimiters(pat_text, active_type_delims#)
+                    active_type_last_line = cur_line
+                    if trimmed.ends_with(";") && active_type_delims.is_all_zero() {
+                        auto &prev_sym# = all_symbols#.borrow_mut(active_type_sym_idx)
+                        prev_sym.range_end = Option<usize>::Some(cur_line)
+                        prev_sym.range_reliability = string::from("observed_close")
+                        has_active_type = false
+                    } else if active_type_delims.is_all_zero() && !line_has_trailing_type_continuation(pat_text) {
+                        active_type_cand_end = cur_line
+                    }
+                }
+            }
         }
 
         auto lex = scan_line_lexical(pat_text, d#, dialect)
@@ -646,7 +755,10 @@ pub fn outline_symbols_lines(
         }
 
         // 2. Identify declarations on this line
-        auto ident = extract_declared_identifier_with_dialect(pat_text, dialect)
+        auto ident# = string::new()
+        if !d.in_heredoc {
+            ident = extract_declared_identifier_with_dialect(pat_text, dialect)
+        }
         if ident.len() > 0 {
             auto kind_raw = classify_symbol_kind_with_dialect(pat_text, dialect)
             auto kind# = cede kind_raw
@@ -684,8 +796,8 @@ pub fn outline_symbols_lines(
             if is_single_line_type_alias(pat_text) {
                 is_self_closed = true
             }
-            if pat_text.trim().ends_with(";") && pat_text.index_of('{' as char).is_none() {
-                is_self_closed = true
+            if kind == "type" {
+                is_self_closed = is_single_line_type_alias(pat_text)
             }
 
             auto sym_idx_opt# = Option<usize>::None
@@ -715,9 +827,20 @@ pub fn outline_symbols_lines(
                 auto range_s = snap_symbol_start_decorators(cur_line, first_stored_line, recent_lines)
                 auto r_end# = Option<usize>::None
                 auto r_rel# = string::from("unknown")
-                if is_self_closed {
-                    r_end = Option<usize>::Some(cur_line)
-                    r_rel = string::from("single_line")
+                if kind == "type" {
+                    if is_self_closed {
+                        r_end = Option<usize>::Some(cur_line)
+                        r_rel = string::from("single_line")
+                    }
+                } else {
+                    if is_self_closed {
+                        r_end = Option<usize>::Some(cur_line)
+                        r_rel = string::from("single_line")
+                    } else if pat_text.trim().ends_with(";") && pat_text.index_of('{' as char).is_none() {
+                        is_self_closed = true
+                        r_end = Option<usize>::Some(cur_line)
+                        r_rel = string::from("single_line")
+                    }
                 }
 
                 auto detail_str# = string::from(pat_text.trim())
@@ -741,6 +864,15 @@ pub fn outline_symbols_lines(
                     detail = cede detail_str,
                     range_reliability = cede r_rel
                 ))
+
+                if kind == "type" && !is_self_closed {
+                    has_active_type = true
+                    active_type_sym_idx = sym_idx
+                    active_type_delims = TypeDelimiters::new()
+                    update_type_delimiters(pat_text, active_type_delims#)
+                    active_type_last_line = cur_line
+                    active_type_cand_end = 0:usize
+                }
 
                 approx_bytes_accum = approx_bytes_accum + 120:usize + ident.len() + scope_name.len()
                 if has_max_bytes && approx_bytes_accum >= max_bytes_val {
@@ -775,6 +907,16 @@ pub fn outline_symbols_lines(
     }
 
     if !truncated {
+        if has_active_type {
+            auto close_line# = active_type_cand_end
+            if close_line == 0:usize {
+                close_line = active_type_last_line
+            }
+            auto &prev_sym# = all_symbols#.borrow_mut(active_type_sym_idx)
+            prev_sym.range_end = Option<usize>::Some(close_line)
+            prev_sym.range_reliability = string::from("observed_close")
+            has_active_type = false
+        }
         loop open_stack.len() > 0:usize {
             auto top_entry = open_stack#.pop().unwrap()
             match top_entry.symbol_index {

@@ -15,7 +15,9 @@ pub shape DelimiterDepths (
     str_char: char,
     escape: bool,
     is_triple_quote: bool,
-    block_comment_depth: usize
+    block_comment_depth: usize,
+    in_heredoc: bool,
+    heredoc_tag: string
 )
 
 impl DelimiterDepths {
@@ -29,7 +31,9 @@ impl DelimiterDepths {
             str_char = self.str_char,
             escape = self.escape,
             is_triple_quote = self.is_triple_quote,
-            block_comment_depth = self.block_comment_depth
+            block_comment_depth = self.block_comment_depth,
+            in_heredoc = self.in_heredoc,
+            heredoc_tag = self.heredoc_tag.clone()
         )
     }
 
@@ -43,12 +47,14 @@ impl DelimiterDepths {
             str_char = 0:char,
             escape = false,
             is_triple_quote = false,
-            block_comment_depth = 0:usize
+            block_comment_depth = 0:usize,
+            in_heredoc = false,
+            heredoc_tag = string::new()
         )
     }
 
     pub fn is_clean_eof(self) -> bool {
-        return !self.in_str && !self.is_triple_quote && self.block_comment_depth == 0:usize && self.brace_depth == 0:usize && self.paren_depth == 0:usize && self.bracket_depth == 0:usize && !self.trailing_backslash
+        return !self.in_str && !self.is_triple_quote && !self.in_heredoc && self.block_comment_depth == 0:usize && self.brace_depth == 0:usize && self.paren_depth == 0:usize && self.bracket_depth == 0:usize && !self.trailing_backslash
     }
 }
 
@@ -166,7 +172,8 @@ pub fn is_symbol_view_supported(path: str) -> bool {
        ext == "js" || ext == "jsx" || ext == "ts" || ext == "tsx" || ext == "mjs" || ext == "cjs" ||
        ext == "java" || ext == "kt" || ext == "kts" || ext == "scala" || ext == "swift" || ext == "cs" ||
        ext == "rb" || ext == "php" || ext == "dart" || ext == "zig" || ext == "nim" || ext == "lua" ||
-       ext == "vue" || ext == "svelte" || ext == "astro" {
+       ext == "vue" || ext == "svelte" || ext == "astro" ||
+       ext == "sh" || ext == "bash" || ext == "zsh" {
         return true
     }
     return false
@@ -180,8 +187,11 @@ pub fn detect_lexical_dialect(path: str) -> LexicalDialect {
     if ext == "rs" {
         return LexicalDialect::Rust
     }
+    if ext == "sh" || ext == "bash" || ext == "zsh" {
+        return LexicalDialect::Bash
+    }
     if ext == "py" || ext == "pyi" || ext == "yaml" || ext == "yml" || ext == "nim" ||
-       ext == "sh" || ext == "bash" || ext == "zsh" || ext == "rb" || ext == "pl" || ext == "r" {
+       ext == "rb" || ext == "pl" || ext == "r" {
         return LexicalDialect::HashComment
     }
     return LexicalDialect::Generic
@@ -204,6 +214,63 @@ pub fn compute_line_indent(line: str) -> usize {
     return indent
 }
 
+pub fn extract_heredoc_tag(line: str, start_pos: usize) -> Option<string> {
+    auto p# = start_pos
+    if p < line.len && line.byte_at(p) == ('-' as char) {
+        p = p + 1:usize
+    }
+    loop p < line.len && (line.byte_at(p) == (' ' as char) || line.byte_at(p) == ('\t' as char)) {
+        p = p + 1:usize
+    }
+    if p >= line.len {
+        return Option<string>::None
+    }
+    auto c = line.byte_at(p)
+    auto is_quoted = c == ('\'' as char) || c == ('"' as char)
+    auto is_escaped = c == ('\\' as char)
+    auto tag# = string::new()
+
+    if is_quoted {
+        p = p + 1:usize
+        loop p < line.len {
+            auto qc = line.byte_at(p)
+            if qc == c {
+                break
+            }
+            tag#.push_char(qc)
+            p = p + 1:usize
+        }
+    } else if is_escaped {
+        p = p + 1:usize
+        loop p < line.len {
+            auto ec = line.byte_at(p)
+            auto is_word = (ec >= ('a' as char) && ec <= ('z' as char)) ||
+                           (ec >= ('A' as char) && ec <= ('Z' as char)) ||
+                           (ec >= ('0' as char) && ec <= ('9' as char)) ||
+                           (ec == ('_' as char))
+            if !is_word { break }
+            tag#.push_char(ec)
+            p = p + 1:usize
+        }
+    } else {
+        loop p < line.len {
+            auto wc = line.byte_at(p)
+            auto is_word = (wc >= ('a' as char) && wc <= ('z' as char)) ||
+                           (wc >= ('A' as char) && wc <= ('Z' as char)) ||
+                           (wc >= ('0' as char) && wc <= ('9' as char)) ||
+                           (wc == ('_' as char))
+            if !is_word { break }
+            tag#.push_char(wc)
+            p = p + 1:usize
+        }
+    }
+
+    if tag.len() > 0 {
+        return Option<string>::Some(cede tag)
+    }
+    return Option<string>::None
+}
+
 pub fn scan_line_lexical(line: str, depths#: DelimiterDepths, dialect: LexicalDialect) -> LineLexicalInfo {
     return scan_line_lexical_with_mask(line, depths#, dialect, false)
 }
@@ -216,12 +283,49 @@ pub fn scan_line_lexical_with_mask(
 ) -> LineLexicalInfo {
     auto depth_before_brace = depths.brace_depth
     auto depth_before_paren = depths.paren_depth
-    auto was_in_comm_or_str = depths.in_str || depths.block_comment_depth > 0:usize
+    auto was_in_comm_or_str = depths.in_str || depths.block_comment_depth > 0:usize || depths.in_heredoc
 
     auto out# = string::new()
     out#.ensure_capacity(line.len + 1:usize)
 
     auto mask# = Vec<u8>::new()
+
+    if depths.in_heredoc {
+        auto trimmed = line.trim()
+        if trimmed == depths.heredoc_tag.as_str() {
+            depths.in_heredoc = false
+            depths.heredoc_tag = string::new()
+        }
+        auto j# = 0:usize
+        loop j < line.len {
+            out#.push_char(' ')
+            if with_mask {
+                mask#.push(BYTE_KIND_STRING)
+            }
+            j = j + 1:usize
+        }
+        auto mask_opt# = Option<Vec<u8>>::None
+        if with_mask {
+            mask_opt = Option<Vec<u8>>::Some(cede mask)
+        }
+        return LineLexicalInfo(
+            code_text = cede out,
+            participates_in_indent = false,
+            statement_indent = 0:usize,
+            depth_before_brace = depth_before_brace,
+            depth_after_brace = depths.brace_depth,
+            depth_before_paren = depth_before_paren,
+            depth_after_paren = depths.paren_depth,
+            has_code_brace_closer = false,
+            has_code_paren_closer = false,
+            is_scope_decl = false,
+            starts_block = false,
+            delimiter = BlockDelimiter::Brace,
+            byte_mask = cede mask_opt,
+            was_in_comm_or_str = true,
+            is_in_comm_or_str_after = depths.in_heredoc
+        )
+    }
 
     auto has_code_brace_closer# = false
     auto has_code_paren_closer# = false
@@ -333,8 +437,8 @@ pub fn scan_line_lexical_with_mask(
         // 3. Not in comment, not in string
         auto is_ws = ch == (' ' as char) || ch == ('\t' as char) || ch == ('\r' as char) || ch == ('\n' as char)
 
-        // Block comment opener (only for non-HashComment dialects)
-        if dialect != LexicalDialect::HashComment && ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('*' as char) {
+        // Block comment opener (only for non-HashComment / non-Bash dialects)
+        if dialect != LexicalDialect::HashComment && dialect != LexicalDialect::Bash && ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('*' as char) {
             depths.block_comment_depth = depths.block_comment_depth + 1:usize
             out#.push_char(' ')
             out#.push_char(' ')
@@ -347,9 +451,10 @@ pub fn scan_line_lexical_with_mask(
         }
 
         // Line comments:
-        // HashComment dialect: '#' is comment
+        // HashComment and Bash dialects: '#' is comment
         // Other dialects: '//' is comment; '#' is code!
-        if dialect == LexicalDialect::HashComment && ch == ('#' as char) {
+        auto is_hash_dialect = dialect == LexicalDialect::HashComment || dialect == LexicalDialect::Bash
+        if is_hash_dialect && ch == ('#' as char) {
             loop i < line.len {
                 out#.push_char(' ')
                 if with_mask {
@@ -359,7 +464,7 @@ pub fn scan_line_lexical_with_mask(
             }
             break
         }
-        if dialect != LexicalDialect::HashComment && ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('/' as char) {
+        if dialect != LexicalDialect::HashComment && dialect != LexicalDialect::Bash && ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('/' as char) {
             loop i < line.len {
                 out#.push_char(' ')
                 if with_mask {
@@ -488,6 +593,20 @@ pub fn scan_line_lexical_with_mask(
             } else if ch == (']' as char) {
                 if depths.bracket_depth > 0:usize {
                     depths.bracket_depth = depths.bracket_depth - 1:usize
+                }
+            }
+
+            if ch == ('<' as char) && dialect == LexicalDialect::Bash && !depths.in_heredoc && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('<' as char) {
+                auto is_here_str = i + 2:usize < line.len && line.byte_at(i + 2:usize) == ('<' as char)
+                if !is_here_str {
+                    auto tag_opt = extract_heredoc_tag(line, i + 2:usize)
+                    match tag_opt {
+                        auto Option<string>::Some(&tag) => {
+                            depths.in_heredoc = true
+                            depths.heredoc_tag = tag.clone()
+                        }
+                        auto Option<string>::None => {}
+                    }
                 }
             }
         }
@@ -719,6 +838,67 @@ pub fn find_arrow_function_pos(line: str) -> Option<usize> {
     return last_arrow
 }
 
+pub fn extract_bash_function_identifier(line: str) -> string {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 || trimmed.starts_with("#") {
+        return string::from("")
+    }
+    auto s# = strip_declaration_modifiers(trimmed)
+    if s.starts_with("function ") {
+        auto rem = s.substr(9:usize, s.len - 9:usize).trim()
+        auto id# = string::new()
+        auto i# = 0:usize
+        loop i < rem.len {
+            auto c = rem.byte_at(i)
+            auto is_id = (c >= ('a' as char) && c <= ('z' as char)) ||
+                         (c >= ('A' as char) && c <= ('Z' as char)) ||
+                         (c >= ('0' as char) && c <= ('9' as char)) ||
+                         (c == ('_' as char)) || (c == ('-' as char)) || (c == (':' as char))
+            if !is_id { break }
+            id#.push_char(c)
+            i = i + 1:usize
+        }
+        return cede id
+    }
+
+    auto p_idx_opt = s.index_of('(' as char)
+    if p_idx_opt.is_none() {
+        return string::from("")
+    }
+    auto p_idx = p_idx_opt.unwrap()
+    if p_idx == 0:usize {
+        return string::from("")
+    }
+    auto name_part = s.substr(0:usize, p_idx).trim()
+    if name_part.len == 0 {
+        return string::from("")
+    }
+    auto j# = 0:usize
+    loop j < name_part.len {
+        auto c = name_part.byte_at(j)
+        auto is_valid = (c >= ('a' as char) && c <= ('z' as char)) ||
+                        (c >= ('A' as char) && c <= ('Z' as char)) ||
+                        (c >= ('0' as char) && c <= ('9' as char)) ||
+                        (c == ('_' as char)) || (c == ('-' as char)) || (c == (':' as char))
+        if !is_valid {
+            return string::from("")
+        }
+        j = j + 1:usize
+    }
+    if name_part == "if" || name_part == "then" || name_part == "else" || name_part == "elif" ||
+       name_part == "fi" || name_part == "case" || name_part == "esac" || name_part == "for" ||
+       name_part == "while" || name_part == "until" || name_part == "do" || name_part == "done" ||
+       name_part == "in" || name_part == "select" || name_part == "time" || name_part == "function" ||
+       name_part == "echo" || name_part == "return" {
+        return string::from("")
+    }
+    auto after_open = s.substr(p_idx + 1:usize, s.len - p_idx - 1:usize).trim()
+    if !after_open.starts_with(")") {
+        return string::from("")
+    }
+    return string::from(name_part)
+}
+
 pub fn extract_declared_identifier(line: str) -> string {
     return extract_declared_identifier_with_dialect(line, LexicalDialect::Toka)
 }
@@ -728,7 +908,14 @@ pub fn extract_declared_identifier_with_dialect(line: str, dialect: LexicalDiale
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return string::from("")
     }
-    auto s# = strip_declaration_modifiers(trimmed)
+    if dialect == LexicalDialect::Bash {
+        auto bash_id = extract_bash_function_identifier(line)
+        if bash_id.len() > 0 {
+            return cede bash_id
+        }
+        return string::from("")
+    }
+    auto s = strip_declaration_modifiers(trimmed)
 
     auto kw_len# = 0:usize
     auto is_impl# = false
@@ -880,6 +1067,9 @@ pub fn is_scope_declaration_with_dialect(line: str, dialect: LexicalDialect) -> 
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return false
     }
+    if dialect == LexicalDialect::Bash {
+        return extract_bash_function_identifier(line).len() > 0
+    }
     auto s# = strip_declaration_modifiers(trimmed)
 
     auto kw_len# = 0:usize
@@ -894,13 +1084,6 @@ pub fn is_scope_declaration_with_dialect(line: str, dialect: LexicalDialect) -> 
     else if is_toka_shape { kw_len = 6:usize }
     else if s.starts_with("interface ") { kw_len = 10:usize }
     else if s.starts_with("trait ") { kw_len = 6:usize }
-    else if s.starts_with("type ") {
-        auto id = extract_declared_identifier_with_dialect(line, dialect)
-        if id.len() == 0 {
-            return false
-        }
-        kw_len = 5:usize
-    }
     else if s.starts_with("enum ") { kw_len = 5:usize }
     else if s.starts_with("impl ") { kw_len = 5:usize }
 
@@ -1073,6 +1256,138 @@ pub fn check_is_self_closed_structured(
     }
 }
 
+pub shape TypeDelimiters (
+    angle: usize,
+    paren: usize,
+    bracket: usize,
+    brace: usize
+)
+
+impl TypeDelimiters {
+    pub fn new() -> TypeDelimiters {
+        return TypeDelimiters(
+            angle = 0:usize,
+            paren = 0:usize,
+            bracket = 0:usize,
+            brace = 0:usize
+        )
+    }
+
+    pub fn is_all_zero(self) -> bool {
+        return self.angle == 0:usize && self.paren == 0:usize && self.bracket == 0:usize && self.brace == 0:usize
+    }
+}
+
+pub fn update_type_delimiters(line: str, delims#: TypeDelimiters) {
+    auto i# = 0:usize
+    auto in_str# = false
+    auto str_char# = 0:char
+    auto escape# = false
+
+    loop i < line.len {
+        auto ch = line.byte_at(i)
+        if in_str {
+            if escape {
+                escape = false
+                i = i + 1:usize
+                continue
+            }
+            if ch == ('\\' as char) {
+                escape = true
+                i = i + 1:usize
+                continue
+            }
+            if ch == str_char {
+                in_str = false
+                str_char = 0:char
+            }
+            i = i + 1:usize
+            continue
+        }
+
+        if ch == ('/' as char) && i + 1:usize < line.len && line.byte_at(i + 1:usize) == ('/' as char) {
+            break
+        }
+
+        if ch == ('"' as char) || ch == ('\'' as char) || ch == ('`' as char) {
+            in_str = true
+            str_char = ch
+            escape = false
+            i = i + 1:usize
+            continue
+        }
+
+        if ch == ('<' as char) {
+            delims.angle = delims.angle + 1:usize
+        } else if ch == ('>' as char) {
+            auto is_arrow = i > 0:usize && line.byte_at(i - 1:usize) == ('=' as char)
+            if !is_arrow && delims.angle > 0:usize {
+                delims.angle = delims.angle - 1:usize
+            }
+        } else if ch == ('(' as char) {
+            delims.paren = delims.paren + 1:usize
+        } else if ch == (')' as char) {
+            if delims.paren > 0:usize {
+                delims.paren = delims.paren - 1:usize
+            }
+        } else if ch == ('[' as char) {
+            delims.bracket = delims.bracket + 1:usize
+        } else if ch == (']' as char) {
+            if delims.bracket > 0:usize {
+                delims.bracket = delims.bracket - 1:usize
+            }
+        } else if ch == ('{' as char) {
+            delims.brace = delims.brace + 1:usize
+        } else if ch == ('}' as char) {
+            if delims.brace > 0:usize {
+                delims.brace = delims.brace - 1:usize
+            }
+        }
+        i = i + 1:usize
+    }
+}
+
+pub fn line_has_trailing_type_continuation(line: str) -> bool {
+    auto trimmed# = line.trim()
+    auto c_opt = trimmed.index_of_str("//")
+    if c_opt.is_some() {
+        trimmed = trimmed.substr(0:usize, c_opt.unwrap()).trim()
+    }
+    if trimmed.len == 0 { return false }
+    if trimmed.ends_with("=") || trimmed.ends_with("|") || trimmed.ends_with("&") ||
+       trimmed.ends_with(",") || trimmed.ends_with("?") || trimmed.ends_with(":") ||
+       trimmed.ends_with("<") || trimmed.ends_with("(") || trimmed.ends_with("[") ||
+       trimmed.ends_with("{") || trimmed.ends_with("extends") || trimmed.ends_with("infer") {
+        return true
+    }
+    return false
+}
+
+pub fn line_has_leading_type_continuation(line: str) -> bool {
+    auto trimmed = line.trim()
+    if trimmed.starts_with("|") || trimmed.starts_with("&") || trimmed.starts_with("?") ||
+       trimmed.starts_with(":") || trimmed.starts_with(",") || trimmed.starts_with(".") ||
+       trimmed.starts_with("extends ") || trimmed.starts_with("infer ") {
+        return true
+    }
+    return false
+}
+
+pub fn is_declaration_or_boundary_line(line: str) -> bool {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 { return false }
+    auto s = strip_declaration_modifiers(trimmed)
+    if s.starts_with("type ") || s.starts_with("interface ") || s.starts_with("class ") ||
+       s.starts_with("function ") || s.starts_with("const ") || s.starts_with("let ") ||
+       s.starts_with("var ") || s.starts_with("enum ") || s.starts_with("export ") ||
+       s.starts_with("import ") || s.starts_with("fn ") || s.starts_with("def ") ||
+       s.starts_with("func ") || s.starts_with("struct ") || s.starts_with("impl ") ||
+       s.starts_with("</script>") || s.starts_with("<template>") || s.starts_with("<style>") {
+        return true
+    }
+    return false
+}
+
 pub fn is_single_line_type_alias(line: str) -> bool {
     auto trimmed = line.trim()
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
@@ -1082,16 +1397,12 @@ pub fn is_single_line_type_alias(line: str) -> bool {
     if !s.starts_with("type ") {
         return false
     }
-    auto code_part# = s
-    auto comment_idx = s.index_of_str("//")
-    if comment_idx.is_some() {
-        code_part = s.substr(0:usize, comment_idx.unwrap()).trim()
-    }
-    if code_part.index_of('{' as char).is_some() {
+    auto delims# = TypeDelimiters::new()
+    update_type_delimiters(s, delims#)
+    if !delims.is_all_zero() {
         return false
     }
-    if code_part.ends_with("=") || code_part.ends_with("|") || code_part.ends_with("&") || code_part.ends_with(",") ||
-       code_part.ends_with("(") || code_part.ends_with("[") || code_part.ends_with("?") || code_part.ends_with(":") {
+    if line_has_trailing_type_continuation(s) {
         return false
     }
     return true
@@ -1144,6 +1455,11 @@ pub fn classify_symbol_kind_with_dialect(line: str, dialect: LexicalDialect) -> 
     auto trimmed = line.trim()
     if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
         return string::from("symbol")
+    }
+    if dialect == LexicalDialect::Bash {
+        if extract_bash_function_identifier(line).len() > 0 {
+            return string::from("function")
+        }
     }
     auto s# = strip_declaration_modifiers(trimmed)
 

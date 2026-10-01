@@ -131,7 +131,8 @@ pub shape LexicalDialect (
     Generic = 0 |
     Toka = 1 |
     Rust = 2 |
-    HashComment = 3
+    HashComment = 3 |
+    Bash = 4
 )
 
 pub shape OutputFormat (
@@ -520,6 +521,28 @@ pub shape LineLexicalInfo (
     was_in_comm_or_str: bool,
     is_in_comm_or_str_after: bool
 )
+
+impl LineLexicalInfo {
+    pub fn dummy() -> LineLexicalInfo {
+        return LineLexicalInfo(
+            code_text = string::new(),
+            participates_in_indent = false,
+            statement_indent = 0:usize,
+            depth_before_brace = 0:usize,
+            depth_after_brace = 0:usize,
+            depth_before_paren = 0:usize,
+            depth_after_paren = 0:usize,
+            has_code_brace_closer = false,
+            has_code_paren_closer = false,
+            is_scope_decl = false,
+            starts_block = false,
+            delimiter = BlockDelimiter::Brace,
+            byte_mask = Option<Vec<u8>>::None,
+            was_in_comm_or_str = false,
+            is_in_comm_or_str_after = false
+        )
+    }
+}
 
 pub shape LogicalLine (
     text: string,

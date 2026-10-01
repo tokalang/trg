@@ -6681,8 +6681,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_ts_vue.returncode == 0, f"TS/Vue symbols test suite failed (exit {r_v_ts_vue.returncode}):\n{r_v_ts_vue.stderr}\n{r_v_ts_vue.stdout}"
     log("Test 182 passed: TS/Vue inline type import defense, ASI type alias & SFC symbol view verified.")
 
+    # Test 183: Bash Function Symbols, Heredoc Defense & Shell Symbol View (TRG-004)
+    log("Test 183: Bash Function Symbols, Heredoc Defense & Shell Symbol View (tests/test_bash_symbols.py)")
+    bash_script = repo_root / "tests" / "test_bash_symbols.py"
+    assert bash_script.exists(), f"Bash symbols test script not found at {bash_script}"
+    env_v_bash = dict(os.environ)
+    env_v_bash["TRG_BIN"] = str(pkg_bin_path)
+    r_v_bash = subprocess.run([
+        sys.executable,
+        str(bash_script)
+    ], cwd=str(repo_root), env=env_v_bash, capture_output=True, text=True)
+    assert r_v_bash.returncode == 0, f"Bash symbols test suite failed (exit {r_v_bash.returncode}):\n{r_v_bash.stderr}\n{r_v_bash.stdout}"
+    log("Test 183 passed: Bash function symbols, heredoc defense & shell symbol view verified.")
+
     log("=" * 60)
-    log("ALL 182 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.6)!")
+    log("ALL 183 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.6)!")
     log("=" * 60)
 
 if __name__ == "__main__":
