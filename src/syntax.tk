@@ -165,7 +165,8 @@ pub fn is_symbol_view_supported(path: str) -> bool {
        ext == "c" || ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "h" || ext == "hpp" || ext == "hxx" ||
        ext == "js" || ext == "jsx" || ext == "ts" || ext == "tsx" || ext == "mjs" || ext == "cjs" ||
        ext == "java" || ext == "kt" || ext == "kts" || ext == "scala" || ext == "swift" || ext == "cs" ||
-       ext == "rb" || ext == "php" || ext == "dart" || ext == "zig" || ext == "nim" || ext == "lua" {
+       ext == "rb" || ext == "php" || ext == "dart" || ext == "zig" || ext == "nim" || ext == "lua" ||
+       ext == "vue" || ext == "svelte" || ext == "astro" {
         return true
     }
     return false
@@ -850,6 +851,15 @@ pub fn extract_declared_identifier_with_dialect(line: str, dialect: LexicalDiale
     if id_end == 0 {
         return string::from("")
     }
+
+    if s.starts_with("type ") {
+        auto after_id = rem.substr(id_end, rem.len - id_end).trim()
+        if after_id.len == 0 || after_id.starts_with(",") || after_id.starts_with("as ") ||
+           after_id.starts_with("}") || after_id.starts_with("from ") {
+            return string::from("")
+        }
+    }
+
     return string::from(rem.substr(0, id_end))
 }
 
@@ -884,7 +894,13 @@ pub fn is_scope_declaration_with_dialect(line: str, dialect: LexicalDialect) -> 
     else if is_toka_shape { kw_len = 6:usize }
     else if s.starts_with("interface ") { kw_len = 10:usize }
     else if s.starts_with("trait ") { kw_len = 6:usize }
-    else if s.starts_with("type ") { kw_len = 5:usize }
+    else if s.starts_with("type ") {
+        auto id = extract_declared_identifier_with_dialect(line, dialect)
+        if id.len() == 0 {
+            return false
+        }
+        kw_len = 5:usize
+    }
     else if s.starts_with("enum ") { kw_len = 5:usize }
     else if s.starts_with("impl ") { kw_len = 5:usize }
 
@@ -1055,6 +1071,30 @@ pub fn check_is_self_closed_structured(
             return depth_after_brace <= target_depth && has_code_brace_closer
         }
     }
+}
+
+pub fn is_single_line_type_alias(line: str) -> bool {
+    auto trimmed = line.trim()
+    if trimmed.len == 0 || trimmed.starts_with("#") || trimmed.starts_with("//") || trimmed.starts_with("/*") {
+        return false
+    }
+    auto s = strip_declaration_modifiers(trimmed)
+    if !s.starts_with("type ") {
+        return false
+    }
+    auto code_part# = s
+    auto comment_idx = s.index_of_str("//")
+    if comment_idx.is_some() {
+        code_part = s.substr(0:usize, comment_idx.unwrap()).trim()
+    }
+    if code_part.index_of('{' as char).is_some() {
+        return false
+    }
+    if code_part.ends_with("=") || code_part.ends_with("|") || code_part.ends_with("&") || code_part.ends_with(",") ||
+       code_part.ends_with("(") || code_part.ends_with("[") || code_part.ends_with("?") || code_part.ends_with(":") {
+        return false
+    }
+    return true
 }
 
 pub fn check_is_self_closed_line(
@@ -1283,7 +1323,7 @@ impl ScopeTracker {
                 has_code_brace_closer,
                 has_code_paren_closer
             )
-            if !is_self_closed {
+            if !is_self_closed && !is_single_line_type_alias(code_text) {
                 auto decl_depth# = depth_after_brace
                 match family {
                     auto SyntaxFamily::Indent => {

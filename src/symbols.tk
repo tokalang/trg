@@ -25,7 +25,8 @@ import src/syntax::{
     is_multiline_decorator_closer,
     check_is_self_closed_structured,
     find_arrow_function_pos,
-    strip_declaration_modifiers
+    strip_declaration_modifiers,
+    is_single_line_type_alias
 }
 import src/printer::{u64_to_string, json_escape}
 import src/parse::{parse_usize_strict, parse_size_bytes_strict}
@@ -393,6 +394,9 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                             is_self_closed = true
                         }
                     }
+                    if is_single_line_type_alias(pat_text) {
+                        is_self_closed = true
+                    }
 
                     auto sym_idx_opt# = Option<usize>::None
                     auto is_kind_match# = true
@@ -676,6 +680,9 @@ pub fn outline_symbols_lines(
                 if !after_arr.starts_with("{") {
                     is_self_closed = true
                 }
+            }
+            if is_single_line_type_alias(pat_text) {
+                is_self_closed = true
             }
             if pat_text.trim().ends_with(";") && pat_text.index_of('{' as char).is_none() {
                 is_self_closed = true

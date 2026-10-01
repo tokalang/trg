@@ -6668,8 +6668,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_inh.returncode == 0, f"Ignore inheritance test suite failed (exit {r_v_inh.returncode}):\n{r_v_inh.stderr}\n{r_v_inh.stdout}"
     log("Test 181 passed: Parent directory and Git root ignore inheritance verified.")
 
+    # Test 182: TS/Vue Inline Type Import Defense, ASI Type Alias & SFC Symbol View (TRG-001 & TRG-002)
+    log("Test 182: TS/Vue Inline Type Import Defense, ASI Type Alias & SFC Symbol View (tests/test_ts_vue_symbols.py)")
+    ts_vue_script = repo_root / "tests" / "test_ts_vue_symbols.py"
+    assert ts_vue_script.exists(), f"TS/Vue symbols test script not found at {ts_vue_script}"
+    env_v_ts_vue = dict(os.environ)
+    env_v_ts_vue["TRG_BIN"] = str(pkg_bin_path)
+    r_v_ts_vue = subprocess.run([
+        sys.executable,
+        str(ts_vue_script)
+    ], cwd=str(repo_root), env=env_v_ts_vue, capture_output=True, text=True)
+    assert r_v_ts_vue.returncode == 0, f"TS/Vue symbols test suite failed (exit {r_v_ts_vue.returncode}):\n{r_v_ts_vue.stderr}\n{r_v_ts_vue.stdout}"
+    log("Test 182 passed: TS/Vue inline type import defense, ASI type alias & SFC symbol view verified.")
+
     log("=" * 60)
-    log("ALL 181 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.5)!")
+    log("ALL 182 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.19.5)!")
     log("=" * 60)
 
 if __name__ == "__main__":
