@@ -6720,8 +6720,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_disambig.returncode == 0, f"Disambiguation test suite failed (exit {r_v_disambig.returncode}):\n{r_v_disambig.stderr}\n{r_v_disambig.stdout}"
     log("Test 185 passed: Agent-Native symbol disambiguation, copy-paste routing & MCP candidate query verified.")
 
+    # Test 186: Agent-Native "Did you mean?" Suggestions on Symbol Not Found
+    log("Test 186: Agent-Native 'Did you mean?' Suggestions on Symbol Not Found (tests/test_view_not_found_suggestions.py)")
+    suggestions_script = repo_root / "tests" / "test_view_not_found_suggestions.py"
+    assert suggestions_script.exists(), f"Suggestions test script not found at {suggestions_script}"
+    env_v_sug = dict(os.environ)
+    env_v_sug["TRG_BIN"] = str(pkg_bin_path)
+    r_v_sug = subprocess.run([
+        sys.executable,
+        str(suggestions_script)
+    ], cwd=str(repo_root), env=env_v_sug, capture_output=True, text=True)
+    assert r_v_sug.returncode == 0, f"Suggestions test suite failed (exit {r_v_sug.returncode}):\n{r_v_sug.stderr}\n{r_v_sug.stdout}"
+    log("Test 186 passed: Agent-Native typo suggestions, scope routing, and fallback hints verified.")
+
     log("=" * 60)
-    log("ALL 185 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
+    log("ALL 186 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
     log("=" * 60)
 
 if __name__ == "__main__":
