@@ -316,7 +316,7 @@ def test_budget_and_truncation():
         assert len(out_lines) == 12
 
         # 2. --max-bytes truncation
-        r_mb = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "big_function", "--max-bytes", "300"], capture_output=True, text=True)
+        r_mb = subprocess.run([TRG_BIN, "view", str(py_file), "--symbol", "big_function", "--max-bytes", "400"], capture_output=True, text=True)
         assert r_mb.returncode == 0
         assert "[trg_view: truncated=true, reason=max_result_bytes]" in r_mb.stderr
         assert "truncated: max_result_bytes" in r_mb.stdout

@@ -616,7 +616,7 @@ pub fn run_mcp_server() -> i32 {
                                                         auto unexp_opt# = Option<string>::None
                                                         loop arg_node != 0:usize {
                                                             auto k = document.key(arg_node)
-                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" && k != "symbol" && k != "scope" && k != "continuation" && k != "continuation_token" {
+                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" && k != "symbol" && k != "scope" && k != "continuation" && k != "continuation_token" && k != "no_hints" {
                                                                 unexp_opt = Option<string>::Some(string::from(k))
                                                                 break
                                                             }
@@ -1035,6 +1035,21 @@ pub fn run_mcp_server() -> i32 {
                                                             }
                                                             target_path = target_res.unwrap()
                                                         }
+                                                        auto no_hints_val# = false
+                                                        auto no_hints_err# = false
+                                                        auto nh_node = document.find(arg_map, "no_hints")
+                                                        if nh_node != 0:usize {
+                                                            if document.kind(nh_node) == 1:i32 {
+                                                                no_hints_val = document.boolean(nh_node).unwrap()
+                                                            } else {
+                                                                no_hints_err = true
+                                                            }
+                                                        }
+                                                        if no_hints_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'no_hints' must be a boolean")
+                                                            continue
+                                                        }
+
                                                         auto exec_max_bytes = max_bytes_opt
                                                         auto cont_token_opt# = Option<string>::None
                                                         if has_cont_token {
@@ -1054,7 +1069,7 @@ pub fn run_mcp_server() -> i32 {
                                                             symbol_scope = cede parsed_scope,
                                                             continuation = continuation_val || has_cont_token,
                                                             continuation_token = cede cont_token_opt,
-                                                            no_hints = true
+                                                            no_hints = no_hints_val
                                                         )
                                                         auto view_res = execute_view_operation(view_opts)
                                                         if view_res.is_err() {
@@ -1149,6 +1164,18 @@ pub fn run_mcp_server() -> i32 {
                                                             resp#.push_str("\n")
                                                             send_mcp_response(resp.as_str())
                                                             continue
+                                                        }
+
+                                                        auto is_symbol_mode = (vr.mode == "symbol") && (vr.selection_status == "found")
+                                                        auto is_budget_truncated = vr.truncated && ((vr.reason == "max_lines") || (vr.reason == "max_result_bytes"))
+                                                        if is_symbol_mode && is_budget_truncated && !vr.continuation_active {
+                                                            auto prev_res = vr#.format_cli_symbol_preview(max_lines_opt, max_bytes_opt, no_hints_val)
+                                                            if prev_res.is_ok() {
+                                                                auto proj = prev_res.unwrap()
+                                                                vr.lines_emitted = proj.lines_emitted
+                                                                vr.bytes_emitted = proj.bytes_emitted
+                                                                vr.text = cede proj.text
+                                                            }
                                                         }
 
                                                         auto resp# = string::from("{\"jsonrpc\":\"2.0\",\"id\":")

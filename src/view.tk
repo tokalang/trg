@@ -7,7 +7,7 @@ import std/io::{println}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
 import src/posix::{posix_ferror, print_err, posix_write_stdout, posix_write_stderr}
 import src/types::{BlockRange, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo, Hint}
-import src/hints::{HintSlot, build_symbol_preview_truncation_hint}
+import src/hints::{HintSlot, build_symbol_preview_truncation_hint, build_continuation_command}
 import src/syntax::{
     detect_syntax_family,
     detect_lexical_dialect,
@@ -324,6 +324,46 @@ impl ViewResult {
                 }
             }
         }
+        auto is_target_mode = self.mode == "symbol" || self.mode == "range"
+        if is_target_mode && self.truncated && !self.continuation_active {
+            resp#.push_str(",\"next_request\":{\"tool\":\"trg_view\",\"arguments\":{")
+            resp#.push_str("\"path\":\"")
+            resp#.push_str(json_escape(self.path.as_str()).as_str())
+            resp#.push_str("\",\"lines\":[")
+            auto next_s# = 1:usize
+            match self.emitted_range {
+                auto Option<BlockRange>::Some(&er) => {
+                    next_s = er.end + 1:usize
+                }
+                _ => {}
+            }
+            auto next_e# = next_s + 199:usize
+            if self.target_symbol.len() > 0:usize {
+                match self.target_symbol.borrow(0).range_end {
+                    auto Option<usize>::Some(re) => {
+                        if next_e > re {
+                            next_e = re
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match self.requested_range {
+                auto Option<BlockRange>::Some(&rr) => {
+                    if next_e > rr.end {
+                        next_e = rr.end
+                    }
+                }
+                _ => {}
+            }
+            if next_e < next_s {
+                next_e = next_s
+            }
+            resp#.push_str(u64_to_string(next_s as u64).as_str())
+            resp#.push_str(",")
+            resp#.push_str(u64_to_string(next_e as u64).as_str())
+            resp#.push_str("]}}")
+        }
         if self.mode == "symbol" {
             auto sym_suffix = self#.format_symbol_suffix_str(self.truncated)
             resp#.push_str(sym_suffix.as_str())
@@ -605,6 +645,48 @@ impl ViewResult {
                 auto Option<string>::None => {}
             }
             l_records_close = l_records_close + s_tok_tag.len + l_tok
+        }
+        auto is_target_mode = self.mode == "symbol" || self.mode == "range"
+        if is_target_mode && cand_trunc && !self.continuation_active {
+            auto s_nr_open = ",\"next_request\":{\"tool\":\"trg_view\",\"arguments\":{"
+            auto l_nr# = s_nr_open.len
+            auto s_p_tag = "\"path\":\""
+            auto s_l_tag = "\",\"lines\":["
+            auto next_s# = 1:usize
+            if lines_emitted > 0:usize {
+                next_s = self.records.borrow(end_idx).line_number + 1:usize
+            } else {
+                match self.emitted_range {
+                    auto Option<BlockRange>::Some(&er) => {
+                        next_s = er.end + 1:usize
+                    }
+                    _ => {}
+                }
+            }
+            auto next_e# = next_s + 199:usize
+            if self.target_symbol.len() > 0:usize {
+                match self.target_symbol.borrow(0).range_end {
+                    auto Option<usize>::Some(re) => {
+                        if next_e > re {
+                            next_e = re
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            match self.requested_range {
+                auto Option<BlockRange>::Some(&rr) => {
+                    if next_e > rr.end {
+                        next_e = rr.end
+                    }
+                }
+                _ => {}
+            }
+            if next_e < next_s {
+                next_e = next_s
+            }
+            l_nr = l_nr + s_p_tag.len + json_escape(self.path.as_str()).len() + s_l_tag.len + u64_to_string(next_s as u64).len() + 1:usize + u64_to_string(next_e as u64).len() + 1:usize + 2:usize
+            l_records_close = l_records_close + l_nr
         }
         if self.mode == "symbol" {
             auto sym_suffix = self#.format_symbol_suffix_str(is_pruned)
@@ -4453,62 +4535,62 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         sym_start = sym_end
     }
 
-    auto header# = string::new()
+    auto base_header# = string::new()
     if opts.continuation {
         if range_status_str == "confirmed" {
-            header#.push_str("[file: ")
-            header#.push_str(opts.file_path.as_str())
-            header#.push_str(", symbol: ")
-            header#.push_str(target_sym.name.as_str())
+            base_header#.push_str("[file: ")
+            base_header#.push_str(opts.file_path.as_str())
+            base_header#.push_str(", symbol: ")
+            base_header#.push_str(target_sym.name.as_str())
             if target_sym.scope.len() > 0:usize {
-                header#.push_str(", scope: ")
-                header#.push_str(target_sym.scope.as_str())
+                base_header#.push_str(", scope: ")
+                base_header#.push_str(target_sym.scope.as_str())
             }
-            header#.push_str(", lines: L")
-            header#.push_str(u64_to_string(sym_start as u64).as_str())
-            header#.push_str("-L")
-            header#.push_str(u64_to_string(sym_end as u64).as_str())
-            header#.push_str("]\n")
+            base_header#.push_str(", lines: L")
+            base_header#.push_str(u64_to_string(sym_start as u64).as_str())
+            base_header#.push_str("-L")
+            base_header#.push_str(u64_to_string(sym_end as u64).as_str())
+            base_header#.push_str("]")
         } else {
-            header#.push_str("[file: ")
-            header#.push_str(opts.file_path.as_str())
-            header#.push_str(", symbol: ")
-            header#.push_str(target_sym.name.as_str())
+            base_header#.push_str("[file: ")
+            base_header#.push_str(opts.file_path.as_str())
+            base_header#.push_str(", symbol: ")
+            base_header#.push_str(target_sym.name.as_str())
             if target_sym.scope.len() > 0:usize {
-                header#.push_str(", scope: ")
-                header#.push_str(target_sym.scope.as_str())
+                base_header#.push_str(", scope: ")
+                base_header#.push_str(target_sym.scope.as_str())
             }
-            header#.push_str(", preview: L")
-            header#.push_str(u64_to_string(sym_start as u64).as_str())
-            header#.push_str("-L")
-            header#.push_str(u64_to_string(sym_end as u64).as_str())
-            header#.push_str(" (unclosed structure)]\n")
+            base_header#.push_str(", preview: L")
+            base_header#.push_str(u64_to_string(sym_start as u64).as_str())
+            base_header#.push_str("-L")
+            base_header#.push_str(u64_to_string(sym_end as u64).as_str())
+            base_header#.push_str(" (unclosed structure)]")
         }
     } else {
         if range_status_str == "confirmed" {
-            header#.push_str("[symbol: ")
-            header#.push_str(target_sym.name.as_str())
+            base_header#.push_str("[symbol: ")
+            base_header#.push_str(target_sym.name.as_str())
             if target_sym.scope.len() > 0:usize {
-                header#.push_str(", scope: ")
-                header#.push_str(target_sym.scope.as_str())
+                base_header#.push_str(", scope: ")
+                base_header#.push_str(target_sym.scope.as_str())
             }
-            header#.push_str(", lines: L")
-            header#.push_str(u64_to_string(sym_start as u64).as_str())
-            header#.push_str("-L")
-            header#.push_str(u64_to_string(sym_end as u64).as_str())
-            header#.push_str("]\n")
+            base_header#.push_str(", lines: L")
+            base_header#.push_str(u64_to_string(sym_start as u64).as_str())
+            base_header#.push_str("-L")
+            base_header#.push_str(u64_to_string(sym_end as u64).as_str())
+            base_header#.push_str("]")
         } else {
-            header#.push_str("[symbol: ")
-            header#.push_str(target_sym.name.as_str())
+            base_header#.push_str("[symbol: ")
+            base_header#.push_str(target_sym.name.as_str())
             if target_sym.scope.len() > 0:usize {
-                header#.push_str(", scope: ")
-                header#.push_str(target_sym.scope.as_str())
+                base_header#.push_str(", scope: ")
+                base_header#.push_str(target_sym.scope.as_str())
             }
-            header#.push_str(", preview: L")
-            header#.push_str(u64_to_string(sym_start as u64).as_str())
-            header#.push_str("-L")
-            header#.push_str(u64_to_string(sym_end as u64).as_str())
-            header#.push_str(" (unclosed structure)]\n")
+            base_header#.push_str(", preview: L")
+            base_header#.push_str(u64_to_string(sym_start as u64).as_str())
+            base_header#.push_str("-L")
+            base_header#.push_str(u64_to_string(sym_end as u64).as_str())
+            base_header#.push_str(" (unclosed structure)]")
         }
     }
 
@@ -4517,14 +4599,14 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             return Result<ViewResult, string>::Err(string::from("target_exceeds_max_lines: Target line cannot fit within max_lines 0"))
         }
 
+        auto header_pre = build_symbol_header_with_status(base_header.as_str(), false, range_status_str == "confirmed", opts.no_hints)
         auto cur_line# = sym_start
         auto lines_emitted# = 0:usize
-        auto bytes_emitted# = header.len()
+        auto bytes_emitted# = header_pre.len()
         auto truncated# = false
         auto trunc_reason# = string::from("completed")
         auto records# = Vec<ViewLineRecord>::new()
-        auto out# = string::new()
-        out#.push_str(header.as_str())
+        auto body_out# = string::new()
         auto content_omitted# = false
         auto target_seen# = false
 
@@ -4573,7 +4655,7 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             }
 
             bytes_emitted = bytes_emitted + line_entry.len()
-            out#.push_str(line_entry.as_str())
+            body_out#.push_str(line_entry.as_str())
             records#.push(ViewLineRecord(
                 line_number = cur_line,
                 kind = cede rec_kind,
@@ -4617,6 +4699,16 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
                 return Result<ViewResult, string>::Err(string::from("continuation_token_overflow: Continuation token exceeds maximum length limit (4096 bytes)"))
             }
         }
+
+        auto final_header = build_symbol_header_with_status(base_header.as_str(), truncated, range_status_str == "confirmed", opts.no_hints)
+        auto out# = string::new()
+        out#.push_str(final_header.as_str())
+        out#.push_str(body_out.as_str())
+        if truncated && cur_line <= sym_end && !opts.no_hints {
+            auto om = build_omitted_marker(opts.file_path.as_str(), cur_line, sym_end, opts.no_hints)
+            out#.push_str(om.as_str())
+        }
+        bytes_emitted = out.len()
 
         auto emitted_range = Option<BlockRange>::Some(BlockRange(
             start = sym_start,
@@ -4702,7 +4794,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
     target_entry#.push_str(target_disp)
     target_entry#.push_str("\n")
 
-    auto base_bytes = header.len() + target_entry.len()
+    auto header_pre = build_symbol_header_with_status(base_header.as_str(), false, range_status_str == "confirmed", opts.no_hints)
+    auto base_bytes = header_pre.len() + target_entry.len()
     if has_max_bytes && base_bytes > max_bytes_val {
         auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record (")
         err#.push_str(u64_to_string(base_bytes as u64).as_str())
@@ -4817,11 +4910,12 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         trunc_reason = string::from("max_lines")
     }
 
+    auto final_header = build_symbol_header_with_status(base_header.as_str(), truncated, range_status_str == "confirmed", opts.no_hints)
     auto out# = string::new()
-    out#.push_str(header.as_str())
+    out#.push_str(final_header.as_str())
 
     auto records# = Vec<ViewLineRecord>::new()
-    auto bytes_emitted# = header.len()
+    auto bytes_emitted# = final_header.len()
     auto lines_emitted = 1:usize + b_take_actual + a_take_actual
 
     // 1. Lines before target
@@ -5323,6 +5417,27 @@ pub shape CliSymbolPreviewProjection (
     bytes_emitted: usize
 )
 
+fn build_omitted_marker(
+    path: str,
+    start_l: usize,
+    end_l: usize,
+    no_hints: bool
+) -> string {
+    auto res# = string::from("[omitted: L")
+    res#.push_str(u64_to_string(start_l as u64).as_str())
+    res#.push_str("-L")
+    res#.push_str(u64_to_string(end_l as u64).as_str())
+    res#.push_str("]")
+    if !no_hints {
+        auto cmd = build_continuation_command(path, start_l, end_l, Option<usize>::None, Option<usize>::None)
+        res#.push_str(" [continue_via: ")
+        res#.push_str(cmd.as_str())
+        res#.push_str("]")
+    }
+    res#.push_str("\n")
+    return cede res
+}
+
 fn build_preview_header(
     file_path: str,
     sym_name: str,
@@ -5332,7 +5447,8 @@ fn build_preview_header(
     sym_end: usize,
     shown_start: usize,
     shown_end: usize,
-    reason: str
+    reason: str,
+    no_hints: bool
 ) -> string {
     auto h# = string::new()
     h#.push_str("[file: ")
@@ -5365,11 +5481,32 @@ fn build_preview_header(
     return cede h
 }
 
+fn build_symbol_header_with_status(
+    base_header: str,
+    is_truncated: bool,
+    is_confirmed: bool,
+    no_hints: bool
+) -> string {
+    auto res# = string::from(base_header)
+    if !no_hints {
+        if is_truncated {
+            res#.push_str(" [status: TRUNCATED]")
+        } else if is_confirmed {
+            res#.push_str(" [status: COMPLETE]")
+        } else {
+            res#.push_str(" [status: UNCLOSED]")
+        }
+    }
+    res#.push_str("\n")
+    return cede res
+}
+
 impl ViewResult {
     pub fn format_cli_symbol_preview(
         self#,
         max_lines_opt: Option<usize>,
-        max_bytes_opt: Option<usize>
+        max_bytes_opt: Option<usize>,
+        no_hints: bool
     ) -> Result<CliSymbolPreviewProjection, string> {
         if self.records.len() == 0:usize {
             return Result<CliSymbolPreviewProjection, string>::Err(string::from("view_preview: no records available"))
@@ -5486,24 +5623,27 @@ impl ViewResult {
                     sym_end,
                     target_line_no,
                     target_line_no,
-                    "max_result_bytes"
+                    "max_result_bytes",
+                    no_hints
                 )
                 auto min_bytes# = min_hdr.len()
                 if target_line_no > sym_start {
-                    auto min_front# = string::from("[omitted: L")
-                    min_front#.push_str(u64_to_string(sym_start as u64).as_str())
-                    min_front#.push_str("-L")
-                    min_front#.push_str(u64_to_string((target_line_no - 1:usize) as u64).as_str())
-                    min_front#.push_str("]\n")
+                    auto min_front = build_omitted_marker(
+                        self.path.as_str(),
+                        sym_start,
+                        target_line_no - 1:usize,
+                        no_hints
+                    )
                     min_bytes = min_bytes + min_front.len()
                 }
                 min_bytes = min_bytes + (prefix_sums.get(target_idx + 1:usize) - prefix_sums.get(target_idx))
                 if target_line_no < sym_end {
-                    auto min_rear# = string::from("[omitted: L")
-                    min_rear#.push_str(u64_to_string((target_line_no + 1:usize) as u64).as_str())
-                    min_rear#.push_str("-L")
-                    min_rear#.push_str(u64_to_string(sym_end as u64).as_str())
-                    min_rear#.push_str("]\n")
+                    auto min_rear = build_omitted_marker(
+                        self.path.as_str(),
+                        target_line_no + 1:usize,
+                        sym_end,
+                        no_hints
+                    )
                     min_bytes = min_bytes + min_rear.len()
                 }
 
@@ -5532,24 +5672,27 @@ impl ViewResult {
                         sym_end,
                         s_line,
                         e_line,
-                        cur_reason
+                        cur_reason,
+                        no_hints
                     )
                     auto cur_bytes# = chdr.len()
                     if s_line > sym_start {
-                        auto f_om# = string::from("[omitted: L")
-                        f_om#.push_str(u64_to_string(sym_start as u64).as_str())
-                        f_om#.push_str("-L")
-                        f_om#.push_str(u64_to_string((s_line - 1:usize) as u64).as_str())
-                        f_om#.push_str("]\n")
+                        auto f_om = build_omitted_marker(
+                            self.path.as_str(),
+                            sym_start,
+                            s_line - 1:usize,
+                            no_hints
+                        )
                         cur_bytes = cur_bytes + f_om.len()
                     }
                     cur_bytes = cur_bytes + (prefix_sums.get(end_idx + 1:usize) - prefix_sums.get(start_idx))
                     if e_line < sym_end {
-                        auto r_om# = string::from("[omitted: L")
-                        r_om#.push_str(u64_to_string((e_line + 1:usize) as u64).as_str())
-                        r_om#.push_str("-L")
-                        r_om#.push_str(u64_to_string(sym_end as u64).as_str())
-                        r_om#.push_str("]\n")
+                        auto r_om = build_omitted_marker(
+                            self.path.as_str(),
+                            e_line + 1:usize,
+                            sym_end,
+                            no_hints
+                        )
                         cur_bytes = cur_bytes + r_om.len()
                     }
 
@@ -5591,7 +5734,8 @@ impl ViewResult {
             sym_end,
             final_s_line,
             final_e_line,
-            final_reason
+            final_reason,
+            no_hints
         )
         final_text#.push_str(hdr.as_str())
 
@@ -5602,11 +5746,13 @@ impl ViewResult {
             has_front = true
             front_s = sym_start
             front_e = final_s_line - 1:usize
-            final_text#.push_str("[omitted: L")
-            final_text#.push_str(u64_to_string(front_s as u64).as_str())
-            final_text#.push_str("-L")
-            final_text#.push_str(u64_to_string(front_e as u64).as_str())
-            final_text#.push_str("]\n")
+            auto f_marker = build_omitted_marker(
+                self.path.as_str(),
+                front_s,
+                front_e,
+                no_hints
+            )
+            final_text#.push_str(f_marker.as_str())
         }
 
         auto out_i# = start_idx
@@ -5622,11 +5768,13 @@ impl ViewResult {
             has_rear = true
             rear_s = final_e_line + 1:usize
             rear_e = sym_end
-            final_text#.push_str("[omitted: L")
-            final_text#.push_str(u64_to_string(rear_s as u64).as_str())
-            final_text#.push_str("-L")
-            final_text#.push_str(u64_to_string(rear_e as u64).as_str())
-            final_text#.push_str("]\n")
+            auto r_marker = build_omitted_marker(
+                self.path.as_str(),
+                rear_s,
+                rear_e,
+                no_hints
+            )
+            final_text#.push_str(r_marker.as_str())
         }
 
         auto lines_count = end_idx - start_idx + 1:usize
@@ -6231,7 +6379,7 @@ pub fn execute_view_cli(args: Vec<string>) -> i32 {
 
     auto preview_proj_opt# = Option<CliSymbolPreviewProjection>::None
     if use_bounded_preview {
-        auto prev_res = view_res#.format_cli_symbol_preview(max_lines_opt, max_bytes_opt)
+        auto prev_res = view_res#.format_cli_symbol_preview(max_lines_opt, max_bytes_opt, no_hints)
         if prev_res.is_err() {
             print_err(prev_res.unwrap_err().as_str())
             return 2

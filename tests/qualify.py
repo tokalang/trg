@@ -6694,8 +6694,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_bash.returncode == 0, f"Bash symbols test suite failed (exit {r_v_bash.returncode}):\n{r_v_bash.stderr}\n{r_v_bash.stdout}"
     log("Test 183 passed: Bash function symbols, heredoc defense & shell symbol view verified.")
 
+    # Test 184: Agent-Native DX, In-Body Status Banner & Zero-Friction Continuation
+    log("Test 184: Agent-Native DX, In-Body Status Banner & Zero-Friction Continuation (tests/test_view_banner_continuation.py)")
+    banner_cont_script = repo_root / "tests" / "test_view_banner_continuation.py"
+    assert banner_cont_script.exists(), f"Banner continuation test script not found at {banner_cont_script}"
+    env_v_banner = dict(os.environ)
+    env_v_banner["TRG_BIN"] = str(pkg_bin_path)
+    r_v_banner = subprocess.run([
+        sys.executable,
+        str(banner_cont_script)
+    ], cwd=str(repo_root), env=env_v_banner, capture_output=True, text=True)
+    assert r_v_banner.returncode == 0, f"Banner continuation test suite failed (exit {r_v_banner.returncode}):\n{r_v_banner.stderr}\n{r_v_banner.stdout}"
+    log("Test 184 passed: Agent-Native in-body status banners, omitted continuation commands, and MCP next_request verified.")
+
     log("=" * 60)
-    log("ALL 183 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT (v0.20.0)!")
+    log("ALL 184 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
     log("=" * 60)
 
 if __name__ == "__main__":

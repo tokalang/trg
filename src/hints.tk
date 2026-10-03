@@ -171,24 +171,13 @@ pub fn build_single_hit_hint(opts: CliOptions, candidate_path: str) -> Option<Hi
     ))
 }
 
-pub fn build_symbol_preview_truncation_hint(
+pub fn build_continuation_command(
     path: str,
     next_start: usize,
     next_end: usize,
     max_lines_opt: Option<usize>,
-    max_bytes_opt: Option<usize>,
-    is_following: bool
-) -> Option<Hint> {
-    if next_end < next_start || path.len == 0 {
-        return Option<Hint>::None
-    }
-    auto msg# = string::new()
-    if is_following {
-        msg#.push_str("to view unshown lines following this section under budget, run:")
-    } else {
-        msg#.push_str("to view unshown lines preceding this section under budget, run:")
-    }
-
+    max_bytes_opt: Option<usize>
+) -> string {
     auto cmd# = string::from("trg view ")
     cmd#.push_str(shell_quote(path).as_str())
     cmd#.push_str(" --lines ")
@@ -209,6 +198,28 @@ pub fn build_symbol_preview_truncation_hint(
         }
         _ => {}
     }
+    return cede cmd
+}
+
+pub fn build_symbol_preview_truncation_hint(
+    path: str,
+    next_start: usize,
+    next_end: usize,
+    max_lines_opt: Option<usize>,
+    max_bytes_opt: Option<usize>,
+    is_following: bool
+) -> Option<Hint> {
+    if next_end < next_start || path.len == 0 {
+        return Option<Hint>::None
+    }
+    auto msg# = string::new()
+    if is_following {
+        msg#.push_str("to view unshown lines following this section under budget, run:")
+    } else {
+        msg#.push_str("to view unshown lines preceding this section under budget, run:")
+    }
+
+    auto cmd = build_continuation_command(path, next_start, next_end, max_lines_opt, max_bytes_opt)
 
     return Option<Hint>::Some(Hint(
         kind = string::from("symbol_preview_truncation"),
