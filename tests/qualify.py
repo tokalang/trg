@@ -6707,8 +6707,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_banner.returncode == 0, f"Banner continuation test suite failed (exit {r_v_banner.returncode}):\n{r_v_banner.stderr}\n{r_v_banner.stdout}"
     log("Test 184 passed: Agent-Native in-body status banners, omitted continuation commands, and MCP next_request verified.")
 
+    # Test 185: Agent-Native Symbol Disambiguation, Copy-Paste Routing & MCP Query Parity
+    log("Test 185: Agent-Native Symbol Disambiguation, Copy-Paste Routing & MCP Query Parity (tests/test_view_disambiguation.py)")
+    disambig_script = repo_root / "tests" / "test_view_disambiguation.py"
+    assert disambig_script.exists(), f"Disambiguation test script not found at {disambig_script}"
+    env_v_disambig = dict(os.environ)
+    env_v_disambig["TRG_BIN"] = str(pkg_bin_path)
+    r_v_disambig = subprocess.run([
+        sys.executable,
+        str(disambig_script)
+    ], cwd=str(repo_root), env=env_v_disambig, capture_output=True, text=True)
+    assert r_v_disambig.returncode == 0, f"Disambiguation test suite failed (exit {r_v_disambig.returncode}):\n{r_v_disambig.stderr}\n{r_v_disambig.stdout}"
+    log("Test 185 passed: Agent-Native symbol disambiguation, copy-paste routing & MCP candidate query verified.")
+
     log("=" * 60)
-    log("ALL 184 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
+    log("ALL 185 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
     log("=" * 60)
 
 if __name__ == "__main__":

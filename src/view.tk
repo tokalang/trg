@@ -7,7 +7,7 @@ import std/io::{println}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
 import src/posix::{posix_ferror, print_err, posix_write_stdout, posix_write_stderr}
 import src/types::{BlockRange, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo, Hint}
-import src/hints::{HintSlot, build_symbol_preview_truncation_hint, build_continuation_command}
+import src/hints::{HintSlot, build_symbol_preview_truncation_hint, build_continuation_command, shell_quote}
 import src/syntax::{
     detect_syntax_family,
     detect_lexical_dialect,
@@ -127,7 +127,10 @@ pub shape SymbolCandidateInfo (
     range_end: Option<usize>,
     range_status: string,
     scope: string,
-    detail: string
+    detail: string,
+    query_cli: string,
+    query_symbol: string,
+    has_query: bool
 )
 
 impl SymbolCandidateInfo {
@@ -140,7 +143,10 @@ impl SymbolCandidateInfo {
             range_end = self.range_end,
             range_status = string::from(self.range_status.as_str()),
             scope = string::from(self.scope.as_str()),
-            detail = string::from(self.detail.as_str())
+            detail = string::from(self.detail.as_str()),
+            query_cli = string::from(self.query_cli.as_str()),
+            query_symbol = string::from(self.query_symbol.as_str()),
+            has_query = self.has_query
         )
     }
 }
@@ -324,7 +330,8 @@ impl ViewResult {
                 }
             }
         }
-        auto is_target_mode = self.mode == "symbol" || self.mode == "range"
+        auto is_sym_found = self.mode == "symbol" && self.target_symbol.len() > 0:usize
+        auto is_target_mode = is_sym_found || self.mode == "range"
         if is_target_mode && self.truncated && !self.continuation_active {
             resp#.push_str(",\"next_request\":{\"tool\":\"trg_view\",\"arguments\":{")
             resp#.push_str("\"path\":\"")
@@ -452,7 +459,21 @@ impl ViewResult {
             resp#.push_str(json_escape(c.scope.as_str()).as_str())
             resp#.push_str("\",\"detail\":\"")
             resp#.push_str(json_escape(c.detail.as_str()).as_str())
-            resp#.push_str("\"}")
+            resp#.push_str("\"")
+            if c.has_query {
+                resp#.push_str(",\"query\":{\"tool\":\"trg_view\",\"arguments\":{\"path\":\"")
+                resp#.push_str(json_escape(self.path.as_str()).as_str())
+                if c.query_symbol.len() > 0:usize {
+                    resp#.push_str("\",\"symbol\":\"")
+                    resp#.push_str(json_escape(c.query_symbol.as_str()).as_str())
+                    resp#.push_str("\"}}")
+                } else {
+                    resp#.push_str("\",\"line\":")
+                    resp#.push_str(u64_to_string(c.line as u64).as_str())
+                    resp#.push_str(",\"block\":true}}")
+                }
+            }
+            resp#.push_str("}")
             ci = ci + 1:usize
         }
         resp#.push_str("],\"candidates_truncated\":")
@@ -646,7 +667,8 @@ impl ViewResult {
             }
             l_records_close = l_records_close + s_tok_tag.len + l_tok
         }
-        auto is_target_mode = self.mode == "symbol" || self.mode == "range"
+        auto is_sym_found = self.mode == "symbol" && self.target_symbol.len() > 0:usize
+        auto is_target_mode = is_sym_found || self.mode == "range"
         if is_target_mode && cand_trunc && !self.continuation_active {
             auto s_nr_open = ",\"next_request\":{\"tool\":\"trg_view\",\"arguments\":{"
             auto l_nr# = s_nr_open.len
@@ -732,7 +754,30 @@ impl ViewResult {
                     self.candidates_truncated = true
                 }
             }
-            auto meta_len = self#.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
+            auto meta_len# = self#.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
+            if meta_len > limit {
+                auto no_q_cands# = Vec<SymbolCandidateInfo>::new()
+                auto nqi# = 0:usize
+                loop nqi < self.candidates.len() {
+                    auto &c = self.candidates.borrow(nqi)
+                    no_q_cands#.push(SymbolCandidateInfo(
+                        name = string::from(c.name.as_str()),
+                        kind = string::from(c.kind.as_str()),
+                        line = c.line,
+                        range_start = c.range_start,
+                        range_end = c.range_end,
+                        range_status = string::from(c.range_status.as_str()),
+                        scope = string::from(c.scope.as_str()),
+                        detail = string::from(c.detail.as_str()),
+                        query_cli = string::new(),
+                        query_symbol = string::new(),
+                        has_query = false
+                    ))
+                    nqi = nqi + 1:usize
+                }
+                self.candidates = cede no_q_cands
+                meta_len = self#.compute_candidate_meta_len(1:usize, 0:usize, false, limit)
+            }
             if meta_len > limit {
                 auto err# = string::from("target_exceeds_max_result_bytes: View result metadata (")
                 err#.push_str(u64_to_string(meta_len as u64).as_str())
@@ -4331,7 +4376,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         auto first_scope = string::from(sym_data.symbols.borrow(first_idx).scope.as_str())
 
         auto all_cands# = Vec<SymbolCandidateInfo>::new()
-        auto cand_lines# = Vec<string>::new()
+        auto cand_base_lines# = Vec<string>::new()
+        auto cand_cli_lines# = Vec<string>::new()
 
         auto mi# = 0:usize
         loop mi < total_matched {
@@ -4343,6 +4389,37 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             auto cand_r_status# = string::from("confirmed")
             if cand_sym.range_reliability == "eof_fallback" || cand_sym.range_end.is_none() {
                 cand_r_status = string::from("unknown")
+            }
+
+            auto cand_scope_count# = 0:usize
+            if cand_sym.scope.len() > 0:usize {
+                auto sci# = 0:usize
+                loop sci < total_matched {
+                    auto other_idx = matched_indices.get(sci)
+                    if sym_data.symbols.borrow(other_idx).scope.as_str() == cand_sym.scope.as_str() {
+                        cand_scope_count = cand_scope_count + 1:usize
+                    }
+                    sci = sci + 1:usize
+                }
+            }
+
+            auto q_sym# = string::new()
+            auto q_cli# = string::new()
+            if cand_sym.scope.len() > 0:usize && cand_scope_count == 1:usize {
+                q_sym#.push_str(cand_sym.scope.as_str())
+                q_sym#.push_str("::")
+                q_sym#.push_str(cand_sym.name.as_str())
+
+                q_cli#.push_str("trg view ")
+                q_cli#.push_str(shell_quote(opts.file_path.as_str()).as_str())
+                q_cli#.push_str(" --symbol ")
+                q_cli#.push_str(shell_quote(q_sym.as_str()).as_str())
+            } else {
+                q_cli#.push_str("trg view ")
+                q_cli#.push_str(shell_quote(opts.file_path.as_str()).as_str())
+                q_cli#.push_char(':')
+                q_cli#.push_str(u64_to_string(cand_sym.line as u64).as_str())
+                q_cli#.push_str(" --block")
             }
 
             auto cline# = string::new()
@@ -4360,7 +4437,18 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             cline#.push_str(" - ")
             cline#.push_str(cand_sym.detail.as_str())
             cline#.push_str("\n")
-            cand_lines#.push(cede cline)
+            cand_base_lines#.push(cede cline)
+
+            auto qline# = string::new()
+            qline#.push_str("    -> query_cli: ")
+            qline#.push_str(q_cli.as_str())
+            qline#.push_str("\n")
+            cand_cli_lines#.push(cede qline)
+
+            auto cand_q_cli# = string::new()
+            if !opts.no_hints {
+                cand_q_cli = string::from(q_cli.as_str())
+            }
 
             all_cands#.push(SymbolCandidateInfo(
                 name = string::from(cand_sym.name.as_str()),
@@ -4370,7 +4458,10 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
                 range_end = cand_sym.range_end,
                 range_status = cede cand_r_status,
                 scope = string::from(cand_sym.scope.as_str()),
-                detail = string::from(cand_sym.detail.as_str())
+                detail = string::from(cand_sym.detail.as_str()),
+                query_cli = cede cand_q_cli,
+                query_symbol = cede q_sym,
+                has_query = true
             ))
             mi = mi + 1:usize
         }
@@ -4389,8 +4480,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             }
         }
 
-        // Check minimum diagnostic byte budget (header + candidate 0 + omission + hint)
-        auto min_bytes# = diag_head.len() + cand_lines.borrow(0).len() + hint.len()
+        // Check minimum diagnostic byte budget (header + candidate 0 base + omission + hint)
+        auto min_bytes# = diag_head.len() + cand_base_lines.borrow(0).len() + hint.len()
         if total_matched > 1:usize {
             auto min_om# = string::from("  [and ")
             min_om#.push_str(u64_to_string((total_matched - 1:usize) as u64).as_str())
@@ -4404,6 +4495,25 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             err#.push_str(u64_to_string(max_bytes_val as u64).as_str())
             err#.push_str(" bytes)")
             return Result<ViewResult, string>::Err(cede err)
+        }
+
+        auto include_cli_in_text# = !opts.no_hints
+        if has_max_bytes && include_cli_in_text {
+            auto min_bytes_with_cli = min_bytes + cand_cli_lines.borrow(0).len()
+            if min_bytes_with_cli > max_bytes_val {
+                include_cli_in_text = false
+            }
+        }
+
+        auto cand_lines# = Vec<string>::new()
+        auto cli_i# = 0:usize
+        loop cli_i < total_matched {
+            auto cl# = string::from(cand_base_lines.borrow(cli_i).as_str())
+            if include_cli_in_text {
+                cl#.push_str(cand_cli_lines.borrow(cli_i).as_str())
+            }
+            cand_lines#.push(cede cl)
+            cli_i = cli_i + 1:usize
         }
 
         auto max_k# = total_matched
@@ -4454,16 +4564,7 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         auto fci# = 0:usize
         loop fci < chosen_k {
             auto &c = all_cands.borrow(fci)
-            final_cands#.push(SymbolCandidateInfo(
-                name = string::from(c.name.as_str()),
-                kind = string::from(c.kind.as_str()),
-                line = c.line,
-                range_start = c.range_start,
-                range_end = c.range_end,
-                range_status = string::from(c.range_status.as_str()),
-                scope = string::from(c.scope.as_str()),
-                detail = string::from(c.detail.as_str())
-            ))
+            final_cands#.push(c.clone())
             fci = fci + 1:usize
         }
 
