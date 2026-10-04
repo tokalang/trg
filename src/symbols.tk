@@ -7,7 +7,7 @@ import std/vec::{Vec}
 import std/io::{println}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
 import src/posix::{posix_ferror, print_err, posix_write_stdout}
-import src/types::{BlockDelimiter, SyntaxFamily}
+import src/types::{BlockDelimiter, SyntaxFamily, ParserIntegrity, parser_integrity_name}
 import src/syntax::{
     detect_syntax_family,
     detect_lexical_dialect,
@@ -62,7 +62,10 @@ pub shape SymbolsResult (
     total_symbols: usize,
     complete: bool,
     truncated: bool,
-    termination_reason: string
+    termination_reason: string,
+    integrity: ParserIntegrity,
+    degraded_reason: Option<string>,
+    unclosed_line: Option<usize>
 )
 
 shape OpenSymbolEntry (
@@ -70,7 +73,8 @@ shape OpenSymbolEntry (
     name: string,
     delimiter: BlockDelimiter,
     depth: usize,
-    indent: usize
+    indent: usize,
+    line: usize
 )
 
 fn extract_go_receiver_type(line: str) -> string {
@@ -174,6 +178,13 @@ fn snap_symbol_start_decorators(
     return cur_snap
 }
 
+fn make_opt_string(s: str) -> Option<string> {
+    if s.len == 0:usize {
+        return Option<string>::None
+    }
+    return Option<string>::Some(string::from(s))
+}
+
 pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, string> {
     auto path_str = string::from(opts.file_path.as_str())
     auto mode_buf# = [0:char; 4]
@@ -228,6 +239,9 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
     auto read_err# = false
     auto truncated# = false
     auto term_reason# = string::from("completed")
+    auto has_degraded# = false
+    auto degraded_reason_str# = string::new()
+    auto unclosed_line# = Option<usize>::None
     auto total_lines# = 0:usize
     auto total_input_bytes# = 0:usize
     auto approx_bytes_accum# = 0:usize
@@ -467,6 +481,10 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                         if has_max_syms && all_symbols.len() >= max_syms_val {
                             truncated = true
                             term_reason = string::from("max_symbols")
+                            has_degraded = true
+                            if degraded_reason_str.len() == 0:usize {
+                                degraded_reason_str = string::from("scan_truncated")
+                            }
                             cursor = cursor + nl_pos + 1
                             cur_line = cur_line + 1
                             break
@@ -527,6 +545,10 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                         if has_max_bytes && approx_bytes_accum >= max_bytes_val {
                             truncated = true
                             term_reason = string::from("max_result_bytes")
+                            has_degraded = true
+                            if degraded_reason_str.len() == 0:usize {
+                                degraded_reason_str = string::from("scan_truncated")
+                            }
                             cursor = cursor + nl_pos + 1
                             cur_line = cur_line + 1
                             break
@@ -543,7 +565,8 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                             name = cede ident,
                             delimiter = delim,
                             depth = d_val,
-                            indent = lex.statement_indent
+                            indent = lex.statement_indent,
+                            line = cur_line
                         ))
                     }
                 }
@@ -586,6 +609,15 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
         }
         loop open_stack.len() > 0:usize {
             auto top_entry = open_stack#.pop().unwrap()
+            if family == SyntaxFamily::Brace {
+                has_degraded = true
+                if degraded_reason_str.len() == 0:usize {
+                    degraded_reason_str = string::from("unclosed_delimiter")
+                }
+                if unclosed_line.is_none() {
+                    unclosed_line = Option<usize>::Some(top_entry.line)
+                }
+            }
             match top_entry.symbol_index {
                 auto Option<usize>::Some(si) => {
                     auto &sym# = all_symbols#.borrow_mut(si)
@@ -595,12 +627,24 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
                             sym.range_reliability = string::from("valid_indent_eof")
                         } else {
                             sym.range_reliability = string::from("eof_fallback")
+                            has_degraded = true
+                            if degraded_reason_str.len() == 0:usize {
+                                degraded_reason_str = string::from("eof_fallback")
+                            }
+                            if unclosed_line.is_none() {
+                                unclosed_line = Option<usize>::Some(top_entry.line)
+                            }
                         }
                     }
                 }
                 auto Option<usize>::None => {}
             }
         }
+    }
+
+    auto integ# = ParserIntegrity::Verified
+    if has_degraded || truncated {
+        integ = ParserIntegrity::Degraded
     }
 
     auto total = all_symbols.len()
@@ -610,7 +654,10 @@ pub fn outline_symbols_file(opts: SymbolsOptions) -> Result<SymbolsResult, strin
         total_symbols = total,
         complete = !truncated,
         truncated = truncated,
-        termination_reason = cede term_reason
+        termination_reason = cede term_reason,
+        integrity = integ,
+        degraded_reason = make_opt_string(degraded_reason_str.as_str()),
+        unclosed_line = unclosed_line
     ))
 }
 
@@ -657,6 +704,9 @@ pub fn outline_symbols_lines(
 
     auto truncated# = false
     auto term_reason# = string::from("completed")
+    auto has_degraded# = false
+    auto degraded_reason_str# = string::new()
+    auto unclosed_line# = Option<usize>::None
     auto total_lines = lines.len()
     auto approx_bytes_accum# = 0:usize
 
@@ -821,6 +871,10 @@ pub fn outline_symbols_lines(
                 if has_max_syms && all_symbols.len() >= max_syms_val {
                     truncated = true
                     term_reason = string::from("max_symbols")
+                    has_degraded = true
+                    if degraded_reason_str.len() == 0:usize {
+                        degraded_reason_str = string::from("scan_truncated")
+                    }
                     break
                 }
 
@@ -878,6 +932,10 @@ pub fn outline_symbols_lines(
                 if has_max_bytes && approx_bytes_accum >= max_bytes_val {
                     truncated = true
                     term_reason = string::from("max_result_bytes")
+                    has_degraded = true
+                    if degraded_reason_str.len() == 0:usize {
+                        degraded_reason_str = string::from("scan_truncated")
+                    }
                     break
                 }
             }
@@ -892,7 +950,8 @@ pub fn outline_symbols_lines(
                     name = cede ident,
                     delimiter = delim,
                     depth = d_val,
-                    indent = lex.statement_indent
+                    indent = lex.statement_indent,
+                    line = cur_line
                 ))
             }
         }
@@ -919,6 +978,15 @@ pub fn outline_symbols_lines(
         }
         loop open_stack.len() > 0:usize {
             auto top_entry = open_stack#.pop().unwrap()
+            if family == SyntaxFamily::Brace {
+                has_degraded = true
+                if degraded_reason_str.len() == 0:usize {
+                    degraded_reason_str = string::from("unclosed_delimiter")
+                }
+                if unclosed_line.is_none() {
+                    unclosed_line = Option<usize>::Some(top_entry.line)
+                }
+            }
             match top_entry.symbol_index {
                 auto Option<usize>::Some(si) => {
                     auto &sym# = all_symbols#.borrow_mut(si)
@@ -928,12 +996,24 @@ pub fn outline_symbols_lines(
                             sym.range_reliability = string::from("valid_indent_eof")
                         } else {
                             sym.range_reliability = string::from("eof_fallback")
+                            has_degraded = true
+                            if degraded_reason_str.len() == 0:usize {
+                                degraded_reason_str = string::from("eof_fallback")
+                            }
+                            if unclosed_line.is_none() {
+                                unclosed_line = Option<usize>::Some(top_entry.line)
+                            }
                         }
                     }
                 }
                 auto Option<usize>::None => {}
             }
         }
+    }
+
+    auto integ# = ParserIntegrity::Verified
+    if has_degraded || truncated {
+        integ = ParserIntegrity::Degraded
     }
 
     auto total = all_symbols.len()
@@ -943,7 +1023,10 @@ pub fn outline_symbols_lines(
         total_symbols = total,
         complete = !truncated,
         truncated = truncated,
-        termination_reason = cede term_reason
+        termination_reason = cede term_reason,
+        integrity = integ,
+        degraded_reason = make_opt_string(degraded_reason_str.as_str()),
+        unclosed_line = unclosed_line
     ))
 }
 
@@ -986,6 +1069,11 @@ pub fn format_symbols_text_tree(res: SymbolsResult) -> string {
             line_str#.push_str("::")
         }
         line_str#.push_str(s.name.as_str())
+        if s.range_reliability == "observed_close" {
+            line_str#.push_str(" [VERIFIED]")
+        } else {
+            line_str#.push_str(" [HEURISTIC]")
+        }
         line_str#.push_str("\n")
         out#.push_str(line_str.as_str())
         i = i + 1
@@ -1039,6 +1127,8 @@ pub fn format_symbols_json(res: SymbolsResult) -> string {
 pub fn format_symbols_structured(res: SymbolsResult) -> string {
     auto out# = string::from("{\"schema\":\"trg-mcp-symbols-result-v1\",\"path\":\"")
     out#.push_str(json_escape(res.path.as_str()).as_str())
+    out#.push_str("\",\"parser_integrity\":\"")
+    out#.push_str(parser_integrity_name(res.integrity))
     out#.push_str("\",\"complete\":")
     if res.complete { out#.push_str("true") } else { out#.push_str("false") }
     out#.push_str(",\"truncated\":")

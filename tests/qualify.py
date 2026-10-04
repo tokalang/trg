@@ -6733,8 +6733,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_sug.returncode == 0, f"Suggestions test suite failed (exit {r_v_sug.returncode}):\n{r_v_sug.stderr}\n{r_v_sug.stdout}"
     log("Test 186 passed: Agent-Native typo suggestions, scope routing, and fallback hints verified.")
 
+    # Test 187: Absence Certainty Protocol, Progress Badges & Boundary Reliability
+    log("Test 187: Absence Certainty Protocol, Progress Badges & Boundary Reliability (tests/test_view_absence_certainty.py)")
+    absence_script = repo_root / "tests" / "test_view_absence_certainty.py"
+    assert absence_script.exists(), f"Absence certainty test script not found at {absence_script}"
+    env_v_abs = dict(os.environ)
+    env_v_abs["TRG_BIN"] = str(pkg_bin_path)
+    r_v_abs = subprocess.run([
+        sys.executable,
+        str(absence_script)
+    ], cwd=str(repo_root), env=env_v_abs, capture_output=True, text=True)
+    assert r_v_abs.returncode == 0, f"Absence certainty test suite failed (exit {r_v_abs.returncode}):\n{r_v_abs.stderr}\n{r_v_abs.stdout}"
+    log("Test 187 passed: Absence Certainty Protocol, Progress Badges & Boundary Reliability verified.")
+
     log("=" * 60)
-    log("ALL 186 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
+    log("ALL 187 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
     log("=" * 60)
 
 if __name__ == "__main__":

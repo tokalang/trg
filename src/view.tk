@@ -6,7 +6,7 @@ import std/vec::{Vec}
 import std/io::{println}
 import sys/libc::{libc_malloc, libc_free, libc_fopen, libc_fclose, libc_fread}
 import src/posix::{posix_ferror, print_err, posix_write_stdout, posix_write_stderr}
-import src/types::{BlockRange, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo, Hint}
+import src/types::{BlockRange, SyntaxFamily, BlockDelimiter, LexicalDialect, LineLexicalInfo, Hint, ParserIntegrity, parser_integrity_name}
 import src/hints::{HintSlot, build_symbol_preview_truncation_hint, build_continuation_command, shell_quote}
 import src/syntax::{
     detect_syntax_family,
@@ -101,7 +101,8 @@ pub shape SymbolTargetInfo (
     range_end: Option<usize>,
     range_status: string,
     scope: string,
-    detail: string
+    detail: string,
+    range_reliability: string
 )
 
 impl SymbolTargetInfo {
@@ -114,7 +115,8 @@ impl SymbolTargetInfo {
             range_end = self.range_end,
             range_status = string::from(self.range_status.as_str()),
             scope = string::from(self.scope.as_str()),
-            detail = string::from(self.detail.as_str())
+            detail = string::from(self.detail.as_str()),
+            range_reliability = string::from(self.range_reliability.as_str())
         )
     }
 }
@@ -194,8 +196,23 @@ pub shape ViewResult (
     suggestions: Vec<SymbolCandidateInfo>,
     continuation_token: Option<string>,
     continuation_active: bool,
-    sha256_hex: string
+    sha256_hex: string,
+    parser_integrity: Option<string>,
+    degraded_reason: Option<string>,
+    unclosed_line: Option<usize>,
+    coverage_percent: Option<usize>
 )
+
+fn copy_opt_string(opt: Option<string>) -> Option<string> {
+    match opt {
+        auto Option<string>::Some(&s) => {
+            return Option<string>::Some(string::from(s.as_str()))
+        }
+        auto Option<string>::None => {
+            return Option<string>::None
+        }
+    }
+}
 
 pub fn format_view_line_record_json(line_number: usize, kind: str, text: str) -> string {
     auto item# = string::from("{\"line_number\":")
@@ -422,7 +439,13 @@ impl ViewResult {
             }
             resp#.push_str(",\"range_status\":\"")
             resp#.push_str(sym.range_status.as_str())
-            resp#.push_str("\",\"scope\":\"")
+            resp#.push_str("\"")
+            if !is_pruned {
+                resp#.push_str(",\"range_reliability\":\"")
+                resp#.push_str(sym.range_reliability.as_str())
+                resp#.push_str("\"")
+            }
+            resp#.push_str(",\"scope\":\"")
             resp#.push_str(json_escape(sym.scope.as_str()).as_str())
             resp#.push_str("\",\"detail\":\"")
             resp#.push_str(json_escape(sym.detail.as_str()).as_str())
@@ -536,6 +559,38 @@ impl ViewResult {
                 resp#.push_str("]")
             } else {
                 resp#.push_str("[]")
+            }
+        }
+        if !is_pruned {
+            match self.parser_integrity {
+                auto Option<string>::Some(&pi) => {
+                    resp#.push_str(",\"parser_integrity\":\"")
+                    resp#.push_str(pi.as_str())
+                    resp#.push_str("\"")
+                }
+                auto Option<string>::None => {}
+            }
+            match self.degraded_reason {
+                auto Option<string>::Some(&dr) => {
+                    resp#.push_str(",\"degraded_reason\":\"")
+                    resp#.push_str(json_escape(dr.as_str()).as_str())
+                    resp#.push_str("\"")
+                }
+                auto Option<string>::None => {}
+            }
+            match self.unclosed_line {
+                auto Option<usize>::Some(ul) => {
+                    resp#.push_str(",\"unclosed_line\":")
+                    resp#.push_str(u64_to_string(ul as u64).as_str())
+                }
+                auto Option<usize>::None => {}
+            }
+            match self.coverage_percent {
+                auto Option<usize>::Some(cp) => {
+                    resp#.push_str(",\"coverage_percent\":")
+                    resp#.push_str(u64_to_string(cp as u64).as_str())
+                }
+                auto Option<usize>::None => {}
             }
         }
         return cede resp
@@ -1032,7 +1087,8 @@ impl ViewResult {
                     range_end = ts.range_end,
                     range_status = string::from(ts.range_status.as_str()),
                     scope = string::from(ts.scope.as_str()),
-                    detail = string::from(ts.detail.as_str())
+                    detail = string::from(ts.detail.as_str()),
+                    range_reliability = string::from(ts.range_reliability.as_str())
                 ))
             }
             auto target_range_status_clone# = Option<string>::None
@@ -1068,7 +1124,11 @@ impl ViewResult {
                 suggestions = Vec<SymbolCandidateInfo>::new(),
                 continuation_token = Option<string>::None,
                 continuation_active = false,
-                sha256_hex = string::new()
+                sha256_hex = string::new(),
+                parser_integrity = copy_opt_string(self.parser_integrity),
+                degraded_reason = copy_opt_string(self.degraded_reason),
+                unclosed_line = self.unclosed_line,
+                coverage_percent = self.coverage_percent
             )
             auto to_conv = target_only_vr#.converge_structured()
             if to_conv.is_err() {
@@ -2093,7 +2153,11 @@ fn execute_view_continuation_lines(
         suggestions = Vec<SymbolCandidateInfo>::new(),
         continuation_token = cede continuation_tok,
         continuation_active = true,
-        sha256_hex = string::from(sha256_hex.as_str())
+        sha256_hex = string::from(sha256_hex.as_str()),
+        parser_integrity = Option<string>::None,
+        degraded_reason = Option<string>::None,
+        unclosed_line = Option<usize>::None,
+        coverage_percent = Option<usize>::None
     ))
 }
 
@@ -2386,7 +2450,11 @@ fn execute_view_stream_lines(
         suggestions = Vec<SymbolCandidateInfo>::new(),
         continuation_token = Option<string>::None,
         continuation_active = false,
-        sha256_hex = string::new()
+        sha256_hex = string::new(),
+        parser_integrity = Option<string>::None,
+        degraded_reason = Option<string>::None,
+        unclosed_line = Option<usize>::None,
+        coverage_percent = Option<usize>::None
     ))
 }
 
@@ -2768,7 +2836,11 @@ fn execute_view_stream_point(
         suggestions = Vec<SymbolCandidateInfo>::new(),
         continuation_token = Option<string>::None,
         continuation_active = false,
-        sha256_hex = string::new()
+        sha256_hex = string::new(),
+        parser_integrity = Option<string>::None,
+        degraded_reason = Option<string>::None,
+        unclosed_line = Option<usize>::None,
+        coverage_percent = Option<usize>::None
     ))
 }
 
@@ -3392,7 +3464,11 @@ fn execute_view_continuation_block(
         suggestions = Vec<SymbolCandidateInfo>::new(),
         continuation_token = cede continuation_tok,
         continuation_active = true,
-        sha256_hex = string::from(sha256_hex.as_str())
+        sha256_hex = string::from(sha256_hex.as_str()),
+        parser_integrity = Option<string>::None,
+        degraded_reason = Option<string>::None,
+        unclosed_line = Option<usize>::None,
+        coverage_percent = Option<usize>::None
     ))
 }
 
@@ -4183,7 +4259,11 @@ fn execute_view_stream_block(
         suggestions = Vec<SymbolCandidateInfo>::new(),
         continuation_token = Option<string>::None,
         continuation_active = false,
-        sha256_hex = string::new()
+        sha256_hex = string::new(),
+        parser_integrity = Option<string>::None,
+        degraded_reason = Option<string>::None,
+        unclosed_line = Option<usize>::None,
+        coverage_percent = Option<usize>::None
     ))
 }
 
@@ -4318,7 +4398,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             suggestions = Vec<SymbolCandidateInfo>::new(),
             continuation_token = Option<string>::None,
             continuation_active = false,
-            sha256_hex = string::new()
+            sha256_hex = string::new(),
+            parser_integrity = Option<string>::None,
+            degraded_reason = Option<string>::None,
+            unclosed_line = Option<usize>::None,
+            coverage_percent = Option<usize>::None
         ))
     }
 
@@ -4354,7 +4438,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             suggestions = Vec<SymbolCandidateInfo>::new(),
             continuation_token = Option<string>::None,
             continuation_active = false,
-            sha256_hex = string::new()
+            sha256_hex = string::new(),
+            parser_integrity = Option<string>::None,
+            degraded_reason = Option<string>::None,
+            unclosed_line = Option<usize>::None,
+            coverage_percent = Option<usize>::None
         ))
     }
 
@@ -4388,7 +4476,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             suggestions = Vec<SymbolCandidateInfo>::new(),
             continuation_token = Option<string>::None,
             continuation_active = false,
-            sha256_hex = string::new()
+            sha256_hex = string::new(),
+            parser_integrity = Option<string>::None,
+            degraded_reason = Option<string>::None,
+            unclosed_line = Option<usize>::None,
+            coverage_percent = Option<usize>::None
         ))
     }
 
@@ -4427,7 +4519,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             suggestions = Vec<SymbolCandidateInfo>::new(),
             continuation_token = Option<string>::None,
             continuation_active = false,
-            sha256_hex = string::new()
+            sha256_hex = string::new(),
+            parser_integrity = Option<string>::None,
+            degraded_reason = Option<string>::None,
+            unclosed_line = Option<usize>::None,
+            coverage_percent = Option<usize>::None
         ))
     }
 
@@ -4462,7 +4558,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             suggestions = Vec<SymbolCandidateInfo>::new(),
             continuation_token = Option<string>::None,
             continuation_active = false,
-            sha256_hex = string::new()
+            sha256_hex = string::new(),
+            parser_integrity = Option<string>::Some(string::from("degraded")),
+            degraded_reason = Option<string>::Some(string::from("internal symbol limit 5000 exceeded")),
+            unclosed_line = Option<usize>::None,
+            coverage_percent = Option<usize>::None
         ))
     }
 
@@ -4664,7 +4764,33 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             sug_i = sug_i + 1:usize
         }
 
-        auto msg# = string::from("trg view: symbol '")
+        auto msg# = string::new()
+        if !opts.no_hints {
+            if sym_data.integrity == ParserIntegrity::Verified {
+                msg#.push_str("[status: DEFINITELY_NOT_FOUND, scanned_symbols: ")
+                msg#.push_str(u64_to_string(sym_data.total_symbols as u64).as_str())
+                msg#.push_str(", parse_integrity: 100%]\n")
+            } else {
+                msg#.push_str("[status: PARSER_DEGRADED")
+                match sym_data.unclosed_line {
+                    auto Option<usize>::Some(ul) => {
+                        msg#.push_str(", unclosed_at: L")
+                        msg#.push_str(u64_to_string(ul as u64).as_str())
+                    }
+                    auto Option<usize>::None => {}
+                }
+                match sym_data.degraded_reason {
+                    auto Option<string>::Some(&dr) => {
+                        msg#.push_str(", reason: ")
+                        msg#.push_str(dr.as_str())
+                    }
+                    auto Option<string>::None => {}
+                }
+                msg#.push_str("]\nWarning: parse integrity degraded; absence of symbol cannot be guaranteed.\n")
+            }
+        }
+
+        msg#.push_str("trg view: symbol '")
         msg#.push_str(target_name.as_str())
         if target_has_scope {
             msg#.push_str("' in scope '")
@@ -4755,7 +4881,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             suggestions = cede suggestions,
             continuation_token = Option<string>::None,
             continuation_active = false,
-            sha256_hex = string::new()
+            sha256_hex = string::new(),
+            parser_integrity = Option<string>::Some(string::from(parser_integrity_name(sym_data.integrity))),
+            degraded_reason = copy_opt_string(sym_data.degraded_reason),
+            unclosed_line = sym_data.unclosed_line,
+            coverage_percent = Option<usize>::None
         ))
     }
 
@@ -4993,7 +5123,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             suggestions = Vec<SymbolCandidateInfo>::new(),
             continuation_token = Option<string>::None,
             continuation_active = false,
-            sha256_hex = string::new()
+            sha256_hex = string::new(),
+            parser_integrity = Option<string>::Some(string::from(parser_integrity_name(sym_data.integrity))),
+            degraded_reason = copy_opt_string(sym_data.degraded_reason),
+            unclosed_line = sym_data.unclosed_line,
+            coverage_percent = Option<usize>::None
         ))
     }
 
@@ -5091,7 +5225,7 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             return Result<ViewResult, string>::Err(string::from("target_exceeds_max_lines: Target line cannot fit within max_lines 0"))
         }
 
-        auto header_pre = build_symbol_header_with_status(base_header.as_str(), false, range_status_str == "confirmed", opts.no_hints)
+        auto header_pre = build_symbol_header_with_status(base_header.as_str(), false, range_status_str == "confirmed", target_sym.range_reliability.as_str(), sym_start, sym_start, sym_start, sym_end, opts.no_hints)
         auto cur_line# = sym_start
         auto lines_emitted# = 0:usize
         auto bytes_emitted# = header_pre.len()
@@ -5192,7 +5326,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             }
         }
 
-        auto final_header = build_symbol_header_with_status(base_header.as_str(), truncated, range_status_str == "confirmed", opts.no_hints)
+        auto em_end# = sym_start
+        if lines_emitted > 0:usize {
+            em_end = sym_start + lines_emitted - 1:usize
+        }
+        auto final_header = build_symbol_header_with_status(base_header.as_str(), truncated, range_status_str == "confirmed", target_sym.range_reliability.as_str(), sym_start, em_end, sym_start, sym_end, opts.no_hints)
         auto out# = string::new()
         out#.push_str(final_header.as_str())
         out#.push_str(body_out.as_str())
@@ -5216,7 +5354,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             range_end = target_sym.range_end,
             range_status = string::from(range_status_str.as_str()),
             scope = string::from(target_sym.scope.as_str()),
-            detail = string::from(target_sym.detail.as_str())
+            detail = string::from(target_sym.detail.as_str()),
+            range_reliability = string::from(target_sym.range_reliability.as_str())
         )
 
         auto detected_block = BlockRange(start = sym_start, end = sym_end)
@@ -5232,6 +5371,15 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
 
         auto target_vec# = Vec<SymbolTargetInfo>::new()
         target_vec#.push(target_info)
+
+        auto total_sym_lines# = 1:usize
+        if sym_end >= sym_start {
+            total_sym_lines = sym_end - sym_start + 1:usize
+        }
+        auto coverage_pct# = (lines_emitted * 100:usize) / total_sym_lines
+        if !truncated || coverage_pct > 100:usize {
+            coverage_pct = 100:usize
+        }
 
         return Result<ViewResult, string>::Ok(ViewResult(
             text = cede out,
@@ -5259,7 +5407,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
             suggestions = Vec<SymbolCandidateInfo>::new(),
             continuation_token = cede continuation_tok,
             continuation_active = true,
-            sha256_hex = string::from(sha256_hex.as_str())
+            sha256_hex = string::from(sha256_hex.as_str()),
+            parser_integrity = Option<string>::Some(string::from(parser_integrity_name(sym_data.integrity))),
+            degraded_reason = copy_opt_string(sym_data.degraded_reason),
+            unclosed_line = sym_data.unclosed_line,
+            coverage_percent = Option<usize>::Some(coverage_pct)
         ))
     }
 
@@ -5287,7 +5439,7 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
     target_entry#.push_str(target_disp)
     target_entry#.push_str("\n")
 
-    auto header_pre = build_symbol_header_with_status(base_header.as_str(), false, range_status_str == "confirmed", opts.no_hints)
+    auto header_pre = build_symbol_header_with_status(base_header.as_str(), false, range_status_str == "confirmed", target_sym.range_reliability.as_str(), sym_start, sym_start, sym_start, sym_end, opts.no_hints)
     auto base_bytes = header_pre.len() + target_entry.len()
     if has_max_bytes && base_bytes > max_bytes_val {
         auto err# = string::from("target_exceeds_max_result_bytes: Target line formatted record (")
@@ -5403,13 +5555,15 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         trunc_reason = string::from("max_lines")
     }
 
-    auto final_header = build_symbol_header_with_status(base_header.as_str(), truncated, range_status_str == "confirmed", opts.no_hints)
+    auto lines_emitted = 1:usize + b_take_actual + a_take_actual
+    auto em_start = target_line_no - b_take_actual
+    auto em_end = target_line_no + a_take_actual
+    auto final_header = build_symbol_header_with_status(base_header.as_str(), truncated, range_status_str == "confirmed", target_sym.range_reliability.as_str(), em_start, em_end, sym_start, sym_end, opts.no_hints)
     auto out# = string::new()
     out#.push_str(final_header.as_str())
 
     auto records# = Vec<ViewLineRecord>::new()
     auto bytes_emitted# = final_header.len()
-    auto lines_emitted = 1:usize + b_take_actual + a_take_actual
 
     // 1. Lines before target
     if b_take_actual > 0:usize {
@@ -5495,7 +5649,8 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         range_end = target_sym.range_end,
         range_status = string::from(range_status_str.as_str()),
         scope = string::from(target_sym.scope.as_str()),
-        detail = string::from(target_sym.detail.as_str())
+        detail = string::from(target_sym.detail.as_str()),
+        range_reliability = string::from(target_sym.range_reliability.as_str())
     )
 
     auto detected_block = BlockRange(start = sym_start, end = sym_end)
@@ -5511,6 +5666,15 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
 
     auto target_vec# = Vec<SymbolTargetInfo>::new()
     target_vec#.push(target_info)
+
+    auto total_sym_lines# = 1:usize
+    if sym_end >= sym_start {
+        total_sym_lines = sym_end - sym_start + 1:usize
+    }
+    auto coverage_pct# = (lines_emitted * 100:usize) / total_sym_lines
+    if !truncated || coverage_pct > 100:usize {
+        coverage_pct = 100:usize
+    }
 
     return Result<ViewResult, string>::Ok(ViewResult(
         text = cede out,
@@ -5538,7 +5702,11 @@ fn execute_view_stream_symbol(opts: ViewOptions) -> Result<ViewResult, string> {
         suggestions = Vec<SymbolCandidateInfo>::new(),
         continuation_token = Option<string>::None,
         continuation_active = false,
-        sha256_hex = string::new()
+        sha256_hex = string::new(),
+        parser_integrity = Option<string>::Some(string::from(parser_integrity_name(sym_data.integrity))),
+        degraded_reason = copy_opt_string(sym_data.degraded_reason),
+        unclosed_line = sym_data.unclosed_line,
+        coverage_percent = Option<usize>::Some(coverage_pct)
     ))
 }
 
@@ -5793,6 +5961,10 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
                 }
                 auto Option<string>::None => {}
             }
+            auto rel_str# = "eof_fallback"
+            if token.range_status == "confirmed" {
+                rel_str = "observed_close"
+            }
             target_vec#.push(SymbolTargetInfo(
                 name = string::from(s_name.as_str()),
                 kind = string::from("symbol"),
@@ -5800,11 +5972,30 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
                 range_start = token.req_start,
                 range_end = Option<usize>::Some(token.req_end),
                 range_status = string::from(token.range_status.as_str()),
+                range_reliability = string::from(rel_str),
                 scope = cede scope_str,
                 detail = string::new()
             ))
         }
         auto Option<string>::None => {}
+    }
+
+    auto cont_cov_pct# = Option<usize>::None
+    if token.mode == "symbol" && token.req_end >= token.req_start {
+        auto total_sym_lines = token.req_end - token.req_start + 1:usize
+        auto cumulative_emitted# = 0:usize
+        if cur_line > token.req_start {
+            auto end_cov# = cur_line - 1:usize
+            if end_cov > token.req_end {
+                end_cov = token.req_end
+            }
+            cumulative_emitted = end_cov - token.req_start + 1:usize
+        }
+        auto pct# = (cumulative_emitted * 100:usize) / total_sym_lines
+        if !truncated || pct > 100:usize {
+            pct = 100:usize
+        }
+        cont_cov_pct = Option<usize>::Some(pct)
     }
 
     auto vr_mode# = string::from(token.mode.as_str())
@@ -5838,7 +6029,11 @@ pub fn execute_view_continuation(opts: ViewOptions) -> Result<ViewResult, string
         suggestions = Vec<SymbolCandidateInfo>::new(),
         continuation_token = cede next_token,
         continuation_active = true,
-        sha256_hex = string::from(token.sha256_hex.as_str())
+        sha256_hex = string::from(token.sha256_hex.as_str()),
+        parser_integrity = Option<string>::None,
+        degraded_reason = Option<string>::None,
+        unclosed_line = Option<usize>::None,
+        coverage_percent = cont_cov_pct
     ))
 }
 
@@ -5980,12 +6175,51 @@ fn build_symbol_header_with_status(
     base_header: str,
     is_truncated: bool,
     is_confirmed: bool,
+    range_reliability: str,
+    emitted_start: usize,
+    emitted_end: usize,
+    sym_start: usize,
+    sym_end: usize,
     no_hints: bool
 ) -> string {
     auto res# = string::from(base_header)
     if !no_hints {
+        if range_reliability == "observed_close" {
+            res#.push_str(" [boundary: VERIFIED]")
+        } else if range_reliability == "valid_indent_eof" {
+            res#.push_str(" [boundary: HEURISTIC (indent_inference)]")
+        } else if range_reliability == "eof_fallback" {
+            res#.push_str(" [boundary: HEURISTIC (eof_fallback)]")
+        }
+
         if is_truncated {
-            res#.push_str(" [status: TRUNCATED]")
+            if is_confirmed && sym_end >= sym_start && emitted_end >= emitted_start {
+                auto total_sym_lines = sym_end - sym_start + 1:usize
+                auto lines_emitted = emitted_end - emitted_start + 1:usize
+                auto pct# = (lines_emitted * 100:usize) / total_sym_lines
+                if pct > 100:usize {
+                    pct = 100:usize
+                }
+                auto rem# = 0:usize
+                if total_sym_lines > lines_emitted {
+                    rem = total_sym_lines - lines_emitted
+                }
+                res#.push_str(" [status: TRUNCATED, emitted: L")
+                res#.push_str(u64_to_string(emitted_start as u64).as_str())
+                res#.push_str("-L")
+                res#.push_str(u64_to_string(emitted_end as u64).as_str())
+                res#.push_str(" (")
+                res#.push_str(u64_to_string(lines_emitted as u64).as_str())
+                res#.push_str("/")
+                res#.push_str(u64_to_string(total_sym_lines as u64).as_str())
+                res#.push_str(" lines, ")
+                res#.push_str(u64_to_string(pct as u64).as_str())
+                res#.push_str("%), remaining: ")
+                res#.push_str(u64_to_string(rem as u64).as_str())
+                res#.push_str(" lines]")
+            } else {
+                res#.push_str(" [status: TRUNCATED]")
+            }
         } else if is_confirmed {
             res#.push_str(" [status: COMPLETE]")
         } else {

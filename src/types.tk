@@ -46,6 +46,18 @@ pub fn scan_pass_name(p: ScanPass) -> str {
     }
 }
 
+pub shape ParserIntegrity (
+    Verified = 0 |
+    Degraded = 1
+)
+
+pub fn parser_integrity_name(p: ParserIntegrity) -> str {
+    match p {
+        auto ParserIntegrity::Verified => { return "verified" }
+        auto ParserIntegrity::Degraded => { return "degraded" }
+    }
+}
+
 pub shape ResolvedPath (
     identity_key: string,
     display_path: string,
