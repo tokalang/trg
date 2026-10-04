@@ -616,7 +616,7 @@ pub fn run_mcp_server() -> i32 {
                                                         auto unexp_opt# = Option<string>::None
                                                         loop arg_node != 0:usize {
                                                             auto k = document.key(arg_node)
-                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" && k != "symbol" && k != "scope" && k != "continuation" && k != "continuation_token" && k != "no_hints" && k != "fold" {
+                                                            if k != "path" && k != "line" && k != "context" && k != "block" && k != "lines" && k != "max_lines" && k != "max_result_bytes" && k != "max_bytes" && k != "max_columns" && k != "max_block_lines" && k != "format" && k != "symbol" && k != "scope" && k != "continuation" && k != "continuation_token" && k != "no_hints" && k != "fold" && k != "focus" {
                                                                 unexp_opt = Option<string>::Some(string::from(k))
                                                                 break
                                                             }
@@ -655,7 +655,8 @@ pub fn run_mcp_server() -> i32 {
                                                                             is_non_null_arg(document, document.find(arg_map, "scope")) ||
                                                                             is_non_null_arg(document, document.find(arg_map, "block")) ||
                                                                             is_non_null_arg(document, document.find(arg_map, "context")) ||
-                                                                            is_non_null_arg(document, document.find(arg_map, "continuation"))
+                                                                            is_non_null_arg(document, document.find(arg_map, "continuation")) ||
+                                                                            is_non_null_arg(document, document.find(arg_map, "focus"))
                                                             if conflict {
                                                                 send_error(id_str.as_str(), -32602, "Invalid params: 'continuation_token' cannot be used with path, line, lines, symbol, scope, block, context, or continuation")
                                                                 continue
@@ -881,6 +882,7 @@ pub fn run_mcp_server() -> i32 {
                                                         }
 
                                                         auto has_explicit_context = document.find(arg_map, "context") != 0:usize
+                                                        auto has_explicit_focus = is_non_null_arg(document, document.find(arg_map, "focus"))
 
                                                         if !has_cont_token {
                                                             if parsed_symbol.is_some() {
@@ -892,7 +894,7 @@ pub fn run_mcp_server() -> i32 {
                                                                     send_error(id_str.as_str(), -32602, "Invalid params: 'block' cannot be used with 'symbol'")
                                                                     continue
                                                                 }
-                                                                if has_explicit_context {
+                                                                if has_explicit_context && !has_explicit_focus {
                                                                     send_error(id_str.as_str(), -32602, "Invalid params: 'context' cannot be used with 'symbol'")
                                                                     continue
                                                                 }
@@ -1065,6 +1067,35 @@ pub fn run_mcp_server() -> i32 {
                                                             continue
                                                         }
 
+                                                        auto focus_val_opt# = Option<string>::None
+                                                        auto focus_err# = false
+                                                        auto focus_node = document.find(arg_map, "focus")
+                                                        if focus_node != 0:usize {
+                                                            auto f_kind = document.kind(focus_node)
+                                                            if f_kind == 3:i32 {
+                                                                auto fs = document.text(focus_node).trim()
+                                                                if fs.len > 0:usize {
+                                                                    focus_val_opt = Option<string>::Some(string::from(fs))
+                                                                } else {
+                                                                    focus_err = true
+                                                                }
+                                                            } else if f_kind != 0:i32 {
+                                                                focus_err = true
+                                                            }
+                                                        }
+                                                        if focus_err {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'focus' must be a non-empty string or null")
+                                                            continue
+                                                        }
+                                                        if focus_val_opt.is_some() && parsed_symbol.is_none() {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'focus' cannot be specified without 'symbol'")
+                                                            continue
+                                                        }
+                                                        if focus_val_opt.is_some() && fold_val {
+                                                            send_error(id_str.as_str(), -32602, "Invalid params: 'focus' cannot be used with 'fold'")
+                                                            continue
+                                                        }
+
                                                         auto exec_max_bytes = max_bytes_opt
                                                         auto cont_token_opt# = Option<string>::None
                                                         if has_cont_token {
@@ -1085,7 +1116,8 @@ pub fn run_mcp_server() -> i32 {
                                                             continuation = continuation_val || has_cont_token,
                                                             continuation_token = cede cont_token_opt,
                                                             no_hints = no_hints_val,
-                                                            fold = fold_val
+                                                            fold = fold_val,
+                                                            focus = cede focus_val_opt
                                                         )
                                                         auto view_res = execute_view_operation(view_opts)
                                                         if view_res.is_err() {

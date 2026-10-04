@@ -6759,8 +6759,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_fold.returncode == 0, f"Fold test suite failed (exit {r_v_fold.returncode}):\n{r_v_fold.stderr}\n{r_v_fold.stdout}"
     log("Test 188 passed: Skeleton Fold View (--fold) verified.")
 
+    # Test 189: In-Symbol Focused Targeting (--focus)
+    log("Test 189: In-Symbol Focused Targeting (--focus) (tests/test_view_focus.py)")
+    focus_script = repo_root / "tests" / "test_view_focus.py"
+    assert focus_script.exists(), f"Focus test script not found at {focus_script}"
+    env_v_focus = dict(os.environ)
+    env_v_focus["TRG_BIN"] = str(pkg_bin_path)
+    r_v_focus = subprocess.run([
+        sys.executable,
+        str(focus_script)
+    ], cwd=str(repo_root), env=env_v_focus, capture_output=True, text=True)
+    assert r_v_focus.returncode == 0, f"Focus test suite failed (exit {r_v_focus.returncode}):\n{r_v_focus.stderr}\n{r_v_focus.stdout}"
+    log("Test 189 passed: In-Symbol Focused Targeting (--focus) verified.")
+
     log("=" * 60)
-    log("ALL 188 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
+    log("ALL 189 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
     log("=" * 60)
 
 if __name__ == "__main__":
