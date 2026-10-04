@@ -6746,8 +6746,21 @@ print(f"{{p.returncode}}:{{rss_mb:.2f}}")
     assert r_v_abs.returncode == 0, f"Absence certainty test suite failed (exit {r_v_abs.returncode}):\n{r_v_abs.stderr}\n{r_v_abs.stdout}"
     log("Test 187 passed: Absence Certainty Protocol, Progress Badges & Boundary Reliability verified.")
 
+    # Test 188: Skeleton Fold View (--fold)
+    log("Test 188: Skeleton Fold View (--fold) (tests/test_view_fold.py)")
+    fold_script = repo_root / "tests" / "test_view_fold.py"
+    assert fold_script.exists(), f"Fold test script not found at {fold_script}"
+    env_v_fold = dict(os.environ)
+    env_v_fold["TRG_BIN"] = str(pkg_bin_path)
+    r_v_fold = subprocess.run([
+        sys.executable,
+        str(fold_script)
+    ], cwd=str(repo_root), env=env_v_fold, capture_output=True, text=True)
+    assert r_v_fold.returncode == 0, f"Fold test suite failed (exit {r_v_fold.returncode}):\n{r_v_fold.stderr}\n{r_v_fold.stdout}"
+    log("Test 188 passed: Skeleton Fold View (--fold) verified.")
+
     log("=" * 60)
-    log("ALL 187 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
+    log("ALL 188 RIGOROUS QUALIFICATION TESTS PASSED ON PACKAGE ARTIFACT!")
     log("=" * 60)
 
 if __name__ == "__main__":
