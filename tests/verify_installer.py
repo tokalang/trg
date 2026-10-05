@@ -13,7 +13,7 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "install.sh"
-STABLE_VERSION = "v0.21.0"
+STABLE_VERSION = "v0.22.0"
 
 
 def fail(message: str) -> None:
